@@ -1,0 +1,48 @@
+{
+  "$schemaComment": "Edit in the Yitec Model Vault UI or by hand. Roles can point at tiers, direct models, fallback lists, and thinking levels. Each model can be a string or an object with model, vision, thinking, rate, notes.",
+  "roles": {
+    "default": { "tier": "high", "thinking": "medium" },
+    "planner": { "tier": "high", "thinking": "high" },
+    "executor": { "tier": "low", "thinking": "low" },
+    "subagent": { "tier": "low", "thinking": "low" },
+    "reviewer": { "tier": "high", "thinking": "high" },
+    "vision": { "tier": "high", "thinking": "off" },
+    "commit": { "tier": "low", "thinking": "low" },
+    "tiny": { "tier": "low", "thinking": "off" }
+  },
+  "planner": { "tier": "high", "thinking": "high" },
+  "executor": { "tier": "low", "thinking": "low" },
+  "vision": {
+    "models": [
+      { "model": "openai/gpt-4o", "vision": true, "thinking": "off", "rate": { "input": 2.5, "output": 10 } },
+      { "model": "google/gemini-2.5-pro", "vision": true, "thinking": "high", "rate": { "input": 1.25, "output": 10 } }
+    ]
+  },
+  "tiers": {
+    "high": [
+      { "model": "anthropic/claude-opus-4-5", "vision": true, "thinking": "high", "rate": { "input": 15, "output": 75 } },
+      { "model": "openai/gpt-5.1", "vision": true, "thinking": "high", "rate": { "input": 5, "output": 15 } },
+      { "model": "google/gemini-2.5-pro", "vision": true, "thinking": "high", "rate": { "input": 1.25, "output": 10 } }
+    ],
+    "low": [
+      { "model": "deepseek/deepseek-chat", "vision": false, "thinking": "off", "rate": { "input": 0.27, "output": 1.1 } },
+      { "model": "openai/gpt-5.1-mini", "vision": true, "thinking": "low", "rate": { "input": 0.25, "output": 2 } },
+      { "model": "anthropic/claude-haiku-4-5", "vision": true, "thinking": "low", "rate": { "input": 1, "output": 5 } }
+    ],
+    "uncapable": []
+  },
+  "retry": {
+    "enabled": true,
+    "maxPerUserPrompt": 2,
+    "cooldownMs": 300000,
+    "fallbackChains": {
+      "planner": ["openai/gpt-5.1:high", "google/gemini-2.5-pro:high"],
+      "reviewer": ["openai/gpt-5.1:high", "google/gemini-2.5-pro:high"],
+      "executor": ["openai/gpt-5.1-mini:low", "deepseek/deepseek-chat:off"]
+    },
+    "errorPatterns": ["rate limit", "429", "quota", "insufficient_quota", "weekly limit", "session limit", "credits", "tokens exhausted", "overloaded"]
+  },
+  "magicKeywords": { "enabled": true, "ultrathink": true, "orchestrate": true, "cheap": true },
+  "advisor": { "enabled": false, "modelRole": "reviewer", "autoReview": false, "tools": ["read", "grep"] },
+  "memory": { "enabled": true, "injectionCharLimit": 5000 }
+}

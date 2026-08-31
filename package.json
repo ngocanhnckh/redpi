@@ -1,0 +1,22 @@
+{
+  "name": "@yitec/pi-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Team Pi harness: model tier routing, Matt Pocock skills bootstrap, and subagents defaults.",
+  "bin": {
+    "yitec-pi-vault": "./vault/server.js"
+  },
+  "scripts": {
+    "vault": "node vault/server.js"
+  },
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "harness"],
+  "license": "UNLICENSED",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/yitec-model-router.ts"],
+    "prompts": ["./prompts"]
+  }
+}
