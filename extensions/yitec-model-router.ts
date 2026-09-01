@@ -273,6 +273,10 @@ function nineRouterApiKey(): string {
   return process.env.NINE_ROUTER_API_KEY || process.env.ROUTER9_API_KEY || process.env.NINEROUTER_API_KEY || local.apiKey || "dummy";
 }
 
+function nineRouterApiKeyCommand(): string {
+  return `!${process.execPath} ${join(packageRoot(), "scripts", "redpi-9router-key.js")}`;
+}
+
 function installBrowserRuntime(): string {
   const root = packageRoot();
   const lines: string[] = [];
@@ -288,10 +292,14 @@ async function pingNineRouter(signal?: AbortSignal): Promise<string> {
 }
 
 async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS || 2500));
+  const onAbort = () => controller.abort();
+  signal?.addEventListener?.("abort", onAbort, { once: true });
   try {
     const res = await fetch(`${nineRouterBaseUrl().replace(/\/$/, "")}/models`, {
       headers: { Authorization: `Bearer ${nineRouterApiKey()}` },
-      signal,
+      signal: controller.signal,
     });
     if (!res.ok) return [];
     const json = (await res.json()) as any;
@@ -299,6 +307,9 @@ async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
     return ids.map((id: string) => ({ id, name: `9Router ${id}`, reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
   } catch {
     return [];
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener?.("abort", onAbort);
   }
 }
 
@@ -344,7 +355,7 @@ function updateRedPi(cfg: Config, force = false): string {
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("9router", {
     baseUrl: nineRouterBaseUrl(),
-    apiKey: nineRouterApiKey(),
+    apiKey: nineRouterApiKeyCommand(),
     api: "openai-completions",
     models: [
       { id: "kr/claude-sonnet-4.5", name: "9Router Kiro Claude Sonnet 4.5", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
@@ -430,7 +441,8 @@ export default function (pi: ExtensionAPI) {
     next.roles ||= {};
     next.roles[role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${thinking}`], thinking };
     writeJson(path, next);
-    ctx.ui.notify(`Saved ${role} -> ${next.roles[role].models[0]} in ${path}\n\nRun /reload or start a new Pi session if you want all startup state refreshed.`, "info");
+    if (model.startsWith("9router/")) patchPiDefaults(model, thinking as string);
+    ctx.ui.notify(`Saved ${role} -> ${next.roles[role].models[0]} in ${path}${model.startsWith("9router/") ? "\nPi default model also set to 9router." : ""}\n\nIf you just changed the 9Router base URL, run /reload or restart Pi once. After that, normal chat should not ask for login again.`, "info");
   } });
   pi.registerCommand("yitec-config", { description: "Alias for /redpi-config", handler: async (_args, ctx) => pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
