@@ -75,6 +75,8 @@ Use 9Router model IDs in your tier config, for example:
 
 Run `/yitec-9router` in Pi to check provider registration and live `/v1/models` discovery.
 
+Use `/redpi-config` for a TUI picker that fetches 9Router `/v1/models`, lets you pick a model or combo ID, assigns it to a role, and saves to global or project config.
+
 You can also use any Pi-native provider model ID such as `openai/...`, `anthropic/...`, `google/...`, `deepseek/...`, `openrouter/...`, or local providers.
 
 ## Configure roles and tiers
@@ -119,6 +121,8 @@ Each model can be a plain provider-qualified string or a profile object:
 Useful commands:
 
 - `/yitec-tiers` — inspect active config.
+- `/redpi-config` — TUI picker to assign a 9Router model/combo to a RedPi role.
+- `/yitec-config` — alias for `/redpi-config`.
 - `/redpi-update` — force-update the RedPi harness checkout and vendored skill repos.
 - `/yitec-update` — alias for `/redpi-update`.
 - `/yitec-9router` — check native 9Router provider registration and live models.

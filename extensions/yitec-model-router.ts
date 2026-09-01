@@ -80,6 +80,16 @@ function loadConfig(cwd: string, projectTrusted = false): LoadedConfig {
   return { ...DEFAULT_CONFIG, __projectTrusted: projectTrusted };
 }
 
+function configWritePath(cwd: string, projectTrusted = false, scope: "global" | "project" = "global"): string {
+  if (scope === "project" && projectTrusted) return join(cwd, CONFIG_DIR_NAME, "yitec", "model-tiers.json");
+  return join(USER_YITEC_DIR, "model-tiers.json");
+}
+
+function writeJson(path: string, value: any) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
+}
+
 function deepMerge<T>(base: T, override: any, extra?: any): T & any {
   if (!override || typeof override !== "object" || Array.isArray(override)) return { ...(base as any), ...(extra || {}) };
   const out: any = { ...(base as any) };
@@ -287,6 +297,31 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("redpi-config", { description: "Interactive RedPi role/model configurator for 9Router and native providers", handler: async (_args, ctx) => {
+    if (!ctx.hasUI) return ctx.ui.notify("/redpi-config needs an interactive UI. Edit ~/.pi/agent/yitec/model-tiers.json in print/headless mode.", "error");
+    const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
+    const role = await ctx.ui.select("Configure which role?", ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny", "default"]);
+    if (!role) return;
+    const scopeChoice = await ctx.ui.select("Save where?", ctx.isProjectTrusted() ? ["project", "global"] : ["global"]);
+    if (!scopeChoice) return;
+    const live = await fetchNineRouterModels(ctx.signal);
+    const liveIds = live.map((m: any) => `9router/${m.id}`);
+    const current = roleCandidates(cfg, role).map(entryModel);
+    const choice = await ctx.ui.select("Select 9Router model/combo, or choose manual", ["manual entry", ...current, ...liveIds].filter(Boolean).slice(0, 80));
+    if (!choice) return;
+    const model = choice === "manual entry" ? await ctx.ui.input("Model id", "Example: 9router/kr/auto or 9router/<combo-id>") : choice;
+    if (!model) return;
+    const thinking = await ctx.ui.select("Thinking level", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    if (!thinking) return;
+    const path = configWritePath(ctx.cwd, ctx.isProjectTrusted(), scopeChoice as "global" | "project");
+    const raw = readJson(path, {});
+    const next = deepMerge(DEFAULT_CONFIG, raw);
+    next.roles ||= {};
+    next.roles[role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${thinking}`], thinking };
+    writeJson(path, next);
+    ctx.ui.notify(`Saved ${role} -> ${next.roles[role].models[0]} in ${path}\n\nRun /reload or start a new Pi session if you want all startup state refreshed.`, "info");
+  } });
+  pi.registerCommand("yitec-config", { description: "Alias for /redpi-config", handler: async (_args, ctx) => pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
   pi.registerCommand("yitec-9router", { description: "Check RedPi native 9Router gateway integration", handler: async (_args, ctx) => {
     const found = ctx.modelRegistry.find("9router", "kr/claude-sonnet-4.5");
