@@ -113,9 +113,12 @@ function patchPiDefaults(modelId: string, thinking = "low") {
 
 function autoConfigFromNineRouter(ids: string[]) {
   const pick = (...hints: string[]) => ids.find(id => hints.some(h => id.toLowerCase().includes(h))) || ids[0] || "kr/auto";
-  const high = pick("terra", "opus", "sonnet", "gpt", "auto");
-  const low = pick("mini", "haiku", "free", "auto", "terra") || high;
-  const review = pick("review", "critic", "terra", "sonnet") || high;
+  // 9Router teams often publish named combos. Prefer those first.
+  const main = pick("mainagent", "main-agent", "main_agent", "main", "terra", "opus", "sonnet", "gpt", "auto");
+  const sub = pick("subagent", "sub-agent", "sub_agent", "worker", "fast", "mini", "haiku", "free", "auto") || main;
+  const review = pick("review", "reviewer", "critic", "mainagent", "terra", "sonnet") || main;
+  const high = main;
+  const low = sub;
   return {
     ...DEFAULT_CONFIG,
     roles: {
@@ -135,6 +138,32 @@ function autoConfigFromNineRouter(ids: string[]) {
     },
     retry: { ...DEFAULT_CONFIG.retry, fallbackChains: { planner: [`9router/${high}:high`], executor: [`9router/${low}:low`], reviewer: [`9router/${review}:medium`] } }
   };
+}
+
+async function customizeRolesWithUi(ctx: any, ids: string[], cfgPath: string) {
+  const options = ids.map(id => `9router/${id}`);
+  if (!options.length) return undefined;
+  const cfg: any = autoConfigFromNineRouter(ids);
+  const roles = [
+    { role: "planner", label: "planner / main session / heavy thinking", thinking: "high", recommended: cfg.roles.planner.models[0] },
+    { role: "executor", label: "executor / normal edits", thinking: "low", recommended: cfg.roles.executor.models[0] },
+    { role: "subagent", label: "subagent / fast delegated work", thinking: "low", recommended: cfg.roles.subagent.models[0] },
+    { role: "reviewer", label: "reviewer / critique", thinking: "medium", recommended: cfg.roles.reviewer.models[0] },
+    { role: "vision", label: "vision / screenshots", thinking: "medium", recommended: cfg.roles.vision.models[0] },
+    { role: "commit", label: "commit / summaries", thinking: "low", recommended: cfg.roles.commit.models[0] },
+    { role: "tiny", label: "tiny / cheapest tasks", thinking: "off", recommended: cfg.roles.tiny.models[0] },
+  ];
+  for (const r of roles) {
+    const recommended = String(r.recommended).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+    const choice = await ctx.ui.select(`Select model/combo for ${r.label}`, [recommended, ...options.filter(o => o !== recommended), "manual entry", "skip/keep recommended"].slice(0, 90));
+    if (!choice) return undefined;
+    const model = choice === "manual entry" ? await ctx.ui.input(`Model for ${r.role}`, recommended) : choice === "skip/keep recommended" ? recommended : choice;
+    if (!model) return undefined;
+    cfg.roles[r.role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${r.thinking}`], thinking: r.thinking };
+  }
+  writeJson(cfgPath, cfg);
+  patchPiDefaults(String(cfg.roles.planner.models[0]).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, ""), "high");
+  return cfg;
 }
 
 function deepMerge<T>(base: T, override: any, extra?: any): T & any {
@@ -393,14 +422,22 @@ export default function (pi: ExtensionAPI) {
         const msg = live.length ? `Connected. ${live.length} models/combos found.` : `Could not fetch /models from ${nineRouterBaseUrl()}.`;
         ctx.ui.notify(msg, live.length ? "info" : "warn");
         if (live.length) {
-          const ok = await ctx.ui.confirm("Auto-configure RedPi from 9Router?", "Recommended: RedPi will assign planner/executor/reviewer/subagent roles, set Pi's default model to 9Router, and keep everything editable via /redpi-config.");
+          const ok = await ctx.ui.confirm("Auto-configure RedPi from 9Router?", "Recommended: RedPi will assign roles from live models. If combos named MainAgent/SubAgent exist, MainAgent is used for main/heavy roles and SubAgent for fast/delegated work.");
           if (ok) {
             const ids = live.map((m: any) => m.id).filter(Boolean);
             const cfgPath = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
-            const generated = autoConfigFromNineRouter(ids);
-            writeJson(cfgPath, generated);
-            patchPiDefaults(ids[0], "low");
-            ctx.ui.notify(`Auto-configured RedPi roles in ${cfgPath}\nDefault Pi model: 9router/${ids[0]}\n\nRun /reload or restart Pi to refresh startup state.`, "info");
+            let generated: any = autoConfigFromNineRouter(ids);
+            const customize = await ctx.ui.confirm("Choose model for each role now?", "Recommended for first setup. You can accept defaults quickly. MainAgent/SubAgent combos are preselected when available.");
+            if (customize) {
+              const custom = await customizeRolesWithUi(ctx, ids, cfgPath);
+              if (custom) generated = custom;
+              else writeJson(cfgPath, generated);
+            } else {
+              writeJson(cfgPath, generated);
+              patchPiDefaults(String(generated.roles.planner.models[0]).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, ""), "high");
+            }
+            const summary = ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny"].map(r => `${r}: ${generated.roles[r]?.models?.[0] || "(none)"}`).join("\n");
+            ctx.ui.notify(`Auto-configured RedPi roles in ${cfgPath}\n\n${summary}\n\nDefault Pi model set to planner/MainAgent route. Run /reload or restart Pi once to refresh provider state.`, "info");
           }
         }
       }

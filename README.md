@@ -165,7 +165,9 @@ When RedPi asks whether to auto-configure roles from 9Router, choose **yes**.
 RedPi will then:
 
 - fetch live 9Router models/combos
-- pick recommended high/low/reviewer roles
+- prefer `MainAgent` combos for main/heavy-thinking roles when present
+- prefer `SubAgent` combos for fast/subagent/executor roles when present
+- ask whether you want to select a model/combo for each role immediately
 - set Pi's default provider/model to `9router`
 - save config under `~/.pi/agent/yitec/model-tiers.json`
 
@@ -233,19 +235,23 @@ NINEROUTER_API_KEY
 
 ### 🎯 Auto-configure from live 9Router models
 
-If `/v1/models` works, RedPi can create a best-effort role config automatically:
+If `/v1/models` works, RedPi can create a best-effort role config automatically. If 9Router exposes named combos like `MainAgent` and `SubAgent`, RedPi uses them as first-class defaults:
 
 ```mermaid
 flowchart LR
   M["🧠 9Router /v1/models"] --> A["🔴 RedPi auto-config"]
-  A --> P["🏗️ planner<br/>strongest + high thinking"]
-  A --> E["🛠️ executor<br/>cheaper + low thinking"]
-  A --> S["🤖 subagent<br/>cheap parallel work"]
-  A --> R["🕵️ reviewer<br/>review/critic if available"]
-  A --> V["🖼️ vision<br/>vision-capable route"]
-  A --> C["📝 commit<br/>low-thinking summaries"]
-  A --> T["🪶 tiny<br/>cheapest + thinking off"]
+  A --> MA["🔥 MainAgent combo<br/>main session + heavy thinking"]
+  A --> SA["⚡ SubAgent combo<br/>fast delegated work"]
+  MA --> P["🏗️ planner<br/>high thinking"]
+  MA --> R["🕵️ reviewer<br/>medium/high thinking"]
+  MA --> V["🖼️ vision<br/>vision-capable route"]
+  SA --> E["🛠️ executor<br/>low thinking"]
+  SA --> S["🤖 subagent<br/>low thinking"]
+  SA --> C["📝 commit<br/>low-thinking summaries"]
+  SA --> T["🪶 tiny<br/>thinking off"]
 ```
+
+After auto-detection, RedPi asks whether you want to choose the model/combo for each role right away. You can accept the recommended default for each role or pick any live 9Router model/combo.
 
 
 Everything remains editable through:
