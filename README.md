@@ -48,10 +48,17 @@ Default RedPi 9Router endpoint:
 http://127.0.0.1:20128/v1
 ```
 
-Override it with:
+Override it with your own hosted 9Router endpoint:
 
 ```bash
-export NINE_ROUTER_BASE_URL=http://127.0.0.1:20128/v1
+export NINE_ROUTER_BASE_URL=https://your-9router.example.com/v1
+```
+
+Yitec-hosted example, if you have a Yitec key:
+
+```bash
+export NINE_ROUTER_BASE_URL=https://9router.yitec.dev/v1
+export NINE_ROUTER_API_KEY=sk-...
 ```
 
 Use 9Router model IDs in your tier config, for example:
