@@ -434,13 +434,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("redpi-setup", { description: "Friendly RedPi setup wizard: 9Router login, browser install, and role config", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-setup needs the interactive TUI. In print mode, set NINE_ROUTER_API_KEY/NINE_ROUTER_BASE_URL and run npm run browser:install.", "error");
-    while (true) {
-      const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
-      if (!choice || choice === "Done") return;
+    const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
+    if (!choice || choice === "Done") return;
       if (choice === "9Router login / connection") {
         const current = localNineRouter();
         const baseUrl = await ctx.ui.input("9Router base URL", current.baseUrl || process.env.NINE_ROUTER_BASE_URL || "https://9router.yitec.dev/v1");
-        if (!baseUrl) continue;
+        if (!baseUrl) return;
         const apiKey = await ctx.ui.input("9Router API key", current.apiKey ? "keep-existing" : "paste key here");
         const next = { baseUrl: baseUrl.replace(/\/$/, ""), apiKey: apiKey === "keep-existing" ? current.apiKey : apiKey };
         mkdirSync(dirname(NINE_ROUTER_LOCAL_PATH), { recursive: true });
@@ -456,7 +455,7 @@ export default function (pi: ExtensionAPI) {
             const cfgPath = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
             let generated: any = autoConfigFromNineRouter(ids);
             const mode = await ctx.ui.select("Role model setup", ["✅ Use recommended MainAgent/SubAgent mapping", "🎛 Choose model for each role", "✍️ Save recommendations and edit later"]);
-            if (!mode) continue;
+            if (!mode) return;
             if (mode === "🎛 Choose model for each role") {
               const custom = await customizeRolesWithUi(ctx, ids, cfgPath);
               if (custom) generated = custom;
@@ -467,12 +466,15 @@ export default function (pi: ExtensionAPI) {
             }
             const summary = ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny"].map(r => `${r}: ${generated.roles[r]?.models?.[0] || "(none)"}`).join("\n");
             ctx.ui.notify(`Auto-configured RedPi roles in ${cfgPath}\n\n${summary}\n\nDefault Pi model set to planner/MainAgent route. Run /reload or restart Pi once to refresh provider state.`, "info");
+            return;
           }
         }
+        return;
       }
       if (choice === "Install Playwright + Chromium") {
         const ok = await ctx.ui.confirm("Install browser runtime?", "This runs npm install and npx playwright install chromium for the RedPi package.");
         if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+        return;
       }
       if (choice === "Configure role models") {
         pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true });
@@ -481,8 +483,8 @@ export default function (pi: ExtensionAPI) {
       if (choice === "Check status") {
         const browserOk = spawnSync("node", [join(packageRoot(), "scripts", "redpi-browser.js"), "--help"], { encoding: "utf8", maxBuffer: 1024 * 128 }).status === 0;
         ctx.ui.notify(`9Router: ${await pingNineRouter(ctx.signal)}\n\nBrowser CLI: ${browserOk ? "installed" : "missing dependencies; choose Install Playwright + Chromium"}\nConfig file: ${NINE_ROUTER_LOCAL_PATH}`, "info");
+        return;
       }
-    }
   } });
   pi.registerCommand("yitec-setup", { description: "Alias for /redpi-setup", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-setup", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("redpi-config", { description: "Interactive RedPi role/model configurator for 9Router and native providers", handler: async (_args, ctx) => {
