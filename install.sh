@@ -86,6 +86,16 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
 s.skills = Array.from(new Set([...(s.skills || []), mattSkills, liquidSkill]));
 s.enableSkillCommands = true;
+s.retry = {
+  ...(s.retry || {}),
+  provider: {
+    ...((s.retry || {}).provider || {}),
+    timeoutMs: Math.max(Number(((s.retry || {}).provider || {}).timeoutMs || 0), 900000),
+    maxRetries: 0,
+    maxRetryDelayMs: 60000
+  }
+};
+s.httpIdleTimeoutMs = Math.max(Number(s.httpIdleTimeoutMs || 0), 900000);
 s.subagents = {
   ...(s.subagents || {}),
   defaultModel: (s.subagents && s.subagents.defaultModel) || "deepseek/deepseek-chat",

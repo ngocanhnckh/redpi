@@ -103,14 +103,33 @@ function writeJson(path: string, value: any) {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 }
 
-function patchPiDefaults(modelId: string, thinking = "low") {
+function patchPiSettings(defaultModel?: string, thinking = "low") {
   const p = join(AGENT_DIR, "settings.json");
   const s = readJson(p, {});
-  s.defaultProvider = "9router";
-  s.defaultModel = modelId.replace(/^9router\//, "");
-  s.defaultThinkingLevel = thinking;
+  if (defaultModel) {
+    s.defaultProvider = "9router";
+    s.defaultModel = defaultModel.replace(/^9router\//, "");
+    s.defaultThinkingLevel = thinking;
+  }
+  s.retry = { ...(s.retry || {}), provider: { ...((s.retry || {}).provider || {}), timeoutMs: Math.max(Number((s.retry || {}).provider?.timeoutMs || 0), 900000), maxRetries: 0, maxRetryDelayMs: 60000 } };
+  s.httpIdleTimeoutMs = Math.max(Number(s.httpIdleTimeoutMs || 0), 900000);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+}
+
+function patchPiDefaults(modelId: string, thinking = "low") {
+  patchPiSettings(modelId, thinking);
+}
+
+function modelOptionMap(models: string[], max = 60) {
+  const map = new Map<string, string>();
+  const labels = models.map((m, i) => {
+    const label = m.length > max ? `${m.slice(0, Math.max(20, max - 14))}…${m.slice(-10)}` : m;
+    const display = `${String(i + 1).padStart(2, "0")}. ${label}`;
+    map.set(display, m);
+    return display;
+  });
+  return { labels, map };
 }
 
 function autoConfigFromNineRouter(ids: string[]) {
@@ -155,11 +174,18 @@ async function customizeRolesWithUi(ctx: any, ids: string[], cfgPath: string) {
     { role: "commit", label: "commit / summaries", thinking: "low", recommended: cfg.roles.commit.models[0] },
     { role: "tiny", label: "tiny / cheapest tasks", thinking: "off", recommended: cfg.roles.tiny.models[0] },
   ];
+  const { labels, map } = modelOptionMap(options.filter(o => !/mainagent|main-agent|main_agent|subagent|sub-agent|sub_agent/i.test(o)).slice(0, 35));
   for (const r of roles) {
     const recommended = String(r.recommended).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
-    const choice = await ctx.ui.select(`Select model/combo for ${r.label}`, [recommended, ...options.filter(o => o !== recommended), "manual entry", "skip/keep recommended"].slice(0, 90));
+    const choice = await ctx.ui.select(`Model for ${r.label}`, [
+      `✅ use recommended: ${recommended.length > 52 ? recommended.slice(0, 52) + "…" : recommended}`,
+      "manual entry",
+      ...labels,
+      "skip remaining roles / save now",
+    ]);
     if (!choice) return undefined;
-    const model = choice === "manual entry" ? await ctx.ui.input(`Model for ${r.role}`, recommended) : choice === "skip/keep recommended" ? recommended : choice;
+    if (choice === "skip remaining roles / save now") break;
+    const model = choice === "manual entry" ? await ctx.ui.input(`Model for ${r.role}`, recommended) : choice.startsWith("✅ use recommended:") ? recommended : map.get(choice);
     if (!model) return undefined;
     cfg.roles[r.role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${r.thinking}`], thinking: r.thinking };
   }
@@ -429,8 +455,9 @@ export default function (pi: ExtensionAPI) {
             const ids = live.map((m: any) => m.id).filter(Boolean);
             const cfgPath = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
             let generated: any = autoConfigFromNineRouter(ids);
-            const customize = await ctx.ui.confirm("Choose model for each role now?", "Recommended for first setup. You can accept defaults quickly. MainAgent/SubAgent combos are preselected when available.");
-            if (customize) {
+            const mode = await ctx.ui.select("Role model setup", ["✅ Use recommended MainAgent/SubAgent mapping", "🎛 Choose model for each role", "✍️ Save recommendations and edit later"]);
+            if (!mode) continue;
+            if (mode === "🎛 Choose model for each role") {
               const custom = await customizeRolesWithUi(ctx, ids, cfgPath);
               if (custom) generated = custom;
               else writeJson(cfgPath, generated);
@@ -468,9 +495,13 @@ export default function (pi: ExtensionAPI) {
     const live = await fetchNineRouterModels(ctx.signal);
     const liveIds = live.map((m: any) => `9router/${m.id}`);
     const current = roleCandidates(cfg, role).map(entryModel);
-    const choice = await ctx.ui.select("Select 9Router model/combo, or choose manual", ["manual entry", ...current, ...liveIds].filter(Boolean).slice(0, 80));
+    const recommended = current[0] || autoConfigFromNineRouter(live.map((m: any) => m.id).filter(Boolean)).roles?.[role]?.models?.[0]?.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+    const compactModels = dedupeEntries([...current, ...liveIds].filter(Boolean)).map(entryModel).slice(0, 45);
+    const { labels, map } = modelOptionMap(compactModels);
+    const recLabel = recommended ? `✅ use recommended/current: ${recommended.length > 48 ? recommended.slice(0, 48) + "…" : recommended}` : undefined;
+    const choice = await ctx.ui.select("Select model/combo", [recLabel, "manual entry", ...labels].filter(Boolean) as string[]);
     if (!choice) return;
-    const model = choice === "manual entry" ? await ctx.ui.input("Model id", "Example: 9router/kr/auto or 9router/<combo-id>") : choice;
+    const model = choice === "manual entry" ? await ctx.ui.input("Model id", "Example: 9router/kr/auto or 9router/<combo-id>") : choice.startsWith("✅ use recommended/current:") ? recommended : map.get(choice);
     if (!model) return;
     const thinking = await ctx.ui.select("Thinking level", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     if (!thinking) return;
@@ -510,6 +541,7 @@ export default function (pi: ExtensionAPI) {
   }});
 
   pi.on("session_start", async (_event, ctx) => {
+    patchPiSettings();
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
     const high = cfg.tiers?.[cfg.planner?.tier ?? "high"] ?? [];
