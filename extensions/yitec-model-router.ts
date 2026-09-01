@@ -63,7 +63,7 @@ type LoadedConfig = Config & { __path?: string; __projectTrusted?: boolean };
 
 type TurnMagic = { ultrathink?: boolean; orchestrate?: boolean; cheap?: boolean };
 
-const REDPI_BANNER = [
+const REDPI_BANNER_FULL = [
   "██████╗ ███████╗██████╗ ██████╗ ██╗",
   "██╔══██╗██╔════╝██╔══██╗██╔══██╗██║",
   "██████╔╝█████╗  ██║  ██║██████╔╝██║",
@@ -72,6 +72,8 @@ const REDPI_BANNER = [
   "╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝     ╚═╝",
   "powered by YITEC",
 ];
+const REDPI_BANNER_COMPACT = ["RedPi · powered by YITEC"];
+function redpiBanner() { return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : REDPI_BANNER_COMPACT; }
 
 function readJson(path: string, fallback: any) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return fallback; }
@@ -512,7 +514,7 @@ export default function (pi: ExtensionAPI) {
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
     const high = cfg.tiers?.[cfg.planner?.tier ?? "high"] ?? [];
     ctx.ui.setStatus("redpi", `tiers high:${high.length} low:${low.length}`);
-    if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget("redpi-banner", REDPI_BANNER);
+    if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget("redpi-banner", redpiBanner());
     const updateResult = updateRedPi(cfg, false);
     if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
   });

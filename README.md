@@ -134,11 +134,16 @@ REDPI_SKIP_BROWSER_INSTALL=1 curl -fsSL https://raw.githubusercontent.com/ngocan
 pi
 ```
 
-You should see the RedPi banner:
+You should see a compact startup banner:
 
 ```text
-REDPI
-powered by YITEC
+RedPi · powered by YITEC
+```
+
+If you want the full ASCII banner in the TUI, start Pi with:
+
+```bash
+REDPI_FULL_BANNER=1 pi
 ```
 
 ### 3. Run the setup wizard
