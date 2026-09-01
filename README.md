@@ -10,10 +10,6 @@
               powered by YITEC
 ```
 
-# 🔴 RedPi
-
-### powered by **YITEC**
-
 </div>
 
 ```mermaid
