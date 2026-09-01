@@ -101,6 +101,42 @@ function writeJson(path: string, value: any) {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 }
 
+function patchPiDefaults(modelId: string, thinking = "low") {
+  const p = join(AGENT_DIR, "settings.json");
+  const s = readJson(p, {});
+  s.defaultProvider = "9router";
+  s.defaultModel = modelId.replace(/^9router\//, "");
+  s.defaultThinkingLevel = thinking;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+}
+
+function autoConfigFromNineRouter(ids: string[]) {
+  const pick = (...hints: string[]) => ids.find(id => hints.some(h => id.toLowerCase().includes(h))) || ids[0] || "kr/auto";
+  const high = pick("terra", "opus", "sonnet", "gpt", "auto");
+  const low = pick("mini", "haiku", "free", "auto", "terra") || high;
+  const review = pick("review", "critic", "terra", "sonnet") || high;
+  return {
+    ...DEFAULT_CONFIG,
+    roles: {
+      default: { models: [`9router/${high}:medium`], thinking: "medium" },
+      planner: { models: [`9router/${high}:high`], thinking: "high" },
+      executor: { models: [`9router/${low}:low`], thinking: "low" },
+      subagent: { models: [`9router/${low}:low`], thinking: "low" },
+      reviewer: { models: [`9router/${review}:medium`], thinking: "medium" },
+      vision: { models: [`9router/${high}:medium`], thinking: "medium" },
+      commit: { models: [`9router/${low}:low`], thinking: "low" },
+      tiny: { models: [`9router/${low}:off`], thinking: "off" },
+    },
+    tiers: {
+      high: [{ model: `9router/${high}`, vision: true, thinking: "high", rate: { input: 0, output: 0 } }],
+      low: [{ model: `9router/${low}`, vision: true, thinking: "low", rate: { input: 0, output: 0 } }],
+      uncapable: []
+    },
+    retry: { ...DEFAULT_CONFIG.retry, fallbackChains: { planner: [`9router/${high}:high`], executor: [`9router/${low}:low`], reviewer: [`9router/${review}:medium`] } }
+  };
+}
+
 function deepMerge<T>(base: T, override: any, extra?: any): T & any {
   if (!override || typeof override !== "object" || Array.isArray(override)) return { ...(base as any), ...(extra || {}) };
   const out: any = { ...(base as any) };
@@ -342,7 +378,20 @@ export default function (pi: ExtensionAPI) {
         mkdirSync(dirname(NINE_ROUTER_LOCAL_PATH), { recursive: true });
         writeFileSync(NINE_ROUTER_LOCAL_PATH, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
         try { chmodSync(NINE_ROUTER_LOCAL_PATH, 0o600); } catch {}
-        ctx.ui.notify(await pingNineRouter(ctx.signal), "info");
+        const live = await fetchNineRouterModels(ctx.signal);
+        const msg = live.length ? `Connected. ${live.length} models/combos found.` : `Could not fetch /models from ${nineRouterBaseUrl()}.`;
+        ctx.ui.notify(msg, live.length ? "info" : "warn");
+        if (live.length) {
+          const ok = await ctx.ui.confirm("Auto-configure RedPi from 9Router?", "Recommended: RedPi will assign planner/executor/reviewer/subagent roles, set Pi's default model to 9Router, and keep everything editable via /redpi-config.");
+          if (ok) {
+            const ids = live.map((m: any) => m.id).filter(Boolean);
+            const cfgPath = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
+            const generated = autoConfigFromNineRouter(ids);
+            writeJson(cfgPath, generated);
+            patchPiDefaults(ids[0], "low");
+            ctx.ui.notify(`Auto-configured RedPi roles in ${cfgPath}\nDefault Pi model: 9router/${ids[0]}\n\nRun /reload or restart Pi to refresh startup state.`, "info");
+          }
+        }
       }
       if (choice === "Install Playwright + Chromium") {
         const ok = await ctx.ui.confirm("Install browser runtime?", "This runs npm install and npx playwright install chromium for the RedPi package.");
