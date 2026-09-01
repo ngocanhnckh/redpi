@@ -1,6 +1,6 @@
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -30,6 +30,7 @@ type Config = {
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const USER_YITEC_DIR = join(AGENT_DIR, "yitec");
+const NINE_ROUTER_LOCAL_PATH = join(USER_YITEC_DIR, "9router.local.json");
 const DEFAULT_CONFIG: Required<Config> = {
   planner: { tier: "high", thinking: "high" },
   executor: { tier: "low", thinking: "low" },
@@ -222,12 +223,32 @@ function runPiPrint(cwd: string, model: string, prompt: string): string {
   return result.stdout || result.stderr || `pi exited with status ${result.status}`;
 }
 
+function localNineRouter(): { baseUrl?: string; apiKey?: string } {
+  return readJson(NINE_ROUTER_LOCAL_PATH, {});
+}
+
 function nineRouterBaseUrl(): string {
-  return process.env.NINE_ROUTER_BASE_URL || process.env.ROUTER9_BASE_URL || "http://127.0.0.1:20128/v1";
+  const local = localNineRouter();
+  return process.env.NINE_ROUTER_BASE_URL || process.env.ROUTER9_BASE_URL || local.baseUrl || "http://127.0.0.1:20128/v1";
 }
 
 function nineRouterApiKey(): string {
-  return process.env.NINE_ROUTER_API_KEY || process.env.ROUTER9_API_KEY || process.env.NINEROUTER_API_KEY || "dummy";
+  const local = localNineRouter();
+  return process.env.NINE_ROUTER_API_KEY || process.env.ROUTER9_API_KEY || process.env.NINEROUTER_API_KEY || local.apiKey || "dummy";
+}
+
+function installBrowserRuntime(): string {
+  const root = packageRoot();
+  const lines: string[] = [];
+  lines.push(run("npm", ["install"], root));
+  lines.push(run("npx", ["playwright", "install", "chromium"], root));
+  try { chmodSync(join(root, "scripts", "redpi-browser.js"), 0o755); } catch {}
+  return lines.join("\n\n");
+}
+
+async function pingNineRouter(signal?: AbortSignal): Promise<string> {
+  const live = await fetchNineRouterModels(signal);
+  return live.length ? `Connected. ${live.length} models/combos found. Examples: ${live.map((m: any) => m.id).slice(0, 8).join(", ")}` : `Could not fetch /models from ${nineRouterBaseUrl()}. Check URL, key, or whether 9Router is running.`;
 }
 
 async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
@@ -307,6 +328,37 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("redpi-setup", { description: "Friendly RedPi setup wizard: 9Router login, browser install, and role config", handler: async (_args, ctx) => {
+    if (!ctx.hasUI) return ctx.ui.notify("/redpi-setup needs the interactive TUI. In print mode, set NINE_ROUTER_API_KEY/NINE_ROUTER_BASE_URL and run npm run browser:install.", "error");
+    while (true) {
+      const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
+      if (!choice || choice === "Done") return;
+      if (choice === "9Router login / connection") {
+        const current = localNineRouter();
+        const baseUrl = await ctx.ui.input("9Router base URL", current.baseUrl || process.env.NINE_ROUTER_BASE_URL || "https://9router.yitec.dev/v1");
+        if (!baseUrl) continue;
+        const apiKey = await ctx.ui.input("9Router API key", current.apiKey ? "keep-existing" : "paste key here");
+        const next = { baseUrl: baseUrl.replace(/\/$/, ""), apiKey: apiKey === "keep-existing" ? current.apiKey : apiKey };
+        mkdirSync(dirname(NINE_ROUTER_LOCAL_PATH), { recursive: true });
+        writeFileSync(NINE_ROUTER_LOCAL_PATH, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+        try { chmodSync(NINE_ROUTER_LOCAL_PATH, 0o600); } catch {}
+        ctx.ui.notify(await pingNineRouter(ctx.signal), "info");
+      }
+      if (choice === "Install Playwright + Chromium") {
+        const ok = await ctx.ui.confirm("Install browser runtime?", "This runs npm install and npx playwright install chromium for the RedPi package.");
+        if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+      }
+      if (choice === "Configure role models") {
+        pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true });
+        return;
+      }
+      if (choice === "Check status") {
+        const browserOk = spawnSync("node", [join(packageRoot(), "scripts", "redpi-browser.js"), "--help"], { encoding: "utf8", maxBuffer: 1024 * 128 }).status === 0;
+        ctx.ui.notify(`9Router: ${await pingNineRouter(ctx.signal)}\n\nBrowser CLI: ${browserOk ? "installed" : "missing dependencies; choose Install Playwright + Chromium"}\nConfig file: ${NINE_ROUTER_LOCAL_PATH}`, "info");
+      }
+    }
+  } });
+  pi.registerCommand("yitec-setup", { description: "Alias for /redpi-setup", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-setup", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("redpi-config", { description: "Interactive RedPi role/model configurator for 9Router and native providers", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-config needs an interactive UI. Edit ~/.pi/agent/yitec/model-tiers.json in print/headless mode.", "error");
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());

@@ -71,7 +71,28 @@ The installer is per machine/user account. It writes to your Pi agent config und
 ~/.pi/agent/
 ```
 
-### 2. Configure credentials
+### 2. Run the friendly setup wizard
+
+Start Pi:
+
+```bash
+pi
+```
+
+Then run:
+
+```text
+/redpi-setup
+```
+
+The TUI wizard guides you through:
+
+- 9Router URL/API-key setup
+- Playwright + Chromium browser install/check
+- role model selection through `/redpi-config`
+- status checks
+
+### 3. Configure credentials manually if preferred
 
 Use either Pi-native provider login:
 
@@ -94,13 +115,13 @@ For a local 9Router install, the default endpoint is already:
 http://127.0.0.1:20128/v1
 ```
 
-### 3. Start Pi normally
+### 4. Start Pi normally
+
+After first-time setup, the daily workflow is just:
 
 ```bash
 pi
 ```
-
-That is the normal daily workflow.
 
 ---
 
@@ -341,6 +362,8 @@ Project config is only loaded after Pi trusts the project.
 
 | Command | Purpose |
 | --- | --- |
+| `/redpi-setup` | Friendly TUI wizard for 9Router login, browser install/check, and role config. |
+| `/yitec-setup` | Alias for `/redpi-setup`. |
 | `/redpi-config` | TUI picker for assigning 9Router models/combos to roles. |
 | `/yitec-config` | Alias for `/redpi-config`. |
 | `/redpi-update` | Force-update RedPi and vendored skills. |
@@ -391,7 +414,19 @@ redpi_browser
 
 This is intentionally **not MCP**. MCP tools can add a lot of tool-schema/context overhead. RedPi instead translates browser actions into a single CLI-style command string.
 
-Install Chromium browser assets once from a RedPi checkout if needed:
+The one-command RedPi installer automatically runs Playwright's Chromium installer. If you skipped it or need to repair it, run inside Pi:
+
+```text
+/redpi-setup
+```
+
+Then choose:
+
+```text
+Install Playwright + Chromium
+```
+
+Manual install from a RedPi checkout also works:
 
 ```bash
 npm install

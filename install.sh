@@ -25,8 +25,13 @@ fi
 
 mkdir -p "$YITEC_DIR" "$AGENT_DIR/vendor"
 
-echo "Installing Yitec Pi package: $TEAM_PI_PACKAGE"
+echo "Installing RedPi package: $TEAM_PI_PACKAGE"
 pi install "$TEAM_PI_PACKAGE"
+
+if [ "${REDPI_SKIP_BROWSER_INSTALL:-0}" != "1" ]; then
+  echo "Installing Playwright Chromium runtime for RedPi browser automation..."
+  npx -y playwright@1.57.0 install chromium || echo "Playwright browser install failed; you can retry inside Pi with /redpi-setup."
+fi
 
 echo "Installing most-starred subagent extension: pi-subagents (nicobailon/pi-subagents, 3189 GitHub stars at bootstrap authoring time)"
 pi install npm:pi-subagents
@@ -97,4 +102,5 @@ fs.mkdirSync(require('path').dirname(settingsPath), { recursive: true });
 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
 NODE
 
-echo "Done. Next steps: edit $YITEC_DIR/model-tiers.json with your real providers/models, set NINE_ROUTER_API_KEY if using 9Router, or run pi /login for native providers, then start pi."
+echo "Done. Start Pi with: pi"
+echo "Then run /redpi-setup for the friendly TUI wizard: 9Router login, browser install/check, and role model config."
