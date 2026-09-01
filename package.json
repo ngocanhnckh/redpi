@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "smoke": "./scripts/smoke-test.sh",
+    "smoke": "./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh",
+    "smoke:core": "./scripts/smoke-test.sh",
+    "smoke:setup": "./scripts/setup-wizard-smoke-test.sh",
     "browser:install": "playwright install chromium"
   },
   "keywords": ["pi-package", "pi", "pi-coding-agent", "harness", "openrouter"],

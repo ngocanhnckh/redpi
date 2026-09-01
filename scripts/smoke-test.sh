@@ -38,7 +38,7 @@ import os, pty, subprocess, time, select, re, sys
 root, cwd = sys.argv[1], sys.argv[2]
 env=os.environ.copy(); env.update({'PI_NO_TITLE':'1','TERM':'xterm-256color','COLUMNS':'120','LINES':'40'})
 master, slave = pty.openpty()
-p=subprocess.Popen(['pi','-e',f'{root}/extensions/yitec-model-router.ts'],cwd=cwd,env=env,stdin=slave,stdout=slave,stderr=slave,close_fds=True)
+p=subprocess.Popen(['pi','-ne','-e',f'{root}/extensions/yitec-model-router.ts'],cwd=cwd,env=env,stdin=slave,stdout=slave,stderr=slave,close_fds=True)
 os.close(slave); out=b''
 def drain(sec):
  global out

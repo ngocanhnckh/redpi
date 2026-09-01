@@ -606,9 +606,20 @@ If a key appears in chat, logs, or a public issue, rotate it.
 From a checkout:
 
 ```bash
-./scripts/smoke-test.sh
+npm run smoke
 npm pack --dry-run
 ```
+
+Smoke coverage includes:
+
+- core extension load
+- commands/roles/memory in a real Pi TUI
+- `/redpi-setup` one-shot flow in a real Pi TUI
+- mocked 9Router `/v1/models`
+- `MainAgent`/`SubAgent` auto-mapping
+- local 9Router key file creation
+- timeout settings patching
+- guard that setup does not loop after success
 
 Browser CLI test:
 
