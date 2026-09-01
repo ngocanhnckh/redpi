@@ -1,16 +1,14 @@
-<div align="center">
+# 🔴 RedPi
 
-```text
-██████╗ ███████╗██████╗ ██████╗ ██╗
-██╔══██╗██╔════╝██╔══██╗██╔══██╗██║
-██████╔╝█████╗  ██║  ██║██████╔╝██║
-██╔══██╗██╔══╝  ██║  ██║██╔═══╝ ██║
-██║  ██║███████╗██████╔╝██║     ██║
-╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝     ╚═╝
-              powered by YITEC
+### powered by **YITEC**
+
+```mermaid
+flowchart LR
+  Y["⚡ YITEC"] --> R["🔴 RedPi"]
+  R --> P["π Pi Coding Agent"]
+  R --> N["🧠 9Router"]
+  R --> B["🌐 Browser CLI"]
 ```
-
-# RedPi
 
 ### The install-once, auto-applied Pi harness for serious coding teams
 
@@ -22,11 +20,9 @@
 [![No MCP Browser](https://img.shields.io/badge/browser-CLI%20not%20MCP-green)](#browser-automation-without-mcp)
 [![Powered by YITEC](https://img.shields.io/badge/powered%20by-YITEC-black)](https://github.com/ngocanhnckh/redpi)
 
-</div>
-
 ---
 
-## The promise
+## ✨ The promise
 
 RedPi is designed so a teammate does **not** need to understand model routing, skills, browser tooling, subagents, memory files, or fallback policy before getting value.
 
@@ -46,65 +42,58 @@ RedPi auto-loads and applies the best available harness defaults.
 
 ---
 
-## What happens after install?
+## 🧭 What happens after install?
 
-```text
-┌────────────────────────────────────────────────────────────┐
-│                        User runs pi                         │
-└──────────────────────────────┬─────────────────────────────┘
-                               │
-                               ▼
-┌────────────────────────────────────────────────────────────┐
-│ RedPi extension auto-loads from Pi package config           │
-│ - registers 9router provider                                │
-│ - loads role model policy                                   │
-│ - loads memory-lite and WATCHDOG guidance                   │
-│ - exposes setup/config/update/browser tools                 │
-│ - checks for updates                                        │
-└──────────────────────────────┬─────────────────────────────┘
-                               │
-                               ▼
-┌────────────────────────────────────────────────────────────┐
-│ User asks normally                                           │
-│ "fix this test", "review this PR", "cheap summarize", etc. │
-└──────────────────────────────┬─────────────────────────────┘
-                               │
-                               ▼
-┌────────────────────────────────────────────────────────────┐
-│ RedPi picks role + thinking + model                         │
-│ planner / executor / subagent / reviewer / vision / tiny    │
-└──────────────────────────────┬─────────────────────────────┘
-                               │
-                               ▼
-┌────────────────────────────────────────────────────────────┐
-│ 9Router or native provider handles the request              │
-│ with fallback if rate limit, quota, overload, or session cap │
-└────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+  A["👤 User runs pi"] --> B["🔴 RedPi auto-loads"]
+  B --> C["🧩 Registers 9router provider"]
+  B --> D["🧠 Loads role + thinking policy"]
+  B --> E["📚 Loads memory-lite + WATCHDOG guidance"]
+  B --> F["🛠️ Exposes setup/config/update/browser tools"]
+  B --> G["⬆️ Checks harness + skill updates"]
+
+  C --> H["💬 User asks normally<br/>fix tests · review PR · cheap summarize"]
+  D --> H
+  E --> H
+  F --> H
+  G --> H
+
+  H --> I["🎯 RedPi selects role"]
+  I --> J["🧪 planner · executor · subagent · reviewer · vision · tiny"]
+  J --> K["⚙️ Applies thinking level"]
+  K --> L["🚦 Routes to 9Router or native provider"]
+  L --> M{"⚠️ rate limit / quota / overload?"}
+  M -- "no" --> N["✅ Response"]
+  M -- "yes" --> O["🔁 Cooldown + fallback + retry"]
+  O --> L
 ```
 
----
-
-## Feature map
-
-| Feature | Default behavior | User effort |
-| --- | --- | --- |
-| **Auto-loaded harness** | Installed as a Pi package; normal `pi` startup loads RedPi. | None after install |
-| **Friendly setup GUI/TUI** | `/redpi-setup` walks through 9Router login, browser install, status, and role config. | One command |
-| **9Router provider** | Registers native provider `9router` with OpenAI-compatible `/v1` API. | Paste URL/key once |
-| **Auto 9Router role config** | After login, RedPi can auto-generate planner/executor/reviewer/subagent roles from live `/models`. | Confirm once |
-| **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
-| **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
-| **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
-| **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; no MCP overhead. | Auto-installed |
-| **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
-| **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
-| **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
-| **Auto-update** | Checks harness and skill repos on session start. | None |
-| **Public-safe** | No vault, no bundled secrets, no committed credentials. | Safer by default |
+RedPi is designed to **auto-create the best usable harness** from your available 9Router models and then apply it automatically on future `pi` starts.
 
 ---
 
-## Quick start: easiest path
+## 🚀 Feature map
+
+|  | Feature | Default behavior | User effort |
+| --- | --- | --- | --- |
+| 🔌 | **Auto-loaded harness** | Installed as a Pi package; normal `pi` startup loads RedPi. | None after install |
+| 🧙 | **Friendly setup TUI** | `/redpi-setup` walks through 9Router login, browser install, status, and role config. | One command |
+| 🧠 | **9Router provider** | Registers native provider `9router` with OpenAI-compatible `/v1` API. | Paste URL/key once |
+| 🎯 | **Auto 9Router role config** | Auto-generates planner/executor/reviewer/subagent roles from live `/models`. | Confirm once |
+| ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
+| 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
+| 🧰 | **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
+| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; no MCP overhead. | Auto-installed |
+| 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
+| 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
+| 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
+| ⬆️ | **Auto-update** | Checks harness and skill repos on session start. | None |
+| 🔐 | **Public-safe** | No vault, no bundled secrets, no committed credentials. | Safer by default |
+
+---
+
+## ⚡ Quick start: easiest path
 
 ### 1. Install once
 
@@ -186,7 +175,7 @@ That's it.
 
 ---
 
-## Setup wizard
+## 🧙 Setup wizard
 
 Run:
 
@@ -232,19 +221,22 @@ ROUTER9_API_KEY
 NINEROUTER_API_KEY
 ```
 
-### Auto-configure from live 9Router models
+### 🎯 Auto-configure from live 9Router models
 
 If `/v1/models` works, RedPi can create a best-effort role config automatically:
 
-```text
-planner  → strongest/high-thinking model or combo
-executor → cheaper/low-thinking model or combo
-subagent → cheaper/low-thinking model or combo
-reviewer → review/critic combo if available, otherwise strong model
-vision   → strong vision-capable route
-commit   → cheap/low-thinking route
-tiny     → cheapest/off-thinking route
+```mermaid
+flowchart LR
+  M["🧠 9Router /v1/models"] --> A["🔴 RedPi auto-config"]
+  A --> P["🏗️ planner<br/>strongest + high thinking"]
+  A --> E["🛠️ executor<br/>cheaper + low thinking"]
+  A --> S["🤖 subagent<br/>cheap parallel work"]
+  A --> R["🕵️ reviewer<br/>review/critic if available"]
+  A --> V["🖼️ vision<br/>vision-capable route"]
+  A --> C["📝 commit<br/>low-thinking summaries"]
+  A --> T["🪶 tiny<br/>cheapest + thinking off"]
 ```
+
 
 Everything remains editable through:
 
@@ -254,23 +246,31 @@ Everything remains editable through:
 
 ---
 
-## Role-based thinking
+## ⚙️ Role-based thinking
 
 RedPi treats models as workers with jobs, not as a single global default.
 
-```text
-┌───────────┬──────────────────────────────┬───────────┐
-│ Role      │ Best for                     │ Thinking  │
-├───────────┼──────────────────────────────┼───────────┤
-│ planner   │ architecture, plans, hard bugs│ high      │
-│ executor  │ edits, tests, implementation │ low       │
-│ subagent  │ parallel cheap tasks         │ low       │
-│ reviewer  │ critique, safety, PR review  │ medium/high│
-│ vision    │ screenshots/images           │ medium    │
-│ commit    │ commit messages, summaries   │ low       │
-│ tiny      │ cheap summaries/classification│ off       │
-└───────────┴──────────────────────────────┴───────────┘
+```mermaid
+flowchart TB
+  U["💬 User task"] --> Q{"What kind of work?"}
+  Q -->|architecture / hard bug| P["🏗️ planner<br/>thinking: high"]
+  Q -->|edits / tests| E["🛠️ executor<br/>thinking: low"]
+  Q -->|parallel research| S["🤖 subagent<br/>thinking: low"]
+  Q -->|critique / PR review| R["🕵️ reviewer<br/>thinking: medium/high"]
+  Q -->|screenshots / images| V["🖼️ vision<br/>thinking: medium"]
+  Q -->|summaries / commits| C["📝 commit<br/>thinking: low"]
+  Q -->|cheap classification| T["🪶 tiny<br/>thinking: off"]
 ```
+
+|  | Role | Best for | Default thinking |
+| --- | --- | --- | --- |
+| 🏗️ | `planner` | architecture, plans, hard bugs | `high` |
+| 🛠️ | `executor` | edits, tests, implementation | `low` |
+| 🤖 | `subagent` | parallel cheap tasks | `low` |
+| 🕵️ | `reviewer` | critique, safety, PR review | `medium` / `high` |
+| 🖼️ | `vision` | screenshots/images | `medium` |
+| 📝 | `commit` | commit messages, summaries | `low` |
+| 🪶 | `tiny` | cheap summaries/classification | `off` |
 
 Magic keywords can override behavior for a single turn:
 
@@ -282,7 +282,7 @@ orchestrate inspect auth, database, and frontend in parallel
 
 ---
 
-## Subagents
+## 🤖 Subagents
 
 RedPi installs `pi-subagents` and configures practical defaults:
 
@@ -305,7 +305,7 @@ RedPi tells the agent to prefer cheap/parallel delegation where it helps.
 
 ---
 
-## 9Router integration
+## 🧠 9Router integration
 
 RedPi registers this provider:
 
@@ -338,7 +338,7 @@ Check live status:
 
 ---
 
-## Browser automation without MCP
+## 🌐 Browser automation without MCP
 
 RedPi includes Playwright browser automation, but intentionally avoids MCP because MCP can be context-heavy.
 
@@ -362,10 +362,17 @@ reset
 
 Why this is efficient:
 
-```text
-MCP browser server  → many tool schemas + large context surface
-RedPi browser CLI   → one tool schema + clipped text output
+```mermaid
+flowchart LR
+  A["❌ Browser MCP"] --> A1["many tool schemas"]
+  A --> A2["large context surface"]
+  A --> A3["more token burn"]
+
+  B["✅ RedPi Browser CLI"] --> B1["one compact tool"]
+  B --> B2["CLI command string"]
+  B --> B3["clipped output with --max"]
 ```
+
 
 Browser state lives at:
 
@@ -382,7 +389,7 @@ node scripts/redpi-browser.js text --max 3000
 
 ---
 
-## Skills included
+## 🧰 Skills included
 
 RedPi adds skills to Pi settings automatically:
 
@@ -403,7 +410,7 @@ Pi can also auto-select skills when the task matches their descriptions.
 
 ---
 
-## Memory-lite
+## 📚 Memory-lite
 
 Project memory:
 
@@ -435,7 +442,7 @@ Memory is injected with a character cap and labeled as heuristic guidance, so th
 
 ---
 
-## Advisor-lite and WATCHDOG.md
+## 🕵️ Advisor-lite and WATCHDOG.md
 
 Run a reviewer pass:
 
@@ -465,52 +472,51 @@ Enable auto-review in config if desired:
 
 ---
 
-## Commands
+## ⌨️ Commands
 
-| Command | Purpose |
-| --- | --- |
-| `/redpi-setup` | Friendly TUI setup wizard for 9Router login, browser install/check, auto role config, and status. |
-| `/yitec-setup` | Alias for `/redpi-setup`. |
-| `/redpi-config` | TUI role/model configurator. Pick live 9Router models/combos and thinking levels. |
-| `/yitec-config` | Alias for `/redpi-config`. |
-| `/redpi-update` | Force-update RedPi and vendored skill repos. |
-| `/yitec-update` | Alias for `/redpi-update`. |
-| `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
-| `/yitec-tiers` | Print active model role/tier config. |
-| `/yitec-doctor` | Validate role config, providers, and trust status. |
-| `/yitec-agents` | Show subagent/reviewer/planner/executor model policy. |
-| `/yitec-memory` | Show local RedPi memory/lessons. |
-| `/yitec-review` | Run advisor-lite review using reviewer role. |
+|  | Command | Purpose |
+| --- | --- | --- |
+| 🧙 | `/redpi-setup` | Friendly TUI setup wizard for 9Router login, browser install/check, auto role config, and status. |
+| 🧙 | `/yitec-setup` | Alias for `/redpi-setup`. |
+| 🎯 | `/redpi-config` | TUI role/model configurator. Pick live 9Router models/combos and thinking levels. |
+| 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
+| ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
+| ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
+| 🧠 | `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
+| 📊 | `/yitec-tiers` | Print active model role/tier config. |
+| 🩺 | `/yitec-doctor` | Validate role config, providers, and trust status. |
+| 🤖 | `/yitec-agents` | Show subagent/reviewer/planner/executor model policy. |
+| 📚 | `/yitec-memory` | Show local RedPi memory/lessons. |
+| 🕵️ | `/yitec-review` | Run advisor-lite review using reviewer role. |
 
 ---
 
-## Files RedPi manages
+## 🗂️ Files RedPi manages
 
-```text
-~/.pi/agent/
-├── settings.json                       # Pi settings patched with skills/subagents/defaults
-├── yitec/
-│   ├── model-tiers.json                # global RedPi role config
-│   ├── 9router.local.json              # local private 9Router URL/key
-│   ├── memory.md                       # global memory
-│   ├── lessons.md                      # global learned lessons
-│   └── browser/                        # Playwright profile/state
-└── vendor/
-    ├── mattpocock-skills/
-    └── liquid-glass-frontend-skill/
+```mermaid
+flowchart TB
+  A["~/.pi/agent"] --> S["⚙️ settings.json<br/>skills/subagents/defaults"]
+  A --> Y["🔴 yitec/"]
+  Y --> MT["🎯 model-tiers.json<br/>global role config"]
+  Y --> NR["🔐 9router.local.json<br/>private URL/key"]
+  Y --> MEM["📚 memory.md"]
+  Y --> LES["🧠 lessons.md"]
+  Y --> BR["🌐 browser/<br/>Playwright profile/state"]
+  A --> V["📦 vendor/"]
+  V --> MS["🧰 mattpocock-skills"]
+  V --> LG["🎨 liquid-glass-frontend-skill"]
 
-<project>/
-└── .pi/
-    └── yitec/
-        ├── model-tiers.json            # optional trusted project override
-        ├── memory.md
-        ├── lessons.md
-        └── WATCHDOG.md
+  P["project repo"] --> PI[".pi/yitec/"]
+  PI --> PMT["🎯 model-tiers.json<br/>trusted project override"]
+  PI --> PMEM["📚 memory.md"]
+  PI --> PLES["🧠 lessons.md"]
+  PI --> W["🕵️ WATCHDOG.md"]
 ```
 
+
 ---
 
-## Configuration example
+## ⚙️ Configuration example
 
 Most users should use `/redpi-setup` and `/redpi-config`, not edit JSON manually.
 
@@ -531,7 +537,7 @@ Most users should use `/redpi-setup` and `/redpi-config`, not edit JSON manually
 
 ---
 
-## Updates
+## ⬆️ Updates
 
 RedPi checks for updates on session start, once per configured interval.
 
@@ -549,7 +555,7 @@ Then restart Pi or run:
 
 ---
 
-## Security model
+## 🔐 Security model
 
 RedPi is public-repo safe by design:
 
@@ -574,7 +580,7 @@ If a key appears in chat, logs, or a public issue, rotate it.
 
 ---
 
-## Testing
+## ✅ Testing
 
 From a checkout:
 
@@ -598,7 +604,7 @@ Example Domain
 
 ---
 
-## FAQ
+## ❓ FAQ
 
 ### Is RedPi a fork of Oh My Pi?
 
@@ -622,12 +628,12 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 
 ---
 
-## Repository
+## 📍 Repository
 
 ```text
 https://github.com/ngocanhnckh/redpi
 ```
 
-## License
+## 📄 License
 
 MIT
