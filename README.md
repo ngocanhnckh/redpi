@@ -51,6 +51,7 @@ RedPi loads automatically.
 | **Magic keywords** | `ultrathink`, `orchestrate`, `cheap`, and `lowcost` adjust turn behavior. |
 | **TUI config** | `/redpi-config` lets you choose a 9Router model/combo for each role inside Pi. |
 | **Advisor-lite** | `/yitec-review` runs a reviewer-role pass using optional `WATCHDOG.md` guidance. |
+| **Browser CLI** | Token-efficient Playwright automation through one compact `redpi_browser` tool; no MCP context bloat. |
 | **Memory-lite** | Project/global `memory.md` and `lessons.md`, plus a `yitec_remember` tool. |
 | **Auto-update** | RedPi can pull the latest harness and skill repos on session start, and exposes `/redpi-update`. |
 
@@ -379,6 +380,48 @@ cheap summarize these files without deep architecture work
 ```
 
 ---
+
+## Browser automation without MCP
+
+RedPi includes a small Playwright CLI and exposes it to Pi as one compact tool:
+
+```text
+redpi_browser
+```
+
+This is intentionally **not MCP**. MCP tools can add a lot of tool-schema/context overhead. RedPi instead translates browser actions into a single CLI-style command string.
+
+Install Chromium browser assets once from a RedPi checkout if needed:
+
+```bash
+npm install
+npm run browser:install
+```
+
+Examples the agent can call through `redpi_browser`:
+
+```text
+goto https://example.com --max 2000
+text --max 3000
+click text=Login
+type input[name=q] "redpi 9router" --submit
+screenshot /tmp/redpi-page.png
+reset
+```
+
+Token efficiency rules:
+
+- Prefer `text --max 3000` over HTML.
+- Use `html --max N` only when selectors/markup matter.
+- Use `screenshot` only when visual layout matters.
+- Browser state is stored under `~/.pi/agent/yitec/browser/` by default.
+
+You can also run the CLI directly:
+
+```bash
+node scripts/redpi-browser.js goto https://example.com --max 2000
+node scripts/redpi-browser.js text --max 3000
+```
 
 ## Skills
 

@@ -439,6 +439,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "redpi_browser",
+    label: "RedPi Browser CLI",
+    description: "Token-efficient Playwright browser automation through the RedPi CLI. Use compact commands like: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, screenshot <path>, reset.",
+    promptSnippet: "Run compact Playwright browser commands without MCP context bloat",
+    promptGuidelines: ["Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters."],
+    parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto https://example.com --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `screenshot /tmp/page.png`, or `reset`." }) }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const script = join(packageRoot(), "scripts", "redpi-browser.js");
+      const args = String(params.command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((s) => s.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
+      const result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+      const text = (result.stdout || result.stderr || "").trim();
+      return { content: [{ type: "text", text }], details: { command: params.command, status: result.status } };
+    },
+  });
+
+  pi.registerTool({
     name: "yitec_remember", label: "Remember", description: "Append a durable Yitec project/user lesson for future sessions.",
     parameters: Type.Object({ lesson: Type.String({ description: "Concise durable lesson, decision, or workflow." }), scope: Type.Optional(Type.String({ description: "project or user. Defaults to project when trusted." })) }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
