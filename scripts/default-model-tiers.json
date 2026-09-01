@@ -44,5 +44,6 @@
   },
   "magicKeywords": { "enabled": true, "ultrathink": true, "orchestrate": true, "cheap": true },
   "advisor": { "enabled": false, "modelRole": "reviewer", "autoReview": false, "tools": ["read", "grep"] },
-  "memory": { "enabled": true, "injectionCharLimit": 5000 }
+  "memory": { "enabled": true, "injectionCharLimit": 5000 },
+  "autoUpdate": { "enabled": true, "intervalHours": 24, "updateHarness": true, "updateSkills": true }
 }

@@ -67,7 +67,8 @@ if [ ! -f "$YITEC_DIR/model-tiers.json" ]; then
   "retry": { "enabled": true, "maxPerUserPrompt": 2, "cooldownMs": 300000, "fallbackChains": {}, "errorPatterns": ["rate limit", "429", "quota", "weekly limit", "session limit", "credits", "overloaded"] },
   "magicKeywords": { "enabled": true, "ultrathink": true, "orchestrate": true, "cheap": true },
   "advisor": { "enabled": false, "modelRole": "reviewer", "autoReview": false, "tools": ["read", "grep"] },
-  "memory": { "enabled": true, "injectionCharLimit": 5000 }
+  "memory": { "enabled": true, "injectionCharLimit": 5000 },
+  "autoUpdate": { "enabled": true, "intervalHours": 24, "updateHarness": true, "updateSkills": true }
 }
 JSON
 fi

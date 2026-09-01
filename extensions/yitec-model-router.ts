@@ -25,6 +25,7 @@ type Config = {
   magicKeywords?: { enabled?: boolean; ultrathink?: boolean; orchestrate?: boolean; cheap?: boolean };
   advisor?: { enabled?: boolean; modelRole?: string; autoReview?: boolean; tools?: string[] };
   memory?: { enabled?: boolean; injectionCharLimit?: number };
+  autoUpdate?: { enabled?: boolean; intervalHours?: number; updateHarness?: boolean; updateSkills?: boolean };
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -54,6 +55,7 @@ const DEFAULT_CONFIG: Required<Config> = {
   magicKeywords: { enabled: true, ultrathink: true, orchestrate: true, cheap: true },
   advisor: { enabled: false, modelRole: "reviewer", autoReview: false, tools: ["read", "grep"] },
   memory: { enabled: true, injectionCharLimit: 5000 },
+  autoUpdate: { enabled: true, intervalHours: 24, updateHarness: true, updateSkills: true },
 };
 
 type LoadedConfig = Config & { __path?: string; __projectTrusted?: boolean };
@@ -223,6 +225,45 @@ async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
   }
 }
 
+function packageRoot(): string {
+  const here = typeof __dirname === "string" ? __dirname : process.cwd();
+  return resolve(here, "..");
+}
+
+function run(cmd: string, args: string[], cwd?: string): string {
+  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 3 });
+  const text = [r.stdout, r.stderr].filter(Boolean).join("\n").trim();
+  return `${cmd} ${args.join(" ")} -> ${r.status ?? "?"}${text ? `\n${text}` : ""}`;
+}
+
+function shouldAutoUpdate(cfg: Config): boolean {
+  if (cfg.autoUpdate?.enabled === false) return false;
+  const marker = join(USER_YITEC_DIR, "last-update-check.json");
+  const last = readJson(marker, { at: 0 }).at || 0;
+  const intervalMs = Math.max(1, cfg.autoUpdate?.intervalHours ?? 24) * 60 * 60 * 1000;
+  if (Date.now() - last < intervalMs) return false;
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, JSON.stringify({ at: Date.now() }, null, 2) + "\n");
+  return true;
+}
+
+function updateRedPi(cfg: Config, force = false): string {
+  const lines = [`RedPi update ${force ? "forced" : "auto"}`];
+  if (!force && !shouldAutoUpdate(cfg)) return "RedPi auto-update skipped: interval has not elapsed.";
+  if (cfg.autoUpdate?.updateHarness !== false) {
+    const root = packageRoot();
+    if (existsSync(join(root, ".git"))) lines.push(run("git", ["pull", "--ff-only"], root));
+    else lines.push(`Harness package root is not a git checkout: ${root}. Run: pi update --extensions`);
+  }
+  if (cfg.autoUpdate?.updateSkills !== false) {
+    for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill")]) {
+      if (existsSync(join(dir, ".git"))) lines.push(run("git", ["pull", "--ff-only"], dir));
+      else lines.push(`Skill repo not found, skipping: ${dir}`);
+    }
+  }
+  return lines.join("\n\n");
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("9router", {
     baseUrl: nineRouterBaseUrl(),
@@ -244,6 +285,8 @@ export default function (pi: ExtensionAPI) {
   let cooldownUntil = new Map<string, number>();
   let turnMagic: TurnMagic = {};
 
+  pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
   pi.registerCommand("yitec-9router", { description: "Check RedPi native 9Router gateway integration", handler: async (_args, ctx) => {
     const found = ctx.modelRegistry.find("9router", "kr/claude-sonnet-4.5");
@@ -274,6 +317,8 @@ export default function (pi: ExtensionAPI) {
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
     const high = cfg.tiers?.[cfg.planner?.tier ?? "high"] ?? [];
     ctx.ui.setStatus("yitec-router", `tiers high:${high.length} low:${low.length}`);
+    const updateResult = updateRedPi(cfg, false);
+    if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
   });
 
   pi.on("input", async (event) => {

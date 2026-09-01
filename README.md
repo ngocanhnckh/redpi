@@ -112,6 +112,8 @@ Each model can be a plain provider-qualified string or a profile object:
 Useful commands:
 
 - `/yitec-tiers` — inspect active config.
+- `/redpi-update` — force-update the RedPi harness checkout and vendored skill repos.
+- `/yitec-update` — alias for `/redpi-update`.
 - `/yitec-9router` — check native 9Router provider registration and live models.
 - `/yitec-doctor` — validate roles, tiers, provider/model IDs, and trust.
 - `/yitec-agents` — inspect subagent/reviewer role policy.
@@ -120,6 +122,7 @@ Useful commands:
 
 ## Behavior
 
+- RedPi auto-checks for updates on session start, by default once every 24 hours. It pulls the RedPi git checkout and vendored Matt Pocock/liquid-glass skill repos when available. Restart Pi or run `/reload` after an update to use newly pulled extension code.
 - RedPi switches turns through semantic roles: planner, executor, reviewer, vision, commit, tiny, and subagent.
 - On rate-limit/quota/session-limit errors, it marks the failed model, applies cooldown, switches to the next fallback candidate, and retries.
 - Magic keywords are recognized in prose, not code/path text:
@@ -130,6 +133,29 @@ Useful commands:
 - Memory-lite reads/writes `memory.md` and `lessons.md` under trusted project `.pi/yitec/` or global `~/.pi/agent/yitec/`.
 - Advisor-lite reads `WATCHDOG.md` from `~/.pi/agent/WATCHDOG.md`, `.pi/WATCHDOG.md`, or `.pi/yitec/WATCHDOG.md`.
 - Matt Pocock skills are available automatically and can also be forced with `/skill:name`.
+
+## Updates
+
+Manual update inside Pi:
+
+```text
+/redpi-update
+```
+
+Global auto-update settings live in `~/.pi/agent/yitec/model-tiers.json`:
+
+```json
+{
+  "autoUpdate": {
+    "enabled": true,
+    "intervalHours": 24,
+    "updateHarness": true,
+    "updateSkills": true
+  }
+}
+```
+
+The installer itself can be re-run any time if you want to reconcile the package, skills, and settings from scratch.
 
 ## Smoke test
 
