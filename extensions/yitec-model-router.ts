@@ -200,7 +200,44 @@ function runPiPrint(cwd: string, model: string, prompt: string): string {
   return result.stdout || result.stderr || `pi exited with status ${result.status}`;
 }
 
+function nineRouterBaseUrl(): string {
+  return process.env.NINE_ROUTER_BASE_URL || process.env.ROUTER9_BASE_URL || "http://127.0.0.1:20128/v1";
+}
+
+function nineRouterApiKey(): string {
+  return process.env.NINE_ROUTER_API_KEY || process.env.ROUTER9_API_KEY || process.env.NINEROUTER_API_KEY || "dummy";
+}
+
+async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
+  try {
+    const res = await fetch(`${nineRouterBaseUrl().replace(/\/$/, "")}/models`, {
+      headers: { Authorization: `Bearer ${nineRouterApiKey()}` },
+      signal,
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as any;
+    const ids = Array.isArray(json?.data) ? json.data.map((m: any) => m?.id).filter(Boolean) : [];
+    return ids.map((id: string) => ({ id, name: `9Router ${id}`, reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
+  } catch {
+    return [];
+  }
+}
+
 export default function (pi: ExtensionAPI) {
+  pi.registerProvider("9router", {
+    baseUrl: nineRouterBaseUrl(),
+    apiKey: nineRouterApiKey(),
+    api: "openai-completions",
+    models: [
+      { id: "kr/claude-sonnet-4.5", name: "9Router Kiro Claude Sonnet 4.5", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      { id: "opencode/free", name: "9Router OpenCode Free", reasoning: true, input: ["text"], contextWindow: 128000, maxTokens: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    ],
+    async refreshModels(context: any) {
+      const models = await fetchNineRouterModels(context?.signal);
+      return models.length ? models : undefined;
+    },
+  } as any);
+
   let currentUserPrompt = "";
   let retriesForPrompt = 0;
   let failedModelsForPrompt = new Set<string>();
@@ -208,6 +245,11 @@ export default function (pi: ExtensionAPI) {
   let turnMagic: TurnMagic = {};
 
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
+  pi.registerCommand("yitec-9router", { description: "Check RedPi native 9Router gateway integration", handler: async (_args, ctx) => {
+    const found = ctx.modelRegistry.find("9router", "kr/claude-sonnet-4.5");
+    const live = await fetchNineRouterModels(ctx.signal).catch(() => []);
+    ctx.ui.notify(`9Router provider: ${found ? "registered" : "missing"}\nBase URL: ${nineRouterBaseUrl()}\nAPI key env: ${nineRouterApiKey() === "dummy" ? "not set (using dummy)" : "set"}\nLive /models: ${live.length ? live.map((m: any) => m.id).slice(0, 20).join(", ") : "not reachable or no models returned"}\nUse model IDs like 9router/kr/claude-sonnet-4.5.`, "info");
+  } });
   pi.registerCommand("yitec-doctor", { description: "Validate Yitec roles, tiers, providers, and trust", handler: async (_args, ctx) => ctx.ui.notify(doctor(loadConfig(ctx.cwd, ctx.isProjectTrusted()), ctx), "info") });
   pi.registerCommand("yitec-agents", { description: "Show Yitec subagent/reviewer role policy", handler: async (_args, ctx) => {
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());

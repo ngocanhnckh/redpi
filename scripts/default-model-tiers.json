@@ -1,5 +1,5 @@
 {
-  "$schemaComment": "Edit in the Yitec Model Vault UI or by hand. Roles can point at tiers, direct models, fallback lists, and thinking levels. Each model can be a string or an object with model, vision, thinking, rate, notes.",
+  "$schemaComment": "RedPi model routing config. Roles can point at tiers, direct models, fallback lists, and thinking levels. 9Router works natively with model IDs like 9router/kr/claude-sonnet-4.5 and NINE_ROUTER_API_KEY.",
   "roles": {
     "default": { "tier": "high", "thinking": "medium" },
     "planner": { "tier": "high", "thinking": "high" },

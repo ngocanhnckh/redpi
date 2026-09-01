@@ -3,11 +3,11 @@ set -euo pipefail
 
 # One-command installer for the Yitec Pi harness.
 # Usage after hosting this repo:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/redpi/main/install.sh | bash
-# Optional override until you replace YOUR_ORG:
+#   curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+# Optional override:
 #   TEAM_PI_PACKAGE=git:github.com/your-org/redpi curl -fsSL .../install.sh | bash
 
-TEAM_PI_PACKAGE="${TEAM_PI_PACKAGE:-git:github.com/YOUR_ORG/redpi}"
+TEAM_PI_PACKAGE="${TEAM_PI_PACKAGE:-git:github.com/ngocanhnckh/redpi}"
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 YITEC_DIR="$AGENT_DIR/yitec"
 MATT_DIR="$AGENT_DIR/vendor/mattpocock-skills"
@@ -24,11 +24,6 @@ if ! command -v pi >/dev/null 2>&1; then
 fi
 
 mkdir -p "$YITEC_DIR" "$AGENT_DIR/vendor"
-
-if [ "$TEAM_PI_PACKAGE" = "git:github.com/YOUR_ORG/redpi" ]; then
-  echo "ERROR: edit install.sh and replace YOUR_ORG/redpi, or run with TEAM_PI_PACKAGE=git:github.com/org/repo" >&2
-  exit 2
-fi
 
 echo "Installing Yitec Pi package: $TEAM_PI_PACKAGE"
 pi install "$TEAM_PI_PACKAGE"
@@ -101,5 +96,4 @@ fs.mkdirSync(require('path').dirname(settingsPath), { recursive: true });
 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
 NODE
 
-echo "Done. Next steps: edit $YITEC_DIR/model-tiers.json with your real providers/models, run pi /login for each provider, then start pi."
-echo "To run the local Model Vault UI from this repo: node vault/server.js"
+echo "Done. Next steps: edit $YITEC_DIR/model-tiers.json with your real providers/models, set NINE_ROUTER_API_KEY if using 9Router, or run pi /login for native providers, then start pi."

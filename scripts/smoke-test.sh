@@ -51,14 +51,14 @@ def drain(sec):
    if not d: break
    out += d
 drain(4)
-for line in ['/yitec-doctor\r','/yitec-agents\r','/yitec-memory\r']:
+for line in ['/yitec-9router\r','/yitec-doctor\r','/yitec-agents\r','/yitec-memory\r']:
  os.write(master,line.encode()); drain(2)
 os.write(master,b'\x04'); drain(1)
 try: p.terminate(); p.wait(timeout=3)
 except Exception: p.kill()
 s=out.decode('utf-8','ignore')
 s=re.sub(r'\x1b\][^\a]*(?:\a|\x1b\\)','',s); s=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',s)
-checks=['Problems: none','Project config trusted: yes','subagent: openai-codex/gpt-5.6-terra','Project memory','Keep tests small']
+checks=['9Router provider: registered','Problems: none','Project config trusted: yes','subagent: openai-codex/gpt-5.6-terra','Project memory','Keep tests small']
 missing=[c for c in checks if c not in s]
 if missing:
  print(s[-5000:]); raise SystemExit('Missing smoke checks: '+', '.join(missing))

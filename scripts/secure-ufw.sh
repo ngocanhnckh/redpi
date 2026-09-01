@@ -13,4 +13,4 @@ ufw allow 22/tcp comment 'SSH'
 ufw --force enable
 ufw status verbose
 
-echo "UFW enabled. Only inbound TCP/22 is open. The vault should stay bound to 127.0.0.1:7979 for Cloudflare Tunnel."
+echo "UFW enabled. Only inbound TCP/22 is open."

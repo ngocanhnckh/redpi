@@ -1,16 +1,12 @@
 {
-  "name": "@yitec/pi-harness",
+  "name": "redpi",
   "version": "0.1.0",
-  "private": true,
-  "description": "Team Pi harness: model tier routing, Matt Pocock skills bootstrap, and subagents defaults.",
-  "bin": {
-    "yitec-pi-vault": "./vault/server.js"
-  },
+  "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "vault": "node vault/server.js"
+    "smoke": "./scripts/smoke-test.sh"
   },
-  "keywords": ["pi-package", "pi", "pi-coding-agent", "harness"],
-  "license": "UNLICENSED",
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "harness", "openrouter"],
+  "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

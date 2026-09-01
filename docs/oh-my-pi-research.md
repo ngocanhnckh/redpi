@@ -74,9 +74,9 @@ Source reviewed: `can1357/oh-my-pi` GitHub repo, shallow clone on 2026-08-31. Li
    - Discover `~/.pi/agent/WATCHDOG.md` and project `.pi/WATCHDOG.md` when trusted.
    - Inject it only into reviewer/advisor style prompts, not every main-agent turn.
 
-4. **Vault upgrades**
-   - Add role editor, fallback chain editor, provider credential/env-var hints, import/export config.
-   - Add a usage/rate column and rough cost calculator from our existing profile rates.
+4. **Native provider configuration instead of a vault**
+   - Prefer native provider support such as 9Router via `NINE_ROUTER_API_KEY` or Pi-native providers.
+   - Keep role/fallback config file-based for public safety; do not ship a credential vault/server.
 
 5. **Safer config loading**
    - Support project-scoped model config only after trust; already started in `yitec-model-router.ts`.
@@ -106,14 +106,14 @@ Source reviewed: `can1357/oh-my-pi` GitHub repo, shallow clone on 2026-08-31. Li
    - Add per-role fallback chains instead of only per-tier lists.
 
 10. **Shell completions / install polish**
-    - Add generated shell snippets for `yitec-pi-vault` and helper scripts.
+    - Add generated shell snippets for helper scripts.
     - Make `install.sh` verify Pi version, package installed resources, and config health.
 
 ### Phase 3 — larger bets
 
-11. **Agent Hub-like web view**
-    - Extend the Vault into a small control deck: sessions, model config, subagent status, prompt templates.
-    - This copies the idea, not OMP internals.
+11. **Agent Hub-like view**
+    - Add a future local control deck for sessions, model config, subagent status, and prompt templates if needed.
+    - This copies the idea, not OMP internals; avoid credential storage.
 
 12. **Rule-triggered steering (TTSR-lite)**
     - Add rules file: `.pi/yitec/rules.json` or markdown frontmatter.
@@ -131,7 +131,7 @@ Source reviewed: `can1357/oh-my-pi` GitHub repo, shallow clone on 2026-08-31. Li
 ## Suggested immediate implementation order
 
 1. Add role-based config schema and migrate existing `model-tiers.json` compatibility.
-2. Upgrade Vault UI to edit roles and fallback chains.
+2. Improve native file-based role/fallback-chain configuration and 9Router examples.
 3. Add magic keywords in the router extension.
 4. Add `WATCHDOG.md` discovery and reviewer prompt template.
 5. Add `/yitec-doctor` to validate models/providers/config/trust.

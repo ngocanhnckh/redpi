@@ -1,46 +1,90 @@
-# RedPi / Yitec Pi Harness
+# RedPi
 
-Team Pi setup with one-command bootstrap, Matt Pocock skills, subagents, model roles, memory-lite, advisor-lite, and model tier routing/failover.
+Public Pi harness with one-command bootstrap, Matt Pocock skills, subagents, role-based model routing, native 9Router gateway support, memory-lite, advisor-lite, and failover.
 
-## One-command install
-
-After this repo is pushed to GitHub, edit `install.sh` and replace `YOUR_ORG/redpi`, then teammates run:
+## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/redpi/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
 ```
 
-Until then:
+Then start Pi normally from any repo:
 
 ```bash
-TEAM_PI_PACKAGE=git:github.com/your-org/redpi curl -fsSL https://raw.githubusercontent.com/your-org/redpi/main/install.sh | bash
+pi
 ```
 
 The installer:
 
 1. Installs Pi if missing.
-2. Installs this Pi package.
-3. Installs `npm:pi-subagents` — selected from npm/GitHub subagent packages as the current most-starred option (`nicobailon/pi-subagents`, 3189 stars when checked).
+2. Installs this RedPi package.
+3. Installs `npm:pi-subagents`.
 4. Clones `https://github.com/mattpocock/skills` and adds `.agents/skills` to Pi settings.
 5. Clones `https://github.com/ngocanhnckh/liquid-glass-frontend-skill` and adds it to Pi settings.
 6. Creates `~/.pi/agent/yitec/model-tiers.json`.
-7. Configures subagents to default to low-tier models and important oracle/planning roles to high-tier fallbacks.
+7. Configures subagents to default to low-tier models and reviewer/planning roles to high-tier fallbacks.
 
-## Configure model tiers
+## 9Router support
 
-Edit:
+RedPi does not run its own vault. It registers 9Router as a native Pi provider and expects 9Router to run separately.
+
+Install/start 9Router:
+
+```bash
+npm install -g 9router
+9router
+```
+
+Open the 9Router dashboard at `http://localhost:20128`, connect providers, copy a dashboard API key, then:
+
+```bash
+export NINE_ROUTER_API_KEY=your-9router-key
+pi
+```
+
+Default RedPi 9Router endpoint:
+
+```text
+http://127.0.0.1:20128/v1
+```
+
+Override it with:
+
+```bash
+export NINE_ROUTER_BASE_URL=http://127.0.0.1:20128/v1
+```
+
+Use 9Router model IDs in your tier config, for example:
+
+```json
+{
+  "roles": {
+    "planner": { "models": ["9router/kr/claude-sonnet-4.5:high"], "thinking": "high" },
+    "executor": { "models": ["9router/opencode/free:low"], "thinking": "low" },
+    "reviewer": { "models": ["9router/kr/claude-sonnet-4.5:medium"], "thinking": "medium" }
+  }
+}
+```
+
+Run `/yitec-9router` in Pi to check provider registration and live `/v1/models` discovery.
+
+You can also use any Pi-native provider model ID such as `openai/...`, `anthropic/...`, `google/...`, `deepseek/...`, `openrouter/...`, or local providers.
+
+## Configure roles and tiers
+
+Global config:
 
 ```text
 ~/.pi/agent/yitec/model-tiers.json
 ```
 
-or for one project:
+Project override, loaded only after project trust:
 
 ```text
 .pi/yitec/model-tiers.json
 ```
 
-Use provider-qualified model ids. Each model can be a plain string or a profile object with a vision checkbox equivalent, thinking level, and rates. Roles are semantic aliases over direct models or backing tiers:
+Each model can be a plain provider-qualified string or a profile object:
 
 ```json
 {
@@ -53,14 +97,12 @@ Use provider-qualified model ids. Each model can be a plain string or a profile 
     "commit": { "tier": "low", "thinking": "low" },
     "tiny": { "tier": "low", "thinking": "off" }
   },
-  "planner": { "tier": "high", "thinking": "high" },
-  "executor": { "tier": "low", "thinking": "low" },
   "tiers": {
     "high": [
-      { "model": "anthropic/claude-opus-4-5", "vision": true, "thinking": "high", "rate": { "input": 15, "output": 75 } }
+      { "model": "9router/kr/claude-sonnet-4.5", "vision": true, "thinking": "high", "rate": { "input": 0, "output": 0 } }
     ],
     "low": [
-      { "model": "deepseek/deepseek-chat", "vision": false, "thinking": "off", "rate": { "input": 0.27, "output": 1.1 } }
+      { "model": "9router/opencode/free", "vision": false, "thinking": "low", "rate": { "input": 0, "output": 0 } }
     ],
     "uncapable": []
   }
@@ -70,61 +112,31 @@ Use provider-qualified model ids. Each model can be a plain string or a profile 
 Useful commands:
 
 - `/yitec-tiers` — inspect active config.
+- `/yitec-9router` — check native 9Router provider registration and live models.
 - `/yitec-doctor` — validate roles, tiers, provider/model IDs, and trust.
 - `/yitec-agents` — inspect subagent/reviewer role policy.
 - `/yitec-memory` — view local memory/lessons.
 - `/yitec-review <context>` — run advisor-lite review through the reviewer role.
 
-## Model Vault UI
-
-A local web UI is included for editing model profiles. I used the `liquid-glass-frontend` skill direction: frosted glass panels, atmospheric gradient mesh, editorial hero type, and non-generic dashboard composition.
-
-```bash
-node vault/server.js
-```
-
-Default port is `7979`. Open the printed `http://127.0.0.1:7979/?token=...` URL. The UI lets you add/edit:
-
-- model id
-- high/low/uncapable tier
-- semantic roles and fallback chains
-- magic keyword, memory, and advisor toggles
-- vision capability checkbox
-- thinking level
-- input/output rates and sample cost estimate
-- config doctor output
-- OpenAI provider API key or environment reference in `models.json`
-
-Personal vault note: this is designed for your local machine/server. You may store your own raw API key if you want, but keep the service private behind Cloudflare Access/Tunnel, protect the token URL, and never commit `~/.pi/agent/models.json`. For ChatGPT/OpenAI subscription OAuth, use Pi's native `/login openai`; this vault handles model/provider config and API-key style credentials.
-
-### Docker
-
-```bash
-docker compose up -d --build
-```
-
-The compose file binds the vault to localhost only:
-
-```text
-127.0.0.1:7979 -> container:7979
-```
-
-Point Cloudflare Tunnel to:
-
-```text
-http://127.0.0.1:7979
-```
-
 ## Behavior
 
-- At each user turn, the router switches the parent harness through semantic roles: planner, executor, reviewer, vision, commit, tiny, and subagent.
-- `pi-subagents` is configured in `settings.json` so subagents use low-tier models by default.
-- On rate-limit/quota/session-limit style errors, the router marks the failed model, applies a cooldown, switches to the next role fallback/high-tier candidate, and queues an automatic retry.
+- RedPi switches turns through semantic roles: planner, executor, reviewer, vision, commit, tiny, and subagent.
+- On rate-limit/quota/session-limit errors, it marks the failed model, applies cooldown, switches to the next fallback candidate, and retries.
 - Magic keywords are recognized in prose, not code/path text:
   - `ultrathink` raises thinking for the turn.
   - `orchestrate` nudges parallel low-cost subagent delegation.
-  - `cheap` or `lowcost` routes the turn through the executor role.
-- If an image is attached, the router switches to a configured vision model. If a text-only model needs a one-off image task, it can call `yitec_vision_task`.
-- Memory-lite reads/writes `memory.md` and `lessons.md` under trusted project `.pi/yitec/` or global `~/.pi/agent/yitec/`. The `yitec_remember` tool appends durable lessons.
-- Advisor-lite uses `WATCHDOG.md` from `~/.pi/agent/WATCHDOG.md`, `.pi/WATCHDOG.md`, or `.pi/yitec/WATCHDOG.md` for reviewer-only guidance. Run `/yitec-review` manually, or set `advisor.autoReview` for automatic follow-up review.
-- Matt Pocock skills are visible in Pi's skill list and can be forced with `/skill:name`; their descriptions also let Pi auto-select them when relevant.
+  - `cheap` or `lowcost` routes through the executor role.
+- Image turns route to configured vision models; `yitec_vision_task` is available for one-off image analysis.
+- Memory-lite reads/writes `memory.md` and `lessons.md` under trusted project `.pi/yitec/` or global `~/.pi/agent/yitec/`.
+- Advisor-lite reads `WATCHDOG.md` from `~/.pi/agent/WATCHDOG.md`, `.pi/WATCHDOG.md`, or `.pi/yitec/WATCHDOG.md`.
+- Matt Pocock skills are available automatically and can also be forced with `/skill:name`.
+
+## Smoke test
+
+```bash
+npm run smoke
+```
+
+## Security
+
+RedPi has no server-side vault. Keep credentials in environment variables, Pi native `/login`, or your local Pi config. Never commit `.env`, `models.json`, API keys, or OAuth tokens.
