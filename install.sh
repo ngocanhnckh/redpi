@@ -18,10 +18,18 @@ need_cmd npm
 need_cmd git
 need_cmd curl
 
-if ! command -v pi >/dev/null 2>&1; then
-  echo "Installing pi coding agent..."
-  npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+PI_NPM_PREFIX=""
+if command -v pi >/dev/null 2>&1; then
+  PI_BIN="$(command -v pi)"
+  if [ "${PI_BIN#"$HOME/.local/bin/"}" != "$PI_BIN" ]; then PI_NPM_PREFIX="--prefix=$HOME/.local"; fi
 fi
+
+echo "Installing/updating Pi coding agent to avoid mixed dependency versions..."
+# A partial Pi upgrade can leave @earendil-works/pi-ai files out of sync and cause
+# ESM errors like: simple-options.js does not provide clampThinkingBudgetToAnswerRoom.
+# Force reinstall Pi as a matched package set before installing RedPi.
+npm install -g $PI_NPM_PREFIX --force --ignore-scripts @earendil-works/pi-coding-agent@latest
+hash -r
 
 mkdir -p "$YITEC_DIR" "$AGENT_DIR/vendor"
 

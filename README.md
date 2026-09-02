@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh |
 
 The installer:
 
-- installs Pi if missing
+- installs/updates Pi to avoid mixed dependency versions
 - installs RedPi as a Pi package
 - installs `pi-subagents`
 - installs Matt Pocock skills
@@ -637,6 +637,23 @@ Example Domain
 ---
 
 ## ❓ FAQ
+
+### Why do I see `simple-options.js does not provide an export named clampThinkingBudgetToAnswerRoom`?
+
+That means your local Pi install is internally mismatched: one `@earendil-works/pi-ai` file was upgraded while another stayed old. It is a Pi package dependency issue, not a 9Router key problem.
+
+Repair by reinstalling Pi/RedPi cleanly:
+
+```bash
+npm install -g --prefix "$HOME/.local" --force --ignore-scripts @earendil-works/pi-coding-agent@latest
+curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+```
+
+Then restart:
+
+```bash
+pi
+```
 
 ### Is RedPi a fork of Oh My Pi?
 
