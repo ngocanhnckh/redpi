@@ -36,9 +36,11 @@ mkdir -p "$YITEC_DIR" "$AGENT_DIR/vendor"
 echo "Installing RedPi package: $TEAM_PI_PACKAGE"
 pi install "$TEAM_PI_PACKAGE"
 
-if [ "${REDPI_SKIP_BROWSER_INSTALL:-0}" != "1" ]; then
+if [ "${REDPI_INSTALL_BROWSER:-0}" = "1" ] || [ "${REDPI_FULL_INSTALL:-0}" = "1" ]; then
   echo "Installing Playwright Chromium runtime for RedPi browser automation..."
-  npx -y playwright@1.57.0 install chromium || echo "Playwright browser install failed; you can retry inside Pi with /redpi-setup."
+  npx -y playwright@1.57.0 install chromium || echo "Playwright browser install failed; you can retry inside Pi with /redpi-browser-install."
+else
+  echo "Skipping Playwright Chromium download for fast default install. Install later with /redpi-browser-install or REDPI_FULL_INSTALL=1."
 fi
 
 echo "Installing most-starred subagent extension: pi-subagents (nicobailon/pi-subagents, 3189 GitHub stars at bootstrap authoring time)"

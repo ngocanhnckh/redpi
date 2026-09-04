@@ -432,6 +432,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
+    const ok = !ctx.hasUI || await ctx.ui.confirm("Install RedPi browser runtime?", "This downloads Playwright Chromium. It can take a few minutes but only needs to run once.");
+    if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+  } });
   pi.registerCommand("redpi-setup", { description: "Friendly RedPi setup wizard: 9Router login, browser install, and role config", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-setup needs the interactive TUI. In print mode, set NINE_ROUTER_API_KEY/NINE_ROUTER_BASE_URL and run npm run browser:install.", "error");
     const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
@@ -634,8 +638,19 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const script = join(packageRoot(), "scripts", "redpi-browser.js");
       const args = String(params.command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((s) => s.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
-      const result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
-      const text = (result.stdout || result.stderr || "").trim();
+      let result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+      let text = (result.stdout || result.stderr || "").trim();
+      const missingBrowser = result.status !== 0 && /Playwright is not installed|Executable doesn't exist|playwright install/i.test(text);
+      if (missingBrowser && ctx.hasUI) {
+        const ok = await ctx.ui.confirm("RedPi browser runtime is missing", "Install Playwright Chromium now? This can take a few minutes and only needs to run once.");
+        if (ok) {
+          const install = installBrowserRuntime();
+          result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+          text = `${install}\n\n--- retry result ---\n${(result.stdout || result.stderr || "").trim()}`.trim();
+        }
+      } else if (missingBrowser) {
+        text += "\n\nBrowser runtime is optional. Run /redpi-browser-install in Pi, or reinstall with REDPI_FULL_INSTALL=1.";
+      }
       return { content: [{ type: "text", text }], details: { command: params.command, status: result.status } };
     },
   });

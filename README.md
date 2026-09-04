@@ -94,7 +94,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
 | 🧰 | **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
-| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; no MCP overhead. | Auto-installed |
+| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; no MCP overhead. Browser runtime installs only when requested/needed. | Optional |
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
@@ -119,13 +119,19 @@ The installer:
 - installs Matt Pocock skills
 - installs the liquid-glass frontend skill
 - creates a default model routing config
-- installs Playwright Chromium for browser automation
 - configures Pi skill discovery
+- skips the large Playwright Chromium download by default for a fast install
 
-Skip browser install only if needed:
+Optional full install with browser runtime:
 
 ```bash
-REDPI_SKIP_BROWSER_INSTALL=1 curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+REDPI_FULL_INSTALL=1 curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+```
+
+Or install the browser later inside Pi:
+
+```text
+/redpi-browser-install
 ```
 
 ### 2. Start Pi
@@ -361,7 +367,11 @@ Check live status:
 
 ## 🌐 Browser automation without MCP
 
-RedPi includes Playwright browser automation, but intentionally avoids MCP because MCP can be context-heavy.
+RedPi includes optional Playwright browser automation, but intentionally avoids MCP because MCP can be context-heavy. The default RedPi install does **not** download Chromium, so first install stays fast. When the agent actually needs a browser, `redpi_browser` can prompt to install the runtime, or you can install it explicitly:
+
+```text
+/redpi-browser-install
+```
 
 Instead, RedPi exposes one compact tool:
 
@@ -502,6 +512,7 @@ Enable auto-review in config if desired:
 | 🎯 | `/redpi-config` | TUI role/model configurator. Pick live 9Router models/combos and thinking levels. |
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
+| 🌐 | `/redpi-browser-install` | Install optional Playwright Chromium runtime when browser automation is needed. |
 | ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
 | 🧠 | `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
 | 📊 | `/yitec-tiers` | Print active model role/tier config. |
