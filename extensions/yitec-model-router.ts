@@ -320,9 +320,18 @@ function localNineRouter(): { baseUrl?: string; apiKey?: string } {
   return readJson(NINE_ROUTER_LOCAL_PATH, {});
 }
 
+function normalizeNineRouterBaseUrl(input: string): string {
+  let url = String(input || "").trim();
+  if (!url) return "http://127.0.0.1:20128/v1";
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  url = url.replace(/\/+$/, "");
+  if (!/\/v1$/i.test(url)) url = `${url}/v1`;
+  return url;
+}
+
 function nineRouterBaseUrl(): string {
   const local = localNineRouter();
-  return process.env.NINE_ROUTER_BASE_URL || process.env.ROUTER9_BASE_URL || local.baseUrl || "http://127.0.0.1:20128/v1";
+  return normalizeNineRouterBaseUrl(process.env.NINE_ROUTER_BASE_URL || process.env.ROUTER9_BASE_URL || local.baseUrl || "http://127.0.0.1:20128/v1");
 }
 
 function nineRouterApiKey(): string {
@@ -445,7 +454,7 @@ export default function (pi: ExtensionAPI) {
         const baseUrl = await ctx.ui.input("9Router base URL", current.baseUrl || process.env.NINE_ROUTER_BASE_URL || "https://9router.yitec.dev/v1");
         if (!baseUrl) return;
         const apiKey = await ctx.ui.input("9Router API key", current.apiKey ? "keep-existing" : "paste key here");
-        const next = { baseUrl: baseUrl.replace(/\/$/, ""), apiKey: apiKey === "keep-existing" ? current.apiKey : apiKey };
+        const next = { baseUrl: normalizeNineRouterBaseUrl(baseUrl), apiKey: apiKey === "keep-existing" ? current.apiKey : apiKey };
         mkdirSync(dirname(NINE_ROUTER_LOCAL_PATH), { recursive: true });
         writeFileSync(NINE_ROUTER_LOCAL_PATH, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
         try { chmodSync(NINE_ROUTER_LOCAL_PATH, 0o600); } catch {}
