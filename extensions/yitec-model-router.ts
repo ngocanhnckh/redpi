@@ -133,11 +133,17 @@ function modelOptionMap(models: string[], max = 60) {
 }
 
 function autoConfigFromNineRouter(ids: string[]) {
-  const pick = (...hints: string[]) => ids.find(id => hints.some(h => id.toLowerCase().includes(h))) || ids[0] || "kr/auto";
-  // 9Router teams often publish named combos. Prefer those first.
-  const main = pick("mainagent", "main-agent", "main_agent", "main", "terra", "opus", "sonnet", "gpt", "auto");
-  const sub = pick("subagent", "sub-agent", "sub_agent", "worker", "fast", "mini", "haiku", "free", "auto") || main;
-  const review = pick("review", "reviewer", "critic", "mainagent", "terra", "sonnet") || main;
+  const lower = (s: string) => s.toLowerCase();
+  const exact = (...names: string[]) => ids.find(id => names.some(n => lower(id) === lower(n) || lower(id).endsWith(`/${lower(n)}`)));
+  const contains = (...hints: string[]) => ids.find(id => hints.some(h => lower(id).includes(lower(h))));
+  const avoidInactive = (id?: string) => id && !/^(ClaudeOpus|ClaudeSubAgent)$/i.test(id) ? id : undefined;
+  // 9Router teams often publish named combos. Prefer exact MainAgent/SubAgent,
+  // then tested low-friction Terra/redstone routes. Avoid legacy ClaudeOpus /
+  // ClaudeSubAgent auto-picks because those often depend on user OAuth that may
+  // list but fail at chat time.
+  const main = exact("MainAgent", "main-agent", "main_agent") || contains("redstone-gpt", "gpt-5.6-terra", "terra") || avoidInactive(contains("opus", "sonnet", "gpt", "auto")) || ids[0] || "kr/auto";
+  const sub = exact("SubAgent", "sub-agent", "sub_agent") || contains("lightweight", "fast", "mini", "haiku", "free", "redstone-gpt") || main;
+  const review = contains("review", "reviewer", "critic") || main;
   const high = main;
   const low = sub;
   return {
@@ -444,6 +450,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
     const ok = !ctx.hasUI || await ctx.ui.confirm("Install RedPi browser runtime?", "This downloads Playwright Chromium. It can take a few minutes but only needs to run once.");
     if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+  } });
+  pi.registerCommand("redpi-repair-config", { description: "Repair RedPi 9Router role config from live models, avoiding stale/inactive combos", handler: async (_args, ctx) => {
+    const live = await fetchNineRouterModels(ctx.signal);
+    if (!live.length) return ctx.ui.notify(`Could not fetch 9Router models from ${nineRouterBaseUrl()}.`, "error");
+    const ids = live.map((m: any) => m.id).filter(Boolean);
+    const cfg = autoConfigFromNineRouter(ids);
+    const cfgPath = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
+    writeJson(cfgPath, cfg);
+    patchPiDefaults(String((cfg as any).roles.planner.models[0]).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, ""), "high");
+    const summary = ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny"].map(r => `${r}: ${(cfg as any).roles[r]?.models?.[0] || "(none)"}`).join("\n");
+    ctx.ui.notify(`Repaired RedPi config in ${cfgPath}\n\n${summary}\n\nRestart Pi or run /reload.`, "info");
   } });
   pi.registerCommand("redpi-setup", { description: "Friendly RedPi setup wizard: 9Router login, browser install, and role config", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-setup needs the interactive TUI. In print mode, set NINE_ROUTER_API_KEY/NINE_ROUTER_BASE_URL and run npm run browser:install.", "error");
