@@ -72,8 +72,30 @@ const REDPI_BANNER_FULL = [
   "╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝     ╚═╝",
   "powered by YITEC",
 ];
-const REDPI_BANNER_COMPACT = ["RedPi · powered by YITEC"];
-function redpiBanner() { return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : REDPI_BANNER_COMPACT; }
+const RED = "\x1b[38;5;203m";
+const PINK = "\x1b[38;5;213m";
+const GOLD = "\x1b[38;5;220m";
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+const REDPI_BANNER_COMPACT = [`${RED}RedPi${RESET} ${DIM}·${RESET} ${GOLD}powered by YITEC${RESET}`];
+function redpiBanner() {
+  if (process.env.REDPI_COLOR === "0") return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : ["RedPi · powered by YITEC"];
+  return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL.map((l, i) => i < 6 ? `${RED}${l}${RESET}` : `${GOLD}${l}${RESET}`) : REDPI_BANNER_COMPACT;
+}
+function collectStrings(v: any, out: string[] = []): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) for (const x of v) collectStrings(x, out);
+  else if (v && typeof v === "object") for (const x of Object.values(v)) collectStrings(x, out);
+  return out;
+}
+function contextBar(used: number, total?: number) {
+  if (!total || total <= 0) return `${used.toLocaleString()} tok`;
+  const pct = Math.min(1, used / total);
+  const width = 18;
+  const filled = Math.max(0, Math.min(width, Math.round(pct * width)));
+  const bar = `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
+  return `${bar} ${used.toLocaleString()}/${Math.round(total / 1000)}k ${Math.round(pct * 100)}%`;
+}
 
 function readJson(path: string, fallback: any) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return fallback; }
@@ -577,10 +599,23 @@ export default function (pi: ExtensionAPI) {
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
     const high = cfg.tiers?.[cfg.planner?.tier ?? "high"] ?? [];
-    ctx.ui.setStatus("redpi", `tiers high:${high.length} low:${low.length}`);
+    ctx.ui.setStatus("redpi", `RedPi high:${high.length} low:${low.length}`);
+    ctx.ui.setStatus("redpi-ctx", "ctx waiting");
     if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget("redpi-banner", redpiBanner());
     const updateResult = updateRedPi(cfg, false);
     if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
+  });
+
+  pi.on("before_provider_request", async (event: any, ctx: any) => {
+    const strings = collectStrings(event.payload || {});
+    const approxTokens = Math.ceil(strings.reduce((n, s) => n + s.length, 0) / 4);
+    const total = ctx.model?.contextWindow || ctx.model?.context_window || ctx.model?.context || undefined;
+    const label = contextBar(approxTokens, total);
+    const color = total && approxTokens / total > 0.8 ? RED : total && approxTokens / total > 0.5 ? GOLD : PINK;
+    ctx.ui.setStatus("redpi-ctx", `ctx ${label}`);
+    if (ctx.hasUI && ctx.mode === "tui" && process.env.REDPI_CONTEXT_WIDGET === "1") {
+      ctx.ui.setWidget("redpi-context", [`${color}Context${RESET} ${label}`, `${DIM}${ctx.model?.provider || ""}/${ctx.model?.id || ""}${RESET}`]);
+    }
   });
 
   pi.on("input", async (event) => {

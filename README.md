@@ -98,6 +98,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
+| 📊 | **Context display bar** | Shows approximate context usage in the Pi status bar during requests. | Automatic |
 | ⬆️ | **Auto-update** | Checks harness and skill repos on session start. | None |
 | 🔐 | **Public-safe** | No vault, no bundled secrets, no committed credentials. | Safer by default |
 
@@ -502,6 +503,28 @@ Enable auto-review in config if desired:
 ```
 
 ---
+
+## 🎨 Visuals and context bar
+
+RedPi keeps the TUI compact by default:
+
+```text
+RedPi · powered by YITEC
+```
+
+It also shows a context status indicator during model requests:
+
+```text
+ctx █████░░░░░░░░░░░░░ 32,100/200k 16%
+```
+
+Optional display flags:
+
+```bash
+REDPI_FULL_BANNER=1 pi      # full ASCII logo in TUI
+REDPI_COLOR=0 pi            # disable ANSI color in RedPi widgets
+REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
+```
 
 ## ⌨️ Commands
 
