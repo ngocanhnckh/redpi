@@ -18,7 +18,7 @@ const STATE_PATH = path.join(STATE_DIR, 'state.json');
 const DEFAULT_TIMEOUT = Number(process.env.REDPI_BROWSER_TIMEOUT || 15000);
 
 function usage(code = 0) {
-  console.log(`RedPi browser CLI\n\nCommands:\n  goto <url> [--max N]\n  text [--max N]\n  html [--max N]\n  title\n  click <selector> [--max N]\n  type <selector> <text> [--submit] [--max N]\n  eval <javascript> [--max N]\n  screenshot <path>\n  reset\n\nSelectors use Playwright syntax: text=Login, role=button[name="Save"], css selectors, etc.\nOutput is intentionally compact for token efficiency.`);
+  console.log(`RedPi browser CLI\n\nCommands:\n  goto <url> [--max N]\n  text [--max N]\n  html [--max N]\n  title\n  click <selector> [--max N]\n  type <selector> <text> [--submit] [--max N]\n  eval <javascript> [--max N]\n  wait-for-text <text> [--max N]\n  console [--max N]\n  errors [--max N]\n  network [--max N]\n  screenshot <path>\n  reset\n\nSelectors use Playwright syntax: text=Login, role=button[name="Save"], css selectors, etc.\nOutput is intentionally compact for token efficiency.`);
   process.exit(code);
 }
 function parse(argv) {
@@ -39,6 +39,15 @@ function clip(s, max) {
 }
 function readState() { try { return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')); } catch { return {}; } }
 function writeState(v) { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(STATE_PATH, JSON.stringify(v, null, 2) + '\n'); }
+function pushLog(state, key, value, limit = 120) {
+  state[key] = Array.isArray(state[key]) ? state[key] : [];
+  state[key].push({ at: new Date().toISOString(), ...value });
+  if (state[key].length > limit) state[key] = state[key].slice(-limit);
+}
+function formatLogs(items, max) {
+  if (!items?.length) return 'none';
+  return clip(items.map((x, i) => `${i + 1}. ${x.at || ''} ${x.type || x.status || ''} ${x.url || ''}\n${x.text || x.error || x.method || ''}`).join('\n\n'), max);
+}
 async function getPlaywright() {
   try { return require('playwright'); }
   catch (e) {
@@ -59,6 +68,10 @@ async function withPage(fn) {
   try {
     const page = ctx.pages()[0] || await ctx.newPage();
     page.setDefaultTimeout(DEFAULT_TIMEOUT);
+    page.on('console', msg => pushLog(state, 'console', { type: msg.type(), text: msg.text(), url: page.url() }));
+    page.on('pageerror', err => pushLog(state, 'errors', { type: 'pageerror', error: err.message, url: page.url() }));
+    page.on('requestfailed', req => pushLog(state, 'network', { type: 'failed', method: req.method(), url: req.url(), error: req.failure()?.errorText || 'request failed' }));
+    page.on('response', res => { if (res.status() >= 400) pushLog(state, 'network', { type: 'http', status: res.status(), url: res.url(), text: res.statusText() }); });
     if (state.url && page.url() === 'about:blank') await page.goto(state.url, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT }).catch(() => {});
     const result = await fn(page, state);
     state.url = page.url();
@@ -82,7 +95,7 @@ function pageSummary(page, max) {
   if (cmd === 'reset') { fs.rmSync(STATE_DIR, { recursive: true, force: true }); console.log('reset ok'); return; }
   if (cmd === 'goto') {
     const url = args[0]; if (!url) usage(1);
-    console.log(await withPage(async page => { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT }); return pageSummary(page, opts.max); })); return;
+    console.log(await withPage(async (page, state) => { state.console = []; state.errors = []; state.network = []; await page.goto(url, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT }); return pageSummary(page, opts.max); })); return;
   }
   if (cmd === 'text') { console.log(await withPage(page => pageSummary(page, opts.max))); return; }
   if (cmd === 'html') { console.log(await withPage(async page => clip(`url: ${page.url()}\n\n${await page.content()}`, opts.max))); return; }
@@ -99,6 +112,13 @@ function pageSummary(page, max) {
     const js = args.join(' '); if (!js) usage(1);
     console.log(await withPage(async page => clip(JSON.stringify(await page.evaluate(js), null, 2), opts.max))); return;
   }
+  if (cmd === 'wait-for-text') {
+    const text = args.join(' '); if (!text) usage(1);
+    console.log(await withPage(async page => { await page.getByText(text, { exact: false }).first().waitFor({ timeout: DEFAULT_TIMEOUT }); return pageSummary(page, opts.max); })); return;
+  }
+  if (cmd === 'console') { const state = readState(); console.log(formatLogs(state.console || [], opts.max)); return; }
+  if (cmd === 'network') { const state = readState(); console.log(formatLogs(state.network || [], opts.max)); return; }
+  if (cmd === 'errors') { const state = readState(); const errors = [...(state.errors || []), ...(state.console || []).filter(x => ['error','warning'].includes(x.type)), ...(state.network || [])]; console.log(formatLogs(errors, opts.max)); return; }
   if (cmd === 'screenshot') {
     const out = path.resolve(args[0] || path.join(STATE_DIR, `screenshot-${Date.now()}.png`));
     await withPage(async page => { await page.screenshot({ path: out, fullPage: true }); return ''; });

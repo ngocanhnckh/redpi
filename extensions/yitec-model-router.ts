@@ -61,7 +61,7 @@ const DEFAULT_CONFIG: Required<Config> = {
 
 type LoadedConfig = Config & { __path?: string; __projectTrusted?: boolean };
 
-type TurnMagic = { ultrathink?: boolean; orchestrate?: boolean; cheap?: boolean };
+type TurnMagic = { ultrathink?: boolean; orchestrate?: boolean; cheap?: boolean; pixelperfect?: boolean; responsive?: boolean; a11y?: boolean; screenshot?: boolean };
 
 const REDPI_BANNER_FULL = [
   "██████╗ ███████╗██████╗ ██████╗ ██╗",
@@ -297,6 +297,10 @@ function magicInstruction(m: TurnMagic): string {
   if (m.ultrathink) lines.push("- ultrathink: reason carefully, enumerate failure modes, and use the highest useful thinking effort for this turn.");
   if (m.orchestrate) lines.push("- orchestrate: split independent research/review/execution across available low-cost subagents where useful, then synthesize and verify.");
   if (m.cheap) lines.push("- cheap/lowcost: prefer the low-tier executor/subagent role unless the task clearly needs high-tier planning.");
+  if (m.pixelperfect) lines.push("- pixelperfect: use browser screenshots/text/console when available; verify visual spacing, alignment, overflow, and before/after behavior.");
+  if (m.responsive) lines.push("- responsive: verify mobile/tablet/desktop layout concerns and avoid desktop-only fixes.");
+  if (m.a11y) lines.push("- a11y: check labels, keyboard flow, contrast, semantic roles, focus states, and error messaging.");
+  if (m.screenshot) lines.push("- screenshot: use redpi_browser screenshot or frontend-check when a live URL/dev server is available.");
   return lines.length ? `\n\nYitec magic keyword policy for this turn:\n${lines.join("\n")}` : "";
 }
 function memoryPaths(cwd: string, projectTrusted = false): string[] {
@@ -319,6 +323,15 @@ function watchdogText(cwd: string, projectTrusted = false): string {
     join(AGENT_DIR, "WATCHDOG.md"),
     ...(projectTrusted ? [join(cwd, CONFIG_DIR_NAME, "WATCHDOG.md"), join(cwd, CONFIG_DIR_NAME, "yitec", "WATCHDOG.md")] : []),
   ], 6000);
+}
+function designText(cwd: string, projectTrusted = false): string {
+  return readCapped([
+    join(USER_YITEC_DIR, "design.md"),
+    ...(projectTrusted ? [join(cwd, CONFIG_DIR_NAME, "yitec", "design.md")] : []),
+  ], 5000);
+}
+function looksFrontendTask(text: string): boolean {
+  return /\b(ui|ux|frontend|front-end|css|tailwind|responsive|mobile|layout|component|landing|dashboard|pixel|screenshot|browser|a11y|accessibility|storybook|shadcn|react|nextjs|next\.js|vite)\b/i.test(text);
 }
 function doctor(cfg: LoadedConfig, ctx: ExtensionContext): string {
   const problems: string[] = [];
@@ -472,6 +485,23 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
     const ok = !ctx.hasUI || await ctx.ui.confirm("Install RedPi browser runtime?", "This downloads Playwright Chromium. It can take a few minutes but only needs to run once.");
     if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+  } });
+  pi.registerCommand("redpi-frontend-check", { description: "Run a compact browser frontend check: page text, console/errors, network failures, optional screenshot", handler: async (args, ctx) => {
+    const url = (args || await (ctx.hasUI ? ctx.ui.input("Frontend URL", "http://localhost:3000") : undefined) || "").trim();
+    if (!url) return ctx.ui.notify("Usage: /redpi-frontend-check http://localhost:3000", "error");
+    const script = join(packageRoot(), "scripts", "redpi-browser.js");
+    const runBrowser = (cmd: string[]) => spawnSync("node", [script, ...cmd], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+    let goto = runBrowser(["goto", url, "--max", "1800"]);
+    let out = (goto.stdout || goto.stderr || "").trim();
+    if (goto.status !== 0 && /Playwright is not installed|Executable doesn't exist|playwright install/i.test(out) && ctx.hasUI) {
+      const ok = await ctx.ui.confirm("RedPi browser runtime is missing", "Install Playwright Chromium now? This can take a few minutes and only needs to run once.");
+      if (ok) { installBrowserRuntime(); goto = runBrowser(["goto", url, "--max", "1800"]); out = (goto.stdout || goto.stderr || "").trim(); }
+    }
+    const errors = (runBrowser(["errors", "--max", "2500"]).stdout || "").trim();
+    const shotPath = join(ctx.cwd, CONFIG_DIR_NAME, "yitec", `frontend-${Date.now()}.png`);
+    mkdirSync(dirname(shotPath), { recursive: true });
+    const shot = (runBrowser(["screenshot", shotPath]).stdout || "").trim();
+    ctx.ui.notify(`Frontend check: ${url}\n\nPage:\n${out}\n\nErrors/Network:\n${errors || "none"}\n\n${shot}`, "info");
   } });
   pi.registerCommand("redpi-repair-config", { description: "Repair RedPi 9Router role config from live models, avoiding stale/inactive combos", handler: async (_args, ctx) => {
     const live = await fetchNineRouterModels(ctx.signal);
@@ -630,6 +660,10 @@ export default function (pi: ExtensionAPI) {
         ultrathink: cfg.magicKeywords?.ultrathink !== false && hasKeyword(event.text, "ultrathink"),
         orchestrate: cfg.magicKeywords?.orchestrate !== false && hasKeyword(event.text, "orchestrate"),
         cheap: cfg.magicKeywords?.cheap !== false && (hasKeyword(event.text, "cheap") || hasKeyword(event.text, "lowcost")),
+        pixelperfect: hasKeyword(event.text, "pixelperfect") || hasKeyword(event.text, "pixel-perfect"),
+        responsive: hasKeyword(event.text, "responsive"),
+        a11y: hasKeyword(event.text, "a11y") || hasKeyword(event.text, "accessibility"),
+        screenshot: hasKeyword(event.text, "screenshot"),
       };
     }
     const extra = magicInstruction(turnMagic);
@@ -649,7 +683,8 @@ export default function (pi: ExtensionAPI) {
     }
     const mem = cfg.memory?.enabled === false ? "" : readCapped(memoryPaths(ctx.cwd, ctx.isProjectTrusted()), cfg.memory?.injectionCharLimit ?? 5000);
     const watch = watchdogText(ctx.cwd, ctx.isProjectTrusted());
-    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. Prefer installed subagents for cheap/parallel delegation. On image-only gaps use yitec_vision_task. Magic-keyword instructions, if present, apply only to this turn.${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
+    const design = looksFrontendTask(currentUserPrompt) || turnMagic.pixelperfect || turnMagic.responsive || turnMagic.a11y || turnMagic.screenshot ? designText(ctx.cwd, ctx.isProjectTrusted()) : "";
+    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. Prefer installed subagents for cheap/parallel delegation. On image-only gaps use yitec_vision_task. For frontend/browser tasks, use redpi_browser or /redpi-frontend-check to inspect text, screenshots, console errors, and network failures when useful. Magic-keyword instructions, if present, apply only to this turn.${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${design ? `\n\nYitec Frontend Design Guidance (heuristic, verify against repo):\n${design}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -692,7 +727,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "redpi_browser",
     label: "RedPi Browser CLI",
-    description: "Token-efficient Playwright browser automation through the RedPi CLI. Use compact commands like: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, screenshot <path>, reset.",
+    description: "Token-efficient Playwright browser automation through the RedPi CLI. Use compact commands like: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, console, errors, network, wait-for-text <text>, screenshot <path>, reset.",
     promptSnippet: "Run compact Playwright browser commands without MCP context bloat",
     promptGuidelines: ["Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters."],
     parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto https://example.com --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `screenshot /tmp/page.png`, or `reset`." }) }),

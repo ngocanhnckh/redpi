@@ -94,7 +94,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
 | 🧰 | **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
-| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; no MCP overhead. Browser runtime installs only when requested/needed. | Optional |
+| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Browser runtime installs only when requested/needed. | Optional |
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
@@ -387,10 +387,22 @@ goto https://example.com --max 2000
 text --max 3000
 click text=Login
 type input[name=q] "redpi 9router" --submit
+wait-for-text "Dashboard loaded" --max 2000
+console --max 3000
+errors --max 3000
+network --max 3000
 html --max 2000
 screenshot /tmp/redpi-page.png
 reset
 ```
+
+Frontend shortcut:
+
+```text
+/redpi-frontend-check http://localhost:3000
+```
+
+It opens the URL, captures page text, console errors, failed/4xx/5xx network responses, and saves a screenshot under `.pi/yitec/`.
 
 Why this is efficient:
 
@@ -536,6 +548,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 🌐 | `/redpi-browser-install` | Install optional Playwright Chromium runtime when browser automation is needed. |
+| 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
 | ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
 | 🧠 | `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
 | 📊 | `/yitec-tiers` | Print active model role/tier config. |
