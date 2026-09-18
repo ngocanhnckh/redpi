@@ -78,12 +78,15 @@ const REDPI_BANNER_FULL = [
 const MATRIX = "\x1b[38;5;46m";
 const MATRIX_BRIGHT = "\x1b[38;5;82m";
 const CYAN = "\x1b[38;5;51m";
+const RED_SIGNAL = "\x1b[38;5;196m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
-const REDPI_BANNER_COMPACT = [`${MATRIX_BRIGHT}◢ RedPi${RESET} ${DIM}//${RESET} ${CYAN}YITEC SYSTEMS ONLINE${RESET}`];
+const REDPI_BANNER_COMPACT = [`${MATRIX_BRIGHT}◢ ${RED_SIGNAL}Red${MATRIX_BRIGHT}Pi${RESET} ${DIM}//${RESET} ${CYAN}YITEC SYSTEMS ONLINE${RESET}`];
 function redpiBanner() {
   if (process.env.REDPI_COLOR === "0") return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : ["RedPi // YITEC SYSTEMS ONLINE"];
-  return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL.map((l, i) => i < 6 ? `${MATRIX_BRIGHT}${l}${RESET}` : `${CYAN}${l}${RESET}`) : REDPI_BANNER_COMPACT;
+  return process.env.REDPI_FULL_BANNER === "1"
+    ? REDPI_BANNER_FULL.map((line, i) => i < 6 ? `${RED_SIGNAL}${line.slice(0, 25)}${MATRIX_BRIGHT}${line.slice(25)}${RESET}` : `${CYAN}${line}${RESET}`)
+    : REDPI_BANNER_COMPACT;
 }
 function collectStrings(v: any, out: string[] = []): string[] {
   if (typeof v === "string") out.push(v);
