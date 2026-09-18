@@ -46,6 +46,9 @@ fi
 echo "Installing most-starred subagent extension: pi-subagents (nicobailon/pi-subagents, 3189 GitHub stars at bootstrap authoring time)"
 pi install npm:pi-subagents
 
+echo "Installing Claude Code bridge (optional Claude subscription provider and AskClaude delegation)..."
+pi install npm:pi-claude-bridge
+
 echo "Installing Matt Pocock skills..."
 if [ -d "$MATT_DIR/.git" ]; then
   git -C "$MATT_DIR" pull --ff-only
@@ -123,4 +126,4 @@ fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
 NODE
 
 echo "Done. Start Pi with: pi"
-echo "Then run /redpi-setup for the friendly TUI wizard: 9Router login, browser install/check, and role model config."
+echo "Then run /redpi-setup for 9Router/browser/models, or /redpi-claude to connect an existing Claude Code subscription."

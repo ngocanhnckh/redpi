@@ -91,6 +91,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | 🧙 | **Friendly setup TUI** | `/redpi-setup` walks through 9Router login, browser install, status, and role config. | One command |
 | 🧠 | **9Router provider** | Registers native provider `9router` with OpenAI-compatible `/v1` API. | Paste URL/key once |
 | 🎯 | **Auto 9Router role config** | Auto-generates planner/executor/reviewer/subagent roles from live `/models`. | Confirm once |
+| ✳️ | **Claude subscription bridge** | Optional [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) provider: use a signed-in Claude Code subscription in Pi. | `/redpi-claude` |
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
 | 🧰 | **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
@@ -117,6 +118,7 @@ The installer:
 - installs/updates Pi to avoid mixed dependency versions
 - installs RedPi as a Pi package
 - installs `pi-subagents`
+- installs `pi-claude-bridge` for optional Claude Code subscription access
 - installs Matt Pocock skills
 - installs the liquid-glass frontend skill
 - creates a default model routing config
@@ -516,6 +518,31 @@ Enable auto-review in config if desired:
 
 ---
 
+## ✳️ Use your Claude Code subscription
+
+RedPi includes [`pi-claude-bridge`](https://github.com/elidickinson/pi-claude-bridge), which uses the official locally signed-in Claude Code CLI via Anthropic's Agent SDK. It does **not** copy, store, or require an Anthropic API key.
+
+1. Sign in once in a normal terminal:
+
+   ```bash
+   claude auth login --claudeai
+   ```
+
+2. Start Pi and run:
+
+   ```text
+   /redpi-claude
+   ```
+
+3. Choose **Use Claude bridge roles** to map primary/planning/review work to Opus and executor/subagent work to Sonnet. Or select a bridge model directly with `/model`:
+
+   ```text
+   claude-bridge/claude-opus-5
+   claude-bridge/claude-sonnet-5
+   ```
+
+`/redpi-claude` can also enable the bridge's optional `AskClaude` delegation tool. The bridge uses your Claude Code subscription quota and its terms; it is independent of 9Router.
+
 ## 🎨 Visuals and context bar
 
 RedPi keeps the TUI compact by default:
@@ -549,6 +576,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 🌐 | `/redpi-browser-install` | Install optional Playwright Chromium runtime when browser automation is needed. |
 | 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
+| ✳️ | `/redpi-claude` | Check/sign in to Claude Code and configure the optional Claude subscription bridge. |
 | ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
 | 🧠 | `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
 | 📊 | `/yitec-tiers` | Print active model role/tier config. |

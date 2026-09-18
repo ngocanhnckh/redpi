@@ -31,6 +31,7 @@ type Config = {
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const USER_YITEC_DIR = join(AGENT_DIR, "yitec");
 const NINE_ROUTER_LOCAL_PATH = join(USER_YITEC_DIR, "9router.local.json");
+const CLAUDE_BRIDGE_CONFIG_PATH = join(AGENT_DIR, "claude-bridge.json");
 const DEFAULT_CONFIG: Required<Config> = {
   planner: { tier: "high", thinking: "high" },
   executor: { tier: "low", thinking: "low" },
@@ -393,6 +394,32 @@ function installBrowserRuntime(): string {
   return lines.join("\n\n");
 }
 
+function claudeAuthStatus(): { installed: boolean; loggedIn: boolean; summary: string } {
+  const result = spawnSync("claude", ["auth", "status"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if (result.error && (result.error as any).code === "ENOENT") return { installed: false, loggedIn: false, summary: "Claude Code CLI is not installed. Install it first: https://docs.anthropic.com/en/docs/claude-code" };
+  const raw = `${result.stdout || ""}${result.stderr || ""}`.trim();
+  try {
+    const auth = JSON.parse(raw);
+    if (auth?.loggedIn) return { installed: true, loggedIn: true, summary: `Signed in to Claude Code as ${auth.email || "your account"}${auth.subscriptionType ? ` (${auth.subscriptionType})` : ""}.` };
+  } catch {}
+  return { installed: true, loggedIn: false, summary: raw || "Claude Code is installed but is not signed in. Run `claude auth login --claudeai` in a normal terminal." };
+}
+
+function claudeBridgeRoleConfig(): any {
+  const main = "claude-bridge/claude-opus-5";
+  const fast = "claude-bridge/claude-sonnet-5";
+  return deepMerge(DEFAULT_CONFIG, { roles: {
+    default: { models: [`${main}:medium`], thinking: "medium" },
+    planner: { models: [`${main}:high`], thinking: "high" },
+    reviewer: { models: [`${main}:high`], thinking: "high" },
+    vision: { models: [`${main}:medium`], thinking: "medium" },
+    executor: { models: [`${fast}:low`], thinking: "low" },
+    subagent: { models: [`${fast}:low`], thinking: "low" },
+    commit: { models: [`${fast}:low`], thinking: "low" },
+    tiny: { models: [`${fast}:off`], thinking: "off" },
+  }});
+}
+
 async function pingNineRouter(signal?: AbortSignal): Promise<string> {
   const live = await fetchNineRouterModels(signal);
   return live.length ? `Connected. ${live.length} models/combos found. Examples: ${live.map((m: any) => m.id).slice(0, 8).join(", ")}` : `Could not fetch /models from ${nineRouterBaseUrl()}. Check URL, key, or whether 9Router is running.`;
@@ -480,6 +507,31 @@ export default function (pi: ExtensionAPI) {
   let cooldownUntil = new Map<string, number>();
   let turnMagic: TurnMagic = {};
 
+  pi.registerCommand("redpi-claude", { description: "Connect RedPi to an existing Claude Code subscription via pi-claude-bridge", handler: async (_args, ctx) => {
+    const status = claudeAuthStatus();
+    if (!ctx.hasUI) return ctx.ui.notify(`${status.summary}\n\n${status.loggedIn ? "Use /model and choose claude-bridge/claude-opus-5 or claude-bridge/claude-sonnet-5." : "Sign in in a normal terminal: claude auth login --claudeai"}`, status.loggedIn ? "info" : "warn");
+    const choice = await ctx.ui.select("RedPi × Claude", [
+      "Check Claude Code sign-in",
+      "Use Claude bridge roles (Opus main, Sonnet subagents)",
+      "Enable AskClaude delegation tool",
+      "Show sign-in instructions",
+      "Done",
+    ]);
+    if (!choice || choice === "Done") return;
+    if (choice === "Check Claude Code sign-in") return ctx.ui.notify(status.summary, status.loggedIn ? "info" : "warn");
+    if (choice === "Show sign-in instructions") return ctx.ui.notify("In a normal terminal, run:\n\nclaude auth login --claudeai\n\nFinish the browser login, restart Pi, then run /redpi-claude again. RedPi never stores your Claude credentials; pi-claude-bridge uses the Claude Code CLI session.", "info");
+    if (!status.loggedIn) return ctx.ui.notify(`${status.summary}\n\nFirst sign in in a normal terminal:\nclaude auth login --claudeai`, "warn");
+    if (choice === "Use Claude bridge roles (Opus main, Sonnet subagents)") {
+      const path = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
+      writeJson(path, claudeBridgeRoleConfig());
+      patchPiDefaults("claude-bridge/claude-opus-5", "high");
+      return ctx.ui.notify(`Saved Claude bridge role mappings to ${path}.\n\nMain/planner/reviewer: claude-bridge/claude-opus-5\nExecutor/subagents: claude-bridge/claude-sonnet-5\n\nRestart Pi or run /reload, then use /model to confirm the provider.`, "info");
+    }
+    const bridge = readJson(CLAUDE_BRIDGE_CONFIG_PATH, {});
+    writeJson(CLAUDE_BRIDGE_CONFIG_PATH, deepMerge(bridge, { askClaude: { enabled: true, allowFullMode: true } }));
+    return ctx.ui.notify(`Enabled AskClaude in ${CLAUDE_BRIDGE_CONFIG_PATH}. Restart Pi or run /reload. AskClaude uses your Claude Code session; use read mode for advice and full mode only when you want Claude to edit/run commands.`, "info");
+  } });
+  pi.registerCommand("yitec-claude", { description: "Alias for /redpi-claude", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-claude", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
@@ -516,7 +568,7 @@ export default function (pi: ExtensionAPI) {
   } });
   pi.registerCommand("redpi-setup", { description: "Friendly RedPi setup wizard: 9Router login, browser install, and role config", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-setup needs the interactive TUI. In print mode, set NINE_ROUTER_API_KEY/NINE_ROUTER_BASE_URL and run npm run browser:install.", "error");
-    const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
+    const choice = await ctx.ui.select("RedPi setup", ["9Router login / connection", "Claude subscription / bridge", "Install Playwright + Chromium", "Configure role models", "Check status", "Done"]);
     if (!choice || choice === "Done") return;
       if (choice === "9Router login / connection") {
         const current = localNineRouter();
@@ -553,6 +605,10 @@ export default function (pi: ExtensionAPI) {
         }
         return;
       }
+      if (choice === "Claude subscription / bridge") {
+        pi.sendUserMessage("/redpi-claude", { deliverAs: "followUp", expandPromptTemplates: true });
+        return;
+      }
       if (choice === "Install Playwright + Chromium") {
         const ok = await ctx.ui.confirm("Install browser runtime?", "This runs npm install and npx playwright install chromium for the RedPi package.");
         if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
@@ -564,7 +620,8 @@ export default function (pi: ExtensionAPI) {
       }
       if (choice === "Check status") {
         const browserOk = spawnSync("node", [join(packageRoot(), "scripts", "redpi-browser.js"), "--help"], { encoding: "utf8", maxBuffer: 1024 * 128 }).status === 0;
-        ctx.ui.notify(`9Router: ${await pingNineRouter(ctx.signal)}\n\nBrowser CLI: ${browserOk ? "installed" : "missing dependencies; choose Install Playwright + Chromium"}\nConfig file: ${NINE_ROUTER_LOCAL_PATH}`, "info");
+        const claude = claudeAuthStatus();
+        ctx.ui.notify(`9Router: ${await pingNineRouter(ctx.signal)}\n\nClaude bridge: ${claude.summary}\n\nBrowser CLI: ${browserOk ? "installed" : "missing dependencies; choose Install Playwright + Chromium"}\nConfig file: ${NINE_ROUTER_LOCAL_PATH}`, "info");
         return;
       }
   } });
