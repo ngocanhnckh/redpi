@@ -385,6 +385,13 @@ function nineRouterApiKeyCommand(): string {
   return `!${process.execPath} ${join(packageRoot(), "scripts", "redpi-9router-key.js")}`;
 }
 
+function nineRouterContextWindow(id: string): number {
+  // 9Router's OpenAI-compatible /models response currently exposes only model IDs.
+  // Keep metadata for its named 1M agent combinations so Pi does not compact them
+  // at the generic discovery fallback (200k) before the router receives a request.
+  return /^(MainAgent|SubAgent)$/i.test(id) ? 1_000_000 : 200_000;
+}
+
 function installBrowserRuntime(): string {
   const root = packageRoot();
   const lines: string[] = [];
@@ -438,7 +445,7 @@ async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
     if (!res.ok) return [];
     const json = (await res.json()) as any;
     const ids = Array.isArray(json?.data) ? json.data.map((m: any) => m?.id).filter(Boolean) : [];
-    return ids.map((id: string) => ({ id, name: `9Router ${id}`, reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
+    return ids.map((id: string) => ({ id, name: `9Router ${id}`, reasoning: true, input: ["text", "image"], contextWindow: nineRouterContextWindow(id), maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
   } catch {
     return [];
   } finally {
@@ -494,6 +501,8 @@ export default function (pi: ExtensionAPI) {
     models: [
       { id: "kr/claude-sonnet-4.5", name: "9Router Kiro Claude Sonnet 4.5", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
       { id: "opencode/free", name: "9Router OpenCode Free", reasoning: true, input: ["text"], contextWindow: 128000, maxTokens: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      { id: "MainAgent", name: "9Router MainAgent (1M context)", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      { id: "SubAgent", name: "9Router SubAgent (1M context)", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
     ],
     async refreshModels(context: any) {
       const models = await fetchNineRouterModels(context?.signal);
