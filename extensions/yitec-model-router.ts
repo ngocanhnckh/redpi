@@ -132,10 +132,14 @@ function patchPiSettings(defaultModel?: string, thinking = "low") {
   const p = join(AGENT_DIR, "settings.json");
   const s = readJson(p, {});
   if (defaultModel) {
-    s.defaultProvider = "9router";
-    s.defaultModel = defaultModel.replace(/^9router\//, "");
+    const full = defaultModel.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+    const slash = full.indexOf("/");
+    s.defaultProvider = slash > 0 ? full.slice(0, slash) : "9router";
+    s.defaultModel = slash > 0 ? full.slice(slash + 1) : full;
     s.defaultThinkingLevel = thinking;
   }
+  // RedPi owns this named theme unless the user explicitly disables automatic theming.
+  if (process.env.REDPI_THEME !== "0") s.theme = process.env.REDPI_THEME || "redpi-matrix";
   s.retry = { ...(s.retry || {}), provider: { ...((s.retry || {}).provider || {}), timeoutMs: Math.max(Number((s.retry || {}).provider?.timeoutMs || 0), 900000), maxRetries: 0, maxRetryDelayMs: 60000 } };
   s.httpIdleTimeoutMs = Math.max(Number(s.httpIdleTimeoutMs || 0), 900000);
   mkdirSync(dirname(p), { recursive: true });

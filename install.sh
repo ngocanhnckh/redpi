@@ -99,6 +99,7 @@ let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
 s.skills = Array.from(new Set([...(s.skills || []), mattSkills, liquidSkill]));
 s.enableSkillCommands = true;
+if (process.env.REDPI_THEME !== '0') s.theme = process.env.REDPI_THEME || 'redpi-matrix';
 s.retry = {
   ...(s.retry || {}),
   provider: {
@@ -125,5 +126,6 @@ fs.mkdirSync(require('path').dirname(settingsPath), { recursive: true });
 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
 NODE
 
+echo "RedPi Matrix theme enabled (set REDPI_THEME=0 during install to preserve another theme)."
 echo "Done. Start Pi with: pi"
 echo "Then run /redpi-setup for 9Router/browser/models, or /redpi-claude to connect an existing Claude Code subscription."

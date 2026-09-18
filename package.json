@@ -19,6 +19,7 @@
   },
   "pi": {
     "extensions": ["./extensions/yitec-model-router.ts"],
-    "prompts": ["./prompts"]
+    "prompts": ["./prompts"],
+    "themes": ["./themes"]
   }
 }

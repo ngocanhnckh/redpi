@@ -545,11 +545,19 @@ RedPi includes [`pi-claude-bridge`](https://github.com/elidickinson/pi-claude-br
 
 ## 🎨 Visuals and context bar
 
-RedPi uses a compact phosphor-green terminal theme by default:
+RedPi ships and selects a complete Pi theme named `redpi-matrix`—not just a colored banner. It replaces the default purple/yellow UI tokens across borders, selection, Markdown, syntax highlighting, tool panels, diffs, thinking levels, and status surfaces with phosphor green, deep green, and signal cyan.
 
 ```text
 ◢ RedPi // YITEC SYSTEMS ONLINE
 ```
+
+Preserve your existing Pi theme during installation with:
+
+```bash
+REDPI_THEME=0 curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+```
+
+Or select a different theme later in `/settings`.
 
 It also shows a context status indicator during model requests:
 
