@@ -534,7 +534,7 @@ RedPi includes [`pi-claude-bridge`](https://github.com/elidickinson/pi-claude-br
    /redpi-claude
    ```
 
-3. Choose **Use Claude bridge roles** to map primary/planning/review work to Opus and executor/subagent work to Sonnet. Or select a bridge model directly with `/model`:
+3. Select **Use Claude subscription: Opus + Sonnet**. To return at any time, run `/redpi-claude` and select **Use 9Router: MainAgent + SubAgent (1M context)**. RedPi snapshots each profile in `~/.pi/agent/yitec/provider-profiles.json`, so your role mappings survive switching. Or select a bridge model directly with `/model`:
 
    ```text
    claude-bridge/claude-opus-5
@@ -545,10 +545,10 @@ RedPi includes [`pi-claude-bridge`](https://github.com/elidickinson/pi-claude-br
 
 ## 🎨 Visuals and context bar
 
-RedPi keeps the TUI compact by default:
+RedPi uses a compact phosphor-green terminal theme by default:
 
 ```text
-RedPi · powered by YITEC
+◢ RedPi // YITEC SYSTEMS ONLINE
 ```
 
 It also shows a context status indicator during model requests:
@@ -576,7 +576,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 🌐 | `/redpi-browser-install` | Install optional Playwright Chromium runtime when browser automation is needed. |
 | 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
-| ✳️ | `/redpi-claude` | Check/sign in to Claude Code and configure the optional Claude subscription bridge. |
+| ✳️ | `/redpi-claude` | Flexibly switch between Claude subscription (Opus/Sonnet) and 9Router MainAgent/SubAgent profiles. |
 | ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
 | 🧠 | `/yitec-9router` | Check 9Router provider, base URL, key presence, and live `/models`. |
 | 📊 | `/yitec-tiers` | Print active model role/tier config. |

@@ -32,6 +32,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "age
 const USER_YITEC_DIR = join(AGENT_DIR, "yitec");
 const NINE_ROUTER_LOCAL_PATH = join(USER_YITEC_DIR, "9router.local.json");
 const CLAUDE_BRIDGE_CONFIG_PATH = join(AGENT_DIR, "claude-bridge.json");
+const PROVIDER_PROFILES_PATH = join(USER_YITEC_DIR, "provider-profiles.json");
 const DEFAULT_CONFIG: Required<Config> = {
   planner: { tier: "high", thinking: "high" },
   executor: { tier: "low", thinking: "low" },
@@ -73,15 +74,16 @@ const REDPI_BANNER_FULL = [
   "╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝     ╚═╝",
   "powered by YITEC",
 ];
-const RED = "\x1b[38;5;203m";
-const PINK = "\x1b[38;5;213m";
-const GOLD = "\x1b[38;5;220m";
+// Matrix-terminal palette: phosphor green, cyan signal, and restrained dim text.
+const MATRIX = "\x1b[38;5;46m";
+const MATRIX_BRIGHT = "\x1b[38;5;82m";
+const CYAN = "\x1b[38;5;51m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
-const REDPI_BANNER_COMPACT = [`${RED}RedPi${RESET} ${DIM}·${RESET} ${GOLD}powered by YITEC${RESET}`];
+const REDPI_BANNER_COMPACT = [`${MATRIX_BRIGHT}◢ RedPi${RESET} ${DIM}//${RESET} ${CYAN}YITEC SYSTEMS ONLINE${RESET}`];
 function redpiBanner() {
-  if (process.env.REDPI_COLOR === "0") return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : ["RedPi · powered by YITEC"];
-  return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL.map((l, i) => i < 6 ? `${RED}${l}${RESET}` : `${GOLD}${l}${RESET}`) : REDPI_BANNER_COMPACT;
+  if (process.env.REDPI_COLOR === "0") return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL : ["RedPi // YITEC SYSTEMS ONLINE"];
+  return process.env.REDPI_FULL_BANNER === "1" ? REDPI_BANNER_FULL.map((l, i) => i < 6 ? `${MATRIX_BRIGHT}${l}${RESET}` : `${CYAN}${l}${RESET}`) : REDPI_BANNER_COMPACT;
 }
 function collectStrings(v: any, out: string[] = []): string[] {
   if (typeof v === "string") out.push(v);
@@ -427,6 +429,47 @@ function claudeBridgeRoleConfig(): any {
   }});
 }
 
+function mainAgentRoleConfig(): any {
+  const main = "9router/MainAgent";
+  const fast = "9router/SubAgent";
+  return deepMerge(DEFAULT_CONFIG, { roles: {
+    default: { models: [`${main}:medium`], thinking: "medium" },
+    planner: { models: [`${main}:high`], thinking: "high" },
+    reviewer: { models: [`${main}:high`], thinking: "high" },
+    vision: { models: [`${main}:medium`], thinking: "medium" },
+    executor: { models: [`${fast}:low`], thinking: "low" },
+    subagent: { models: [`${fast}:low`], thinking: "low" },
+    commit: { models: [`${fast}:low`], thinking: "low" },
+    tiny: { models: [`${fast}:off`], thinking: "off" },
+  }, tiers: {
+    high: [{ model: main, vision: true, thinking: "high", rate: { input: 0, output: 0 } }],
+    low: [{ model: fast, vision: true, thinking: "low", rate: { input: 0, output: 0 } }],
+  }, retry: { fallbackChains: { planner: [`${main}:high`], executor: [`${fast}:low`], reviewer: [`${main}:high`] } }});
+}
+
+function profileModeFromConfig(cfg: any): "router" | "claude" {
+  const main = String(cfg?.roles?.planner?.models?.[0] || cfg?.roles?.default?.models?.[0] || "");
+  return main.startsWith("claude-bridge/") ? "claude" : "router";
+}
+
+function switchProviderProfile(cwd: string, trusted: boolean, mode: "router" | "claude"): string {
+  const configPath = configWritePath(cwd, trusted, "global");
+  const current = readJson(configPath, {});
+  const profiles = readJson(PROVIDER_PROFILES_PATH, {});
+  const active = profiles.active === "claude" || profiles.active === "router" ? profiles.active : profileModeFromConfig(current);
+  // Snapshot every active profile before changing it, so role customizations survive switches.
+  profiles[active] = current;
+  if (!profiles.router) profiles.router = mainAgentRoleConfig();
+  if (!profiles.claude) profiles.claude = claudeBridgeRoleConfig();
+  writeJson(configPath, profiles[mode]);
+  profiles.active = mode;
+  writeJson(PROVIDER_PROFILES_PATH, profiles);
+  if (mode === "claude") patchPiDefaults("claude-bridge/claude-opus-5", "high");
+  else patchPiDefaults("9router/MainAgent", "high");
+  const label = mode === "claude" ? "Claude bridge (Opus main, Sonnet subagents)" : "9Router (MainAgent main, SubAgent subagents)";
+  return `Switched RedPi to ${label}.\n\nActive roles: ${configPath}\nSaved profiles: ${PROVIDER_PROFILES_PATH}\n\nRestart Pi or run /reload to apply the provider/model default.`;
+}
+
 async function pingNineRouter(signal?: AbortSignal): Promise<string> {
   const live = await fetchNineRouterModels(signal);
   return live.length ? `Connected. ${live.length} models/combos found. Examples: ${live.map((m: any) => m.id).slice(0, 8).join(", ")}` : `Could not fetch /models from ${nineRouterBaseUrl()}. Check URL, key, or whether 9Router is running.`;
@@ -516,12 +559,14 @@ export default function (pi: ExtensionAPI) {
   let cooldownUntil = new Map<string, number>();
   let turnMagic: TurnMagic = {};
 
-  pi.registerCommand("redpi-claude", { description: "Connect RedPi to an existing Claude Code subscription via pi-claude-bridge", handler: async (_args, ctx) => {
+  pi.registerCommand("redpi-claude", { description: "Switch RedPi between Claude Code subscription and 9Router MainAgent/SubAgent profiles", handler: async (_args, ctx) => {
     const status = claudeAuthStatus();
-    if (!ctx.hasUI) return ctx.ui.notify(`${status.summary}\n\n${status.loggedIn ? "Use /model and choose claude-bridge/claude-opus-5 or claude-bridge/claude-sonnet-5." : "Sign in in a normal terminal: claude auth login --claudeai"}`, status.loggedIn ? "info" : "warn");
-    const choice = await ctx.ui.select("RedPi × Claude", [
+    const active = profileModeFromConfig(loadConfig(ctx.cwd, ctx.isProjectTrusted()));
+    if (!ctx.hasUI) return ctx.ui.notify(`${status.summary}\n\nActive RedPi profile: ${active}.\n\nUse /redpi-claude in the interactive TUI to switch profiles.`, status.loggedIn ? "info" : "warn");
+    const choice = await ctx.ui.select(`RedPi provider profile (active: ${active})`, [
+      "Use 9Router: MainAgent + SubAgent (1M context)",
+      "Use Claude subscription: Opus + Sonnet",
       "Check Claude Code sign-in",
-      "Use Claude bridge roles (Opus main, Sonnet subagents)",
       "Enable AskClaude delegation tool",
       "Show sign-in instructions",
       "Done",
@@ -529,13 +574,9 @@ export default function (pi: ExtensionAPI) {
     if (!choice || choice === "Done") return;
     if (choice === "Check Claude Code sign-in") return ctx.ui.notify(status.summary, status.loggedIn ? "info" : "warn");
     if (choice === "Show sign-in instructions") return ctx.ui.notify("In a normal terminal, run:\n\nclaude auth login --claudeai\n\nFinish the browser login, restart Pi, then run /redpi-claude again. RedPi never stores your Claude credentials; pi-claude-bridge uses the Claude Code CLI session.", "info");
+    if (choice === "Use 9Router: MainAgent + SubAgent (1M context)") return ctx.ui.notify(switchProviderProfile(ctx.cwd, ctx.isProjectTrusted(), "router"), "info");
     if (!status.loggedIn) return ctx.ui.notify(`${status.summary}\n\nFirst sign in in a normal terminal:\nclaude auth login --claudeai`, "warn");
-    if (choice === "Use Claude bridge roles (Opus main, Sonnet subagents)") {
-      const path = configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global");
-      writeJson(path, claudeBridgeRoleConfig());
-      patchPiDefaults("claude-bridge/claude-opus-5", "high");
-      return ctx.ui.notify(`Saved Claude bridge role mappings to ${path}.\n\nMain/planner/reviewer: claude-bridge/claude-opus-5\nExecutor/subagents: claude-bridge/claude-sonnet-5\n\nRestart Pi or run /reload, then use /model to confirm the provider.`, "info");
-    }
+    if (choice === "Use Claude subscription: Opus + Sonnet") return ctx.ui.notify(switchProviderProfile(ctx.cwd, ctx.isProjectTrusted(), "claude"), "info");
     const bridge = readJson(CLAUDE_BRIDGE_CONFIG_PATH, {});
     writeJson(CLAUDE_BRIDGE_CONFIG_PATH, deepMerge(bridge, { askClaude: { enabled: true, allowFullMode: true } }));
     return ctx.ui.notify(`Enabled AskClaude in ${CLAUDE_BRIDGE_CONFIG_PATH}. Restart Pi or run /reload. AskClaude uses your Claude Code session; use read mode for advice and full mode only when you want Claude to edit/run commands.`, "info");
@@ -707,7 +748,7 @@ export default function (pi: ExtensionAPI) {
     const approxTokens = Math.ceil(strings.reduce((n, s) => n + s.length, 0) / 4);
     const total = ctx.model?.contextWindow || ctx.model?.context_window || ctx.model?.context || undefined;
     const label = contextBar(approxTokens, total);
-    const color = total && approxTokens / total > 0.8 ? RED : total && approxTokens / total > 0.5 ? GOLD : PINK;
+    const color = total && approxTokens / total > 0.8 ? "\x1b[38;5;196m" : total && approxTokens / total > 0.5 ? "\x1b[38;5;226m" : MATRIX_BRIGHT;
     ctx.ui.setStatus("redpi-ctx", `ctx ${label}`);
     if (ctx.hasUI && ctx.mode === "tui" && process.env.REDPI_CONTEXT_WIDGET === "1") {
       ctx.ui.setWidget("redpi-context", [`${color}Context${RESET} ${label}`, `${DIM}${ctx.model?.provider || ""}/${ctx.model?.id || ""}${RESET}`]);
