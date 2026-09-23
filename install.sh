@@ -36,11 +36,18 @@ mkdir -p "$YITEC_DIR" "$AGENT_DIR/vendor"
 echo "Installing RedPi package: $TEAM_PI_PACKAGE"
 pi install "$TEAM_PI_PACKAGE"
 
-if [ "${REDPI_INSTALL_BROWSER:-0}" = "1" ] || [ "${REDPI_FULL_INSTALL:-0}" = "1" ]; then
-  echo "Installing Playwright Chromium runtime for RedPi browser automation..."
-  npx -y playwright@1.57.0 install chromium || echo "Playwright browser install failed; you can retry inside Pi with /redpi-browser-install."
+# pi install places git packages under $AGENT_DIR/git/<host>/<owner>/<repo>.
+REDPI_ROOT="$AGENT_DIR/git/${TEAM_PI_PACKAGE#git:}"
+if [ "${REDPI_SKIP_BROWSER:-0}" = "1" ]; then
+  echo "Skipping Playwright Chromium (REDPI_SKIP_BROWSER=1). Install later with /redpi-browser-install."
 else
-  echo "Skipping Playwright Chromium download for fast default install. Install later with /redpi-browser-install or REDPI_FULL_INSTALL=1."
+  echo "Installing Playwright Chromium runtime for RedPi browser automation..."
+  # Use the package's own Playwright: each Playwright version expects its own Chromium build.
+  if [ -f "$REDPI_ROOT/node_modules/playwright/cli.js" ]; then
+    (cd "$REDPI_ROOT" && node node_modules/playwright/cli.js install chromium) || echo "Playwright browser install failed; you can retry inside Pi with /redpi-browser-install."
+  else
+    (cd "$REDPI_ROOT" && npm install --no-audit --no-fund && npx playwright install chromium) || echo "Playwright browser install failed; you can retry inside Pi with /redpi-browser-install."
+  fi
 fi
 
 echo "Installing most-starred subagent extension: pi-subagents (nicobailon/pi-subagents, 3189 GitHub stars at bootstrap authoring time)"
@@ -66,23 +73,26 @@ else
 fi
 
 if [ ! -f "$YITEC_DIR/model-tiers.json" ]; then
-  curl -fsSL "https://raw.githubusercontent.com/${TEAM_PI_PACKAGE#git:github.com/}/main/scripts/default-model-tiers.json" -o "$YITEC_DIR/model-tiers.json" || cat > "$YITEC_DIR/model-tiers.json" <<'JSON'
+  # A fresh RedPi install starts with its stable named routes. The first-run
+  # wizard will replace these with the exact live IDs returned by 9Router.
+  cat > "$YITEC_DIR/model-tiers.json" <<'JSON'
 {
   "roles": {
-    "default": { "tier": "high", "thinking": "medium" },
-    "planner": { "tier": "high", "thinking": "high" },
-    "executor": { "tier": "low", "thinking": "low" },
-    "subagent": { "tier": "low", "thinking": "low" },
-    "reviewer": { "tier": "high", "thinking": "high" },
-    "vision": { "tier": "high", "thinking": "off" },
-    "commit": { "tier": "low", "thinking": "low" },
-    "tiny": { "tier": "low", "thinking": "off" }
+    "default": { "models": ["9router/MainAgent:medium"], "thinking": "medium" },
+    "planner": { "models": ["9router/MainAgent:high"], "thinking": "high" },
+    "executor": { "models": ["9router/SubAgent:low"], "thinking": "low" },
+    "subagent": { "models": ["9router/SubAgent:low"], "thinking": "low" },
+    "reviewer": { "models": ["9router/MainAgent:high"], "thinking": "high" },
+    "vision": { "models": ["9router/MainAgent:medium"], "thinking": "medium" },
+    "commit": { "models": ["9router/SubAgent:low"], "thinking": "low" },
+    "tiny": { "models": ["9router/SubAgent:off"], "thinking": "off" }
   },
-  "planner": { "tier": "high", "thinking": "high" },
-  "executor": { "tier": "low", "thinking": "low" },
-  "vision": { "models": ["openai/gpt-4o", "google/gemini-2.5-pro"] },
-  "tiers": { "high": [], "low": [], "uncapable": [] },
-  "retry": { "enabled": true, "maxPerUserPrompt": 2, "cooldownMs": 300000, "fallbackChains": {}, "errorPatterns": ["rate limit", "429", "quota", "weekly limit", "session limit", "credits", "overloaded"] },
+  "tiers": {
+    "high": [{ "model": "9router/MainAgent", "vision": true, "thinking": "high", "rate": { "input": 0, "output": 0 } }],
+    "low": [{ "model": "9router/SubAgent", "vision": true, "thinking": "low", "rate": { "input": 0, "output": 0 } }],
+    "uncapable": []
+  },
+  "retry": { "enabled": true, "maxPerUserPrompt": 2, "cooldownMs": 300000, "fallbackChains": { "planner": ["9router/MainAgent:high"], "executor": ["9router/SubAgent:low"], "reviewer": ["9router/MainAgent:high"] }, "errorPatterns": ["rate limit", "429", "quota", "weekly limit", "session limit", "credits", "overloaded"] },
   "magicKeywords": { "enabled": true, "ultrathink": true, "orchestrate": true, "cheap": true },
   "advisor": { "enabled": false, "modelRole": "reviewer", "autoReview": false, "tools": ["read", "grep"] },
   "memory": { "enabled": true, "injectionCharLimit": 5000 },
@@ -92,12 +102,18 @@ JSON
 fi
 
 SETTINGS="$AGENT_DIR/settings.json"
-node - "$SETTINGS" "$MATT_DIR/.agents/skills" "$LIQUID_DIR" <<'NODE'
+# Matt Pocock's promoted skills live under skills/engineering and skills/productivity;
+# Pi discovers SKILL.md directories recursively below each listed path.
+node - "$SETTINGS" "$MATT_DIR" "$LIQUID_DIR" <<'NODE'
 const fs = require('fs');
-const [settingsPath, mattSkills, liquidSkill] = process.argv.slice(2);
+const path = require('path');
+const [settingsPath, mattDir, liquidSkill] = process.argv.slice(2);
 let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
-s.skills = Array.from(new Set([...(s.skills || []), mattSkills, liquidSkill]));
+const mattSkills = ['engineering', 'productivity'].map((bucket) => path.join(mattDir, 'skills', bucket));
+// Drop the old .agents/skills path: that folder no longer exists upstream.
+const kept = (s.skills || []).filter((p) => !String(p).startsWith(mattDir));
+s.skills = Array.from(new Set([...kept, ...mattSkills, liquidSkill]));
 s.enableSkillCommands = true;
 if (process.env.REDPI_THEME !== '0') s.theme = process.env.REDPI_THEME || 'redpi-matrix';
 s.retry = {
@@ -110,16 +126,24 @@ s.retry = {
   }
 };
 s.httpIdleTimeoutMs = Math.max(Number(s.httpIdleTimeoutMs || 0), 900000);
+const previousOverrides = ((s.subagents && s.subagents.agentOverrides) || {});
+const cleanOverride = (name) => {
+  const { fallbackModels, ...rest } = previousOverrides[name] || {};
+  return rest;
+};
+s.defaultProvider = s.defaultProvider || "9router";
+s.defaultModel = s.defaultModel || "MainAgent";
+s.defaultThinkingLevel = s.defaultThinkingLevel || "high";
 s.subagents = {
   ...(s.subagents || {}),
-  defaultModel: (s.subagents && s.subagents.defaultModel) || "deepseek/deepseek-chat",
-  defaultThinking: (s.subagents && s.subagents.defaultThinking) || "low",
+  defaultModel: "9router/SubAgent",
+  defaultThinking: "low",
   agentOverrides: {
-    ...((s.subagents && s.subagents.agentOverrides) || {}),
-    oracle: { ...(((s.subagents||{}).agentOverrides||{}).oracle || {}), model: "anthropic/claude-opus-4-5", thinking: "high", fallbackModels: ["openai/gpt-5.1:high", "google/gemini-2.5-pro:high"] },
-    reviewer: { ...(((s.subagents||{}).agentOverrides||{}).reviewer || {}), model: "deepseek/deepseek-chat", thinking: "low", fallbackModels: ["openai/gpt-5.1-mini:low"] },
-    scout: { ...(((s.subagents||{}).agentOverrides||{}).scout || {}), model: "deepseek/deepseek-chat", thinking: "off" },
-    worker: { ...(((s.subagents||{}).agentOverrides||{}).worker || {}), model: "deepseek/deepseek-chat", thinking: "low" }
+    ...previousOverrides,
+    oracle: { ...cleanOverride("oracle"), model: "9router/MainAgent", thinking: "high" },
+    reviewer: { ...cleanOverride("reviewer"), model: "9router/MainAgent", thinking: "high" },
+    scout: { ...cleanOverride("scout"), model: "9router/SubAgent", thinking: "off" },
+    worker: { ...cleanOverride("worker"), model: "9router/SubAgent", thinking: "low" }
   }
 };
 fs.mkdirSync(require('path').dirname(settingsPath), { recursive: true });

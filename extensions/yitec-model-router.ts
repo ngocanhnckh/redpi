@@ -1,9 +1,10 @@
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 type TierName = "high" | "low" | "uncapable" | string;
 type ModelProfile = {
@@ -26,6 +27,9 @@ type Config = {
   advisor?: { enabled?: boolean; modelRole?: string; autoReview?: boolean; tools?: string[] };
   memory?: { enabled?: boolean; injectionCharLimit?: number };
   autoUpdate?: { enabled?: boolean; intervalHours?: number; updateHarness?: boolean; updateSkills?: boolean };
+  // strict: use only each role's own models (no tiers, fallback chains, failover, or MainAgent default).
+  routing?: { mode?: "auto" | "strict" };
+  folder?: string;
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -33,7 +37,18 @@ const USER_YITEC_DIR = join(AGENT_DIR, "yitec");
 const NINE_ROUTER_LOCAL_PATH = join(USER_YITEC_DIR, "9router.local.json");
 const CLAUDE_BRIDGE_CONFIG_PATH = join(AGENT_DIR, "claude-bridge.json");
 const PROVIDER_PROFILES_PATH = join(USER_YITEC_DIR, "provider-profiles.json");
-const DEFAULT_CONFIG: Required<Config> = {
+const ONBOARDING_MARKER_PATH = join(USER_YITEC_DIR, "onboarding.json");
+// Per-folder role configs live in the user dir (keyed by folder path), so they
+// need no project trust and never end up in the repository.
+const FOLDER_CONFIG_DIR = join(USER_YITEC_DIR, "folders");
+const ROLE_NAMES = ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny", "default"];
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_SUFFIX = /:(off|minimal|low|medium|high|xhigh|max)$/;
+// Role config chosen with "This session only"; cleared when a new session starts.
+let sessionOverride: Config | undefined;
+// True while RedPi itself switches models, so model_select can tell user picks apart.
+let redpiSwitching = false;
+const DEFAULT_CONFIG: Required<Omit<Config, "routing" | "folder">> & Config = {
   planner: { tier: "high", thinking: "high" },
   executor: { tier: "low", thinking: "low" },
   roles: {
@@ -107,14 +122,30 @@ function readJson(path: string, fallback: any) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return fallback; }
 }
 
+function folderConfigPath(dir: string): string {
+  return join(FOLDER_CONFIG_DIR, `${createHash("sha256").update(resolve(dir)).digest("hex").slice(0, 16)}.json`);
+}
+
+function findFolderConfig(cwd: string): string | undefined {
+  // The nearest configured ancestor wins, so subfolders share their project's setup.
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    const p = folderConfigPath(dir);
+    if (existsSync(p)) return p;
+    if (dirname(dir) === dir) return undefined;
+  }
+}
+
 function configPaths(cwd: string, projectTrusted = false): string[] {
+  const folder = findFolderConfig(cwd);
   return [
+    ...(folder ? [folder] : []),
     ...(projectTrusted ? [join(cwd, CONFIG_DIR_NAME, "yitec", "model-tiers.json")] : []),
     join(USER_YITEC_DIR, "model-tiers.json"),
   ];
 }
 
 function loadConfig(cwd: string, projectTrusted = false): LoadedConfig {
+  if (sessionOverride) return deepMerge(DEFAULT_CONFIG, sessionOverride, { __path: "(this session only)", __projectTrusted: projectTrusted });
   for (const path of configPaths(cwd, projectTrusted)) {
     if (existsSync(path)) return deepMerge(DEFAULT_CONFIG, readJson(path, {}), { __path: path, __projectTrusted: projectTrusted });
   }
@@ -145,8 +176,86 @@ function patchPiSettings(defaultModel?: string, thinking = "low") {
   if (process.env.REDPI_THEME !== "0") s.theme = process.env.REDPI_THEME || "redpi-matrix";
   s.retry = { ...(s.retry || {}), provider: { ...((s.retry || {}).provider || {}), timeoutMs: Math.max(Number((s.retry || {}).provider?.timeoutMs || 0), 900000), maxRetries: 0, maxRetryDelayMs: 60000 } };
   s.httpIdleTimeoutMs = Math.max(Number(s.httpIdleTimeoutMs || 0), 900000);
+  s.skills = repairSkillPaths(s.skills || []);
+  // Subagent models follow the active global RedPi profile (9Router combos or Claude bridge).
+  s.subagents = subagentSettings(s.subagents, readJson(join(USER_YITEC_DIR, "model-tiers.json"), {}));
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+}
+
+function repairSkillPaths(skills: string[]): string[] {
+  // Matt Pocock moved skills from .agents/skills to skills/<bucket>; older installs
+  // point at the removed folder and silently load nothing.
+  const mattDir = join(AGENT_DIR, "vendor", "mattpocock-skills");
+  const liquidDir = join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill");
+  const mattSkills = ["engineering", "productivity"].map((bucket) => join(mattDir, "skills", bucket)).filter((p) => existsSync(p));
+  const kept = skills.filter((p) => !String(p).startsWith(mattDir));
+  return [...new Set([...kept, ...mattSkills, ...(existsSync(join(liquidDir, "SKILL.md")) ? [liquidDir] : [])])];
+}
+
+function subagentSettings(existing: any, cfg: any): any {
+  // pi-subagents rejects the removed fallbackModels field at load, so always strip it.
+  const withoutRemovedFallbacks = (value: any) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const { fallbackModels: _removed, ...rest } = value;
+    return rest;
+  };
+  const overrides = Object.fromEntries(Object.entries(existing?.agentOverrides || {}).map(([name, value]) => [name, withoutRemovedFallbacks(value)])) as Record<string, any>;
+  const { main, fast, review } = subagentModelsFromConfig(cfg);
+  if (!main || !fast) return { ...(existing || {}), agentOverrides: overrides };
+  return {
+    ...(existing || {}),
+    defaultModel: fast,
+    defaultThinking: "low",
+    agentOverrides: {
+      ...overrides,
+      oracle: { ...(overrides.oracle || {}), model: main, thinking: "high" },
+      reviewer: { ...(overrides.reviewer || {}), model: review || main, thinking: "high" },
+      scout: { ...(overrides.scout || {}), model: fast, thinking: "off" },
+      worker: { ...(overrides.worker || {}), model: fast, thinking: "low" },
+    },
+  };
+}
+
+function writeFolderSubagents(folder: string, cfg: any): string {
+  // pi-subagents only reads per-project models from the project's .pi/settings.json.
+  const p = join(folder, CONFIG_DIR_NAME, "settings.json");
+  const s = readJson(p, {});
+  s.subagents = subagentSettings(s.subagents, cfg);
+  writeJson(p, s);
+  return p;
+}
+
+function snapshotConfig(cfg: LoadedConfig): Config {
+  // Resolve every role to one concrete model so a strict config is self-contained.
+  const { __path: _p, __projectTrusted: _t, ...rest } = cfg as any;
+  const roles: Record<string, RoleConfig> = {};
+  for (const role of ROLE_NAMES) {
+    const entry = roleCandidates(cfg, role)[0];
+    if (!entry) continue;
+    const parsed = splitModel(entryModel(entry));
+    if (!parsed.provider) continue;
+    const thinking = parsed.thinking ?? entryThinking(entry) ?? roleThinking(cfg, role) ?? "medium";
+    roles[role] = { models: [`${parsed.provider}/${parsed.id}:${thinking}`], thinking };
+  }
+  return { ...rest, roles };
+}
+
+function roleModelLabel(cfg: Config, role: string): string | undefined {
+  const entry = roleCandidates(cfg, role)[0];
+  return entry ? entryModel(entry) : undefined;
+}
+
+function subagentModelsFromConfig(cfg: any): { main?: string; fast?: string; review?: string } {
+  const first = (role: string) => {
+    const rc = cfg?.roles?.[role];
+    const entry = typeof rc === "string" ? (rc.includes("/") ? rc : undefined) : rc?.model || rc?.models?.[0];
+    const model = entry && entryModel(entry).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+    return model && model.includes("/") ? model : undefined;
+  };
+  const main = first("planner") || first("default");
+  const fast = first("subagent") || first("executor") || main;
+  return { main, fast, review: first("reviewer") || main };
 }
 
 function patchPiDefaults(modelId: string, thinking = "low") {
@@ -157,7 +266,7 @@ function modelOptionMap(models: string[], max = 60) {
   const map = new Map<string, string>();
   const labels = models.map((m, i) => {
     const label = m.length > max ? `${m.slice(0, Math.max(20, max - 14))}…${m.slice(-10)}` : m;
-    const display = `${String(i + 1).padStart(2, "0")}. ${label}`;
+    const display = `${String(i + 1).padStart(Math.max(2, String(models.length).length), "0")}. ${label}`;
     map.set(display, m);
     return display;
   });
@@ -173,7 +282,7 @@ function autoConfigFromNineRouter(ids: string[]) {
   // then tested low-friction Terra/redstone routes. Avoid legacy ClaudeOpus /
   // ClaudeSubAgent auto-picks because those often depend on user OAuth that may
   // list but fail at chat time.
-  const main = exact("MainAgent", "main-agent", "main_agent") || contains("redstone-gpt", "gpt-5.6-terra", "terra") || avoidInactive(contains("opus", "sonnet", "gpt", "auto")) || ids[0] || "kr/auto";
+  const main = exact("MainAgent", "main-agent", "main_agent") || contains("redstone-gpt", "gpt-5.6-terra", "terra") || avoidInactive(contains("opus", "sonnet", "gpt", "auto")) || ids[0] || "MainAgent";
   const sub = exact("SubAgent", "sub-agent", "sub_agent") || contains("lightweight", "fast", "mini", "haiku", "free", "redstone-gpt") || main;
   const review = contains("review", "reviewer", "critic") || main;
   const high = main;
@@ -199,6 +308,33 @@ function autoConfigFromNineRouter(ids: string[]) {
   };
 }
 
+// Model picker for large catalogs: MainAgent/SubAgent first, every model listed (no cut-off),
+// plus word search. Choosing one of `extras` returns that extra's text.
+async function pickModel(ctx: any, title: string, models: string[], current?: string, opts: { keepLabel?: string; extras?: string[] } = {}): Promise<string | undefined> {
+  const keep = current ? `${opts.keepLabel || "✅ keep"}: ${current}` : undefined;
+  const search = `🔍 Search ${models.length} models…`;
+  const manual = "✍️ manual entry";
+  const ordered = [...new Set([...models.filter(m => /(^|\/)(MainAgent|SubAgent)$/i.test(m)), ...models])];
+  const { labels, map } = modelOptionMap(ordered);
+  for (;;) {
+    // Search only earns its place on long lists (e.g. REDPI_9ROUTER_ALL_MODELS=1).
+    const choice = await ctx.ui.select(title, [...(keep ? [keep] : []), ...(ordered.length > 20 ? [search] : []), manual, ...(opts.extras || []), ...labels]);
+    if (!choice) return undefined;
+    if (choice === keep) return current;
+    if (opts.extras?.includes(choice)) return choice;
+    if (choice === manual) return (await ctx.ui.input(`${title} (provider/model)`, current || "9router/MainAgent"))?.trim() || undefined;
+    if (choice !== search) return map.get(choice);
+    const query = (await ctx.ui.input("Search models (words in any order)", "e.g. opus thinking"))?.trim().toLowerCase();
+    if (!query) continue;
+    const words = query.split(/\s+/);
+    const hits = ordered.filter(m => words.every(w => m.toLowerCase().includes(w)));
+    if (!hits.length) { ctx.ui.notify(`No models match "${query}".`, "warning"); continue; }
+    const found = modelOptionMap(hits);
+    const pick = await ctx.ui.select(`${title}: ${hits.length} match "${query}"`, [...found.labels, "↩ back"]);
+    if (pick && pick !== "↩ back") return found.map.get(pick);
+  }
+}
+
 async function customizeRolesWithUi(ctx: any, ids: string[], cfgPath: string) {
   const options = ids.map(id => `9router/${id}`);
   if (!options.length) return undefined;
@@ -212,19 +348,12 @@ async function customizeRolesWithUi(ctx: any, ids: string[], cfgPath: string) {
     { role: "commit", label: "commit / summaries", thinking: "low", recommended: cfg.roles.commit.models[0] },
     { role: "tiny", label: "tiny / cheapest tasks", thinking: "off", recommended: cfg.roles.tiny.models[0] },
   ];
-  const { labels, map } = modelOptionMap(options.filter(o => !/mainagent|main-agent|main_agent|subagent|sub-agent|sub_agent/i.test(o)).slice(0, 35));
+  const SKIP = "⏭ skip remaining roles / save now";
   for (const r of roles) {
     const recommended = String(r.recommended).replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
-    const choice = await ctx.ui.select(`Model for ${r.label}`, [
-      `✅ use recommended: ${recommended.length > 52 ? recommended.slice(0, 52) + "…" : recommended}`,
-      "manual entry",
-      ...labels,
-      "skip remaining roles / save now",
-    ]);
-    if (!choice) return undefined;
-    if (choice === "skip remaining roles / save now") break;
-    const model = choice === "manual entry" ? await ctx.ui.input(`Model for ${r.role}`, recommended) : choice.startsWith("✅ use recommended:") ? recommended : map.get(choice);
+    const model = await pickModel(ctx, `Model for ${r.label}`, options, recommended, { keepLabel: "✅ use recommended", extras: [SKIP] });
     if (!model) return undefined;
+    if (model === SKIP) break;
     cfg.roles[r.role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${r.thinking}`], thinking: r.thinking };
   }
   writeJson(cfgPath, cfg);
@@ -254,6 +383,7 @@ function splitModel(pattern: string): { provider?: string; id: string; thinking?
   return slash >= 0 ? { provider: modelPart.slice(0, slash), id: modelPart.slice(slash + 1), thinking } : { id: modelPart, thinking };
 }
 function visionCandidates(cfg: Config): ModelEntry[] {
+  if (cfg.routing?.mode === "strict") return roleCandidates(cfg, "vision");
   const explicit = cfg.vision?.models ?? [];
   const roleEntries = roleCandidates(cfg, "vision");
   const fromTiers = Object.values(cfg.tiers ?? {}).flat().filter(entryHasVision);
@@ -264,15 +394,16 @@ function dedupeEntries(entries: ModelEntry[]): ModelEntry[] {
   return entries.filter((e) => { const k = entryKey(e); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 function roleCandidates(cfg: Config, role: string): ModelEntry[] {
-  const rc = cfg.roles?.[role] ?? (role === "planner" ? cfg.planner : role === "executor" ? cfg.executor : undefined);
+  const rc: RoleConfig | undefined = cfg.roles?.[role] ?? (role === "planner" ? cfg.planner : role === "executor" ? cfg.executor : undefined);
   if (!rc) return [];
   if (typeof rc === "string") return rc.includes("/") ? [rc] : (cfg.tiers?.[rc] ?? []);
   const direct = [...(rc.model ? [rc.model] : []), ...(rc.models ?? [])];
+  if (cfg.routing?.mode === "strict") return dedupeEntries(direct);
   const tier = rc.tier ? (cfg.tiers?.[rc.tier] ?? []) : [];
   return dedupeEntries([...direct, ...tier, ...(rc.fallbacks ?? []), ...(cfg.retry?.fallbackChains?.[role] ?? [])]);
 }
 function roleThinking(cfg: Config, role: string): string | undefined {
-  const rc = cfg.roles?.[role] ?? (role === "planner" ? cfg.planner : role === "executor" ? cfg.executor : undefined);
+  const rc: RoleConfig | undefined = cfg.roles?.[role] ?? (role === "planner" ? cfg.planner : role === "executor" ? cfg.executor : undefined);
   return typeof rc === "object" ? rc.thinking : undefined;
 }
 async function selectFirstAvailable(pi: ExtensionAPI, ctx: ExtensionContext, entries: ModelEntry[], thinking?: string, skip = new Set<string>()): Promise<string | undefined> {
@@ -282,7 +413,9 @@ async function selectFirstAvailable(pi: ExtensionAPI, ctx: ExtensionContext, ent
     if (!parsed.provider) continue;
     const model = ctx.modelRegistry.find(parsed.provider, parsed.id);
     if (!model) continue;
-    const ok = await pi.setModel(model);
+    redpiSwitching = true;
+    let ok = false;
+    try { ok = await pi.setModel(model); } finally { redpiSwitching = false; }
     if (!ok) continue;
     const selectedThinking = parsed.thinking ?? entryThinking(entry) ?? thinking ?? "off";
     pi.setThinkingLevel(selectedThinking as any);
@@ -454,6 +587,14 @@ function mainAgentRoleConfig(): any {
   }, retry: { fallbackChains: { planner: [`${main}:high`], executor: [`${fast}:low`], reviewer: [`${main}:high`] } }});
 }
 
+function onboardingComplete(): boolean {
+  return readJson(ONBOARDING_MARKER_PATH, {}).completed === true;
+}
+
+function finishOnboarding(provider: "router" | "claude" | "manual") {
+  writeJson(ONBOARDING_MARKER_PATH, { completed: true, provider, completedAt: new Date().toISOString() });
+}
+
 function profileModeFromConfig(cfg: any): "router" | "claude" {
   const main = String(cfg?.roles?.planner?.models?.[0] || cfg?.roles?.default?.models?.[0] || "");
   return main.startsWith("claude-bridge/") ? "claude" : "router";
@@ -482,9 +623,47 @@ async function pingNineRouter(signal?: AbortSignal): Promise<string> {
   return live.length ? `Connected. ${live.length} models/combos found. Examples: ${live.map((m: any) => m.id).slice(0, 8).join(", ")}` : `Could not fetch /models from ${nineRouterBaseUrl()}. Check URL, key, or whether 9Router is running.`;
 }
 
-async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
+const NINE_ROUTER_MODELS_CACHE_PATH = join(USER_YITEC_DIR, "9router-models.json");
+
+function nineRouterModelEntry(m: any) {
+  const id = typeof m === "string" ? m : m.id;
+  const caps = (typeof m === "object" && m?.capabilities) || {};
+  return {
+    id,
+    name: `9Router ${id}`,
+    reasoning: caps.reasoning ?? true,
+    input: caps.vision === false ? ["text"] : ["text", "image"],
+    contextWindow: /^(MainAgent|SubAgent)$/i.test(id) ? nineRouterContextWindow(id) : caps.contextWindow || nineRouterContextWindow(id),
+    maxTokens: caps.maxOutput || 64000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+}
+
+// RedPi lists only 9Router combos (owned_by "combo"): a gateway can expose hundreds of raw
+// provider routes, which buries the team's curated combos. Older gateways without owned_by
+// fall back to slash-free IDs; REDPI_9ROUTER_ALL_MODELS=1 lists everything.
+function nineRouterCombos(data: any[]): any[] {
+  const models = data.filter((m: any) => m?.id);
+  if (process.env.REDPI_9ROUTER_ALL_MODELS === "1") return models;
+  const combos = models.filter((m: any) => m.owned_by === "combo");
+  if (combos.length) return combos;
+  const unprefixed = models.filter((m: any) => !String(m.id).includes("/"));
+  return unprefixed.length ? unprefixed : models;
+}
+
+function cachedNineRouterModels(maxAgeMs = Infinity): any[] {
+  const cache = readJson(NINE_ROUTER_MODELS_CACHE_PATH, {});
+  // The cache belongs to one gateway; a changed base URL must not show another router's models.
+  if (cache.baseUrl !== nineRouterBaseUrl() || !Array.isArray(cache.models) || Date.now() - (cache.at || 0) > maxAgeMs) return [];
+  return cache.models.map(nineRouterModelEntry);
+}
+
+// Live /models only, so connection checks never report a cached list as "Connected".
+// Pass { cache: true } for model pickers, which fall back to the last good list.
+async function fetchNineRouterModels(signal?: AbortSignal, opts: { cache?: boolean } = {}): Promise<any[]> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS || 2500));
+  // Large 9Router catalogs (700+ models) take several seconds to list.
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS || 10000));
   const onAbort = () => controller.abort();
   signal?.addEventListener?.("abort", onAbort, { once: true });
   try {
@@ -492,12 +671,15 @@ async function fetchNineRouterModels(signal?: AbortSignal): Promise<any[]> {
       headers: { Authorization: `Bearer ${nineRouterApiKey()}` },
       signal: controller.signal,
     });
-    if (!res.ok) return [];
+    if (!res.ok) return opts.cache ? cachedNineRouterModels() : [];
     const json = (await res.json()) as any;
-    const ids = Array.isArray(json?.data) ? json.data.map((m: any) => m?.id).filter(Boolean) : [];
-    return ids.map((id: string) => ({ id, name: `9Router ${id}`, reasoning: true, input: ["text", "image"], contextWindow: nineRouterContextWindow(id), maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
+    const models = nineRouterCombos(Array.isArray(json?.data) ? json.data : []);
+    if (models.length) {
+      try { writeJson(NINE_ROUTER_MODELS_CACHE_PATH, { at: Date.now(), baseUrl: nineRouterBaseUrl(), models }); } catch {}
+    }
+    return models.map(nineRouterModelEntry);
   } catch {
-    return [];
+    return opts.cache ? cachedNineRouterModels() : [];
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener?.("abort", onAbort);
@@ -544,19 +726,25 @@ function updateRedPi(cfg: Config, force = false): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Runs at extension load (startup and /reload) so pi-subagents never sees stale settings.
+  patchPiSettings();
   pi.registerProvider("9router", {
     baseUrl: nineRouterBaseUrl(),
     apiKey: nineRouterApiKeyCommand(),
     api: "openai-completions",
     models: [
-      { id: "kr/claude-sonnet-4.5", name: "9Router Kiro Claude Sonnet 4.5", reasoning: true, input: ["text", "image"], contextWindow: 200000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-      { id: "opencode/free", name: "9Router OpenCode Free", reasoning: true, input: ["text"], contextWindow: 128000, maxTokens: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      // Combos only. MainAgent comes first: Pi falls back to the first registered model when
+      // settings.json has no default, and that must never be a single upstream route.
       { id: "MainAgent", name: "9Router MainAgent (1M context)", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
       { id: "SubAgent", name: "9Router SubAgent (1M context)", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
     ],
     async refreshModels(context: any) {
-      const models = await fetchNineRouterModels(context?.signal);
-      return models.length ? models : undefined;
+      // Start fast from a recent cache and refresh it in the background; otherwise list live.
+      const recent = cachedNineRouterModels(6 * 60 * 60 * 1000);
+      if (recent.length) void fetchNineRouterModels();
+      const models = recent.length ? recent : await fetchNineRouterModels(context?.signal, { cache: true });
+      const rank = (id: string) => /(^|\/)MainAgent$/i.test(id) ? 0 : /(^|\/)SubAgent$/i.test(id) ? 1 : 2;
+      return models.length ? models.sort((a: any, b: any) => rank(a.id) - rank(b.id)) : undefined;
     },
   } as any);
 
@@ -565,11 +753,13 @@ export default function (pi: ExtensionAPI) {
   let failedModelsForPrompt = new Set<string>();
   let cooldownUntil = new Map<string, number>();
   let turnMagic: TurnMagic = {};
+  // Model the user picked with /model; RedPi stops switching models until it is cleared.
+  let pinnedModel: string | undefined;
 
   pi.registerCommand("redpi-claude", { description: "Switch RedPi between Claude Code subscription and 9Router MainAgent/SubAgent profiles", handler: async (_args, ctx) => {
     const status = claudeAuthStatus();
     const active = profileModeFromConfig(loadConfig(ctx.cwd, ctx.isProjectTrusted()));
-    if (!ctx.hasUI) return ctx.ui.notify(`${status.summary}\n\nActive RedPi profile: ${active}.\n\nUse /redpi-claude in the interactive TUI to switch profiles.`, status.loggedIn ? "info" : "warn");
+    if (!ctx.hasUI) return ctx.ui.notify(`${status.summary}\n\nActive RedPi profile: ${active}.\n\nUse /redpi-claude in the interactive TUI to switch profiles.`, status.loggedIn ? "info" : "warning");
     const choice = await ctx.ui.select(`RedPi provider profile (active: ${active})`, [
       "Use 9Router: MainAgent + SubAgent (1M context)",
       "Use Claude subscription: Opus + Sonnet",
@@ -579,10 +769,10 @@ export default function (pi: ExtensionAPI) {
       "Done",
     ]);
     if (!choice || choice === "Done") return;
-    if (choice === "Check Claude Code sign-in") return ctx.ui.notify(status.summary, status.loggedIn ? "info" : "warn");
+    if (choice === "Check Claude Code sign-in") return ctx.ui.notify(status.summary, status.loggedIn ? "info" : "warning");
     if (choice === "Show sign-in instructions") return ctx.ui.notify("In a normal terminal, run:\n\nclaude auth login --claudeai\n\nFinish the browser login, restart Pi, then run /redpi-claude again. RedPi never stores your Claude credentials; pi-claude-bridge uses the Claude Code CLI session.", "info");
     if (choice === "Use 9Router: MainAgent + SubAgent (1M context)") return ctx.ui.notify(switchProviderProfile(ctx.cwd, ctx.isProjectTrusted(), "router"), "info");
-    if (!status.loggedIn) return ctx.ui.notify(`${status.summary}\n\nFirst sign in in a normal terminal:\nclaude auth login --claudeai`, "warn");
+    if (!status.loggedIn) return ctx.ui.notify(`${status.summary}\n\nFirst sign in in a normal terminal:\nclaude auth login --claudeai`, "warning");
     if (choice === "Use Claude subscription: Opus + Sonnet") return ctx.ui.notify(switchProviderProfile(ctx.cwd, ctx.isProjectTrusted(), "claude"), "info");
     const bridge = readJson(CLAUDE_BRIDGE_CONFIG_PATH, {});
     writeJson(CLAUDE_BRIDGE_CONFIG_PATH, deepMerge(bridge, { askClaude: { enabled: true, allowFullMode: true } }));
@@ -637,8 +827,9 @@ export default function (pi: ExtensionAPI) {
         writeFileSync(NINE_ROUTER_LOCAL_PATH, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
         try { chmodSync(NINE_ROUTER_LOCAL_PATH, 0o600); } catch {}
         const live = await fetchNineRouterModels(ctx.signal);
+        if (live.length) finishOnboarding("router");
         const msg = live.length ? `Connected. ${live.length} models/combos found.` : `Could not fetch /models from ${nineRouterBaseUrl()}.`;
-        ctx.ui.notify(msg, live.length ? "info" : "warn");
+        ctx.ui.notify(msg, live.length ? "info" : "warning");
         if (live.length) {
           const ok = await ctx.ui.confirm("Auto-configure RedPi from 9Router?", "Recommended: RedPi will assign roles from live models. If combos named MainAgent/SubAgent exist, MainAgent is used for main/heavy roles and SubAgent for fast/delegated work.");
           if (ok) {
@@ -683,41 +874,114 @@ export default function (pi: ExtensionAPI) {
       }
   } });
   pi.registerCommand("yitec-setup", { description: "Alias for /redpi-setup", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-setup", { deliverAs: "followUp", expandPromptTemplates: true }) });
-  pi.registerCommand("redpi-config", { description: "Interactive RedPi role/model configurator for 9Router and native providers", handler: async (_args, ctx) => {
-    if (!ctx.hasUI) return ctx.ui.notify("/redpi-config needs an interactive UI. Edit ~/.pi/agent/yitec/model-tiers.json in print/headless mode.", "error");
+  async function applyPlannerNow(ctx: any): Promise<string> {
+    // Switch the live session to the (new) planner model so a saved config is visible at once.
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
-    const role = await ctx.ui.select("Configure which role?", ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny", "default"]);
-    if (!role) return;
-    const scopeChoice = await ctx.ui.select("Save where?", ctx.isProjectTrusted() ? ["project", "global"] : ["global"]);
-    if (!scopeChoice) return;
-    const live = await fetchNineRouterModels(ctx.signal);
-    const liveIds = live.map((m: any) => `9router/${m.id}`);
-    const current = roleCandidates(cfg, role).map(entryModel);
-    const recommended = current[0] || autoConfigFromNineRouter(live.map((m: any) => m.id).filter(Boolean)).roles?.[role]?.models?.[0]?.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
-    const compactModels = dedupeEntries([...current, ...liveIds].filter(Boolean)).map(entryModel).slice(0, 45);
-    const { labels, map } = modelOptionMap(compactModels);
-    const recLabel = recommended ? `✅ use recommended/current: ${recommended.length > 48 ? recommended.slice(0, 48) + "…" : recommended}` : undefined;
-    const choice = await ctx.ui.select("Select model/combo", [recLabel, "manual entry", ...labels].filter(Boolean) as string[]);
-    if (!choice) return;
-    const model = choice === "manual entry" ? await ctx.ui.input("Model id", "Example: 9router/kr/auto or 9router/<combo-id>") : choice.startsWith("✅ use recommended/current:") ? recommended : map.get(choice);
-    if (!model) return;
-    const thinking = await ctx.ui.select("Thinking level", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-    if (!thinking) return;
-    const path = configWritePath(ctx.cwd, ctx.isProjectTrusted(), scopeChoice as "global" | "project");
-    const raw = readJson(path, {});
-    const next = deepMerge(DEFAULT_CONFIG, raw);
+    const selected = await selectFirstAvailable(pi, ctx, roleCandidates(cfg, "planner"), roleThinking(cfg, "planner"));
+    if (selected) ctx.ui.setStatus("yitec-router", `planner on ${selected}${cfg.routing?.mode === "strict" ? " (strict)" : ""}`);
+    return selected ? `Current session now on ${selected}.` : `Planner model ${roleModelLabel(cfg, "planner") || "(none)"} is not available in Pi's model registry.`;
+  }
+
+  async function editRoles(ctx: any, next: any, title: string): Promise<boolean> {
+    ctx.ui.notify("Loading models from 9Router…", "info");
+    const live = await fetchNineRouterModels(ctx.signal, { cache: true });
+    const registry = ctx.modelRegistry.getAvailable().map((m: any) => `${m.provider}/${m.id}`);
+    const current = ROLE_NAMES.map(r => roleModelLabel(next, r)?.replace(THINKING_SUFFIX, "")).filter(Boolean) as string[];
+    const models = [...new Set([...current, ...live.map((m: any) => `9router/${m.id}`), ...registry])];
     next.roles ||= {};
-    next.roles[role] = { models: [`${model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "")}:${thinking}`], thinking };
-    writeJson(path, next);
-    if (model.startsWith("9router/")) patchPiDefaults(model, thinking as string);
-    ctx.ui.notify(`Saved ${role} -> ${next.roles[role].models[0]} in ${path}${model.startsWith("9router/") ? "\nPi default model also set to 9router." : ""}\n\nIf you just changed the 9Router base URL, run /reload or restart Pi once. After that, normal chat should not ask for login again.`, "info");
+    for (;;) {
+      const roleLabels = ROLE_NAMES.map(r => `${r.padEnd(9)} → ${roleModelLabel(next, r) || "(unset)"}`);
+      const pick = await ctx.ui.select(`${title}: pick a role to change, then save`, [...roleLabels, "💾 Save", "Cancel"]);
+      if (!pick || pick === "Cancel") return false;
+      if (pick === "💾 Save") return true;
+      const role = ROLE_NAMES[roleLabels.indexOf(pick)];
+      const now = roleModelLabel(next, role)?.replace(THINKING_SUFFIX, "");
+      const model = await pickModel(ctx, `Model for ${role}`, models, now);
+      if (!model || !model.includes("/")) { if (model) ctx.ui.notify("Use the provider/model form, for example 9router/MainAgent.", "warning"); continue; }
+      const currentThinking = roleThinking(next, role);
+      const thinking = await ctx.ui.select(`Thinking level for ${role}`, currentThinking ? [currentThinking, ...THINKING_LEVELS.filter(t => t !== currentThinking)] : THINKING_LEVELS);
+      if (!thinking) continue;
+      next.roles[role] = { models: [`${model.replace(THINKING_SUFFIX, "")}:${thinking}`], thinking };
+    }
+  }
+
+  function routingSummary(ctx: any): string {
+    const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
+    const rows = ROLE_NAMES.map(r => `  ${r.padEnd(9)} ${roleModelLabel(cfg, r) || "(unset)"}`);
+    return [
+      `Source: ${cfg.__path || "built-in defaults"}`,
+      `Mode: ${cfg.routing?.mode === "strict" ? "strict (only these models, no fallbacks)" : "auto (tiers and fallbacks allowed)"}`,
+      `Manual /model pin: ${pinnedModel || "none"}`,
+      "",
+      ...rows,
+    ].join("\n");
+  }
+
+  pi.registerCommand("redpi-config", { description: "Set RedPi role models for this folder (strict), this session, the project file, or globally", handler: async (_args, ctx) => {
+    if (!ctx.hasUI) return ctx.ui.notify("/redpi-config needs an interactive UI. Edit ~/.pi/agent/yitec/model-tiers.json in print/headless mode.", "error");
+    const trusted = ctx.isProjectTrusted();
+    const folderPath = findFolderConfig(ctx.cwd);
+    const FOLDER = "📁 This folder: strict role models for every new session here";
+    const SESSION = "⏱ This session only";
+    const GLOBAL = "🌐 Global default (folders without their own config)";
+    const PROJECT = "📦 Project file .pi/yitec (can be committed and shared)";
+    const SHOW = "🔎 Show current routing";
+    const UNPIN = `▶ Resume role routing (unpin ${pinnedModel})`;
+    const REMOVE = "🗑 Remove this folder's config (back to global)";
+    const choice = await ctx.ui.select(`RedPi role models${folderPath ? " (this folder has its own strict config)" : ""}`, [
+      FOLDER, SESSION, GLOBAL, ...(trusted ? [PROJECT] : []), SHOW, ...(pinnedModel ? [UNPIN] : []), ...(folderPath ? [REMOVE] : []), "Done",
+    ]);
+    if (!choice || choice === "Done") return;
+    if (choice === SHOW) return ctx.ui.notify(routingSummary(ctx), "info");
+    if (choice === UNPIN) {
+      pinnedModel = undefined;
+      return ctx.ui.notify(`Manual pin cleared. ${await applyPlannerNow(ctx)}`, "info");
+    }
+    if (choice === REMOVE) {
+      const folder = readJson(folderPath!, {}).folder || ctx.cwd;
+      if (!(await ctx.ui.confirm("Remove this folder's RedPi config?", `New sessions in ${folder} will use the global defaults again.`))) return;
+      unlinkSync(folderPath!);
+      return ctx.ui.notify(`Removed ${folderPath}.\n\nSubagent models in ${join(folder, CONFIG_DIR_NAME, "settings.json")} were left as they are; delete its "subagents" block if you no longer want them.`, "info");
+    }
+    const effective = loadConfig(ctx.cwd, trusted);
+    let next: any;
+    if (choice === FOLDER) next = folderPath ? deepMerge(DEFAULT_CONFIG, readJson(folderPath, {})) : { ...snapshotConfig(effective), folder: resolve(ctx.cwd) };
+    else if (choice === SESSION) next = sessionOverride ? deepMerge(DEFAULT_CONFIG, sessionOverride) : snapshotConfig(effective);
+    else next = deepMerge(DEFAULT_CONFIG, readJson(configWritePath(ctx.cwd, trusted, choice === PROJECT ? "project" : "global"), {}));
+    if (choice === FOLDER || choice === SESSION) next.routing = { ...(next.routing || {}), mode: "strict" };
+    if (!(await editRoles(ctx, next, choice === FOLDER ? "This folder" : choice === SESSION ? "This session" : choice === PROJECT ? "Project file" : "Global"))) return;
+    // An explicit config choice replaces any earlier manual /model pin.
+    pinnedModel = undefined;
+    const lines: string[] = [];
+    if (choice === FOLDER) {
+      const path = folderPath || folderConfigPath(ctx.cwd);
+      writeJson(path, next);
+      lines.push(`Saved strict role models for ${next.folder}.`, `Every new session in this folder uses exactly these models; no MainAgent default or fallbacks.`, `Config: ${path}`);
+      lines.push(`Subagent models: ${writeFolderSubagents(next.folder, next)}`);
+    } else if (choice === SESSION) {
+      sessionOverride = next;
+      lines.push("Role models set for this session only (strict). New sessions go back to the folder or global config.");
+    } else {
+      const path = configWritePath(ctx.cwd, trusted, choice === PROJECT ? "project" : "global");
+      writeJson(path, next);
+      lines.push(`Saved ${choice === PROJECT ? "project" : "global"} role models in ${path}.`);
+      if (choice === GLOBAL) {
+        const planner = roleModelLabel(next, "planner");
+        if (planner) patchPiDefaults(planner.replace(THINKING_SUFFIX, ""), roleThinking(next, "planner") || "high");
+        else patchPiSettings();
+        lines.push("Pi's default model and global subagent models were updated to match.");
+      }
+      if (folderPath) lines.push(`Note: this folder has its own strict config, which still takes priority here.`);
+    }
+    lines.push("", await applyPlannerNow(ctx));
+    ctx.ui.notify(lines.join("\n"), "info");
   } });
   pi.registerCommand("yitec-config", { description: "Alias for /redpi-config", handler: async (_args, ctx) => pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
   pi.registerCommand("yitec-9router", { description: "Check RedPi native 9Router gateway integration", handler: async (_args, ctx) => {
-    const found = ctx.modelRegistry.find("9router", "kr/claude-sonnet-4.5");
+    const found = ctx.modelRegistry.find("9router", "MainAgent");
     const live = await fetchNineRouterModels(ctx.signal).catch(() => []);
-    ctx.ui.notify(`9Router provider: ${found ? "registered" : "missing"}\nBase URL: ${nineRouterBaseUrl()}\nAPI key env: ${nineRouterApiKey() === "dummy" ? "not set (using dummy)" : "set"}\nLive /models: ${live.length ? live.map((m: any) => m.id).slice(0, 20).join(", ") : "not reachable or no models returned"}\nUse model IDs like 9router/kr/claude-sonnet-4.5.`, "info");
+    ctx.ui.notify(`9Router provider: ${found ? "registered" : "missing"}\nBase URL: ${nineRouterBaseUrl()}\nAPI key env: ${nineRouterApiKey() === "dummy" ? "not set (using dummy)" : "set"}\nLive combos: ${live.length ? live.map((m: any) => m.id).join(", ") : "not reachable or no models returned"}\nUse model IDs like 9router/MainAgent.`, "info");
   } });
   pi.registerCommand("yitec-doctor", { description: "Validate Yitec roles, tiers, providers, and trust", handler: async (_args, ctx) => ctx.ui.notify(doctor(loadConfig(ctx.cwd, ctx.isProjectTrusted()), ctx), "info") });
   pi.registerCommand("yitec-agents", { description: "Show Yitec subagent/reviewer role policy", handler: async (_args, ctx) => {
@@ -738,14 +1002,55 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify(out, "info");
   }});
 
-  pi.on("session_start", async (_event, ctx) => {
-    patchPiSettings();
+  pi.on("model_select", async (event: any, ctx: any) => {
+    // A model picked by the user (/model or cycling) wins over role routing for this session.
+    if (redpiSwitching || event.source === "restore") return;
+    pinnedModel = `${event.model.provider}/${event.model.id}`;
+    ctx.ui.setStatus("yitec-router", `pinned ${pinnedModel} · /redpi-config to unpin`);
+  });
+
+  pi.on("session_start", async (event: any, ctx) => {
+    if (event.reason !== "reload") sessionOverride = undefined;
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
     const high = cfg.tiers?.[cfg.planner?.tier ?? "high"] ?? [];
     ctx.ui.setStatus("redpi", `RedPi high:${high.length} low:${low.length}`);
     ctx.ui.setStatus("redpi-ctx", "ctx waiting");
     if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget("redpi-banner", redpiBanner());
+    if (ctx.hasUI && ctx.mode === "tui" && !onboardingComplete()) {
+      const provider = await ctx.ui.select("Welcome to RedPi — choose your provider", [
+        "9Router (recommended): MainAgent + SubAgent",
+        "Claude Code subscription: Opus + Sonnet",
+        "Other / configure later",
+      ]);
+      if (provider === "9Router (recommended): MainAgent + SubAgent") {
+        writeJson(configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global"), mainAgentRoleConfig());
+        patchPiDefaults("9router/MainAgent", "high");
+        // Onboarding stays open until the 9Router login succeeds, so a cancelled
+        // login shows the welcome screen again instead of leaving Pi without a key.
+        if (localNineRouter().apiKey) finishOnboarding("router");
+        pi.sendUserMessage("/redpi-setup", { deliverAs: "followUp", expandPromptTemplates: true });
+      } else if (provider === "Claude Code subscription: Opus + Sonnet") {
+        const status = claudeAuthStatus();
+        if (status.loggedIn) {
+          writeJson(configWritePath(ctx.cwd, ctx.isProjectTrusted(), "global"), claudeBridgeRoleConfig());
+          patchPiDefaults("claude-bridge/claude-opus-5", "high");
+          finishOnboarding("claude");
+          ctx.ui.notify("Claude profile selected: Opus for the main agent and Sonnet for subagents. Run /reload once.", "info");
+        } else {
+          ctx.ui.notify(`${status.summary}\n\nSign in with: claude auth login --claudeai\nThen restart Pi to continue onboarding.`, "warning");
+        }
+      } else if (provider === "Other / configure later") {
+        finishOnboarding("manual");
+        ctx.ui.notify("Onboarding saved. Use /login, /model, or /redpi-setup when ready.", "info");
+      }
+    }
+    if (findFolderConfig(ctx.cwd) && !pinnedModel) {
+      // Folder configs are strict: start the session on the folder's planner model, not Pi's global default.
+      const selected = await selectFirstAvailable(pi, ctx, roleCandidates(cfg, "planner"), roleThinking(cfg, "planner"));
+      if (selected) ctx.ui.setStatus("yitec-router", `folder config · planner on ${selected}`);
+      else ctx.ui.notify(`RedPi folder config: planner model ${roleModelLabel(cfg, "planner") || "(unset)"} is not available. Fix it with /redpi-config.`, "warning");
+    }
     const updateResult = updateRedPi(cfg, false);
     if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
   });
@@ -787,13 +1092,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const skip = new Set([...failedModelsForPrompt, ...[...cooldownUntil.entries()].filter(([, until]) => until > Date.now()).map(([k]) => k)]);
-    if (event.images?.length) {
+    const strict = cfg.routing?.mode === "strict";
+    if (pinnedModel) {
+      ctx.ui.setStatus("yitec-router", `pinned ${pinnedModel} · /redpi-config to unpin`);
+    } else if (event.images?.length) {
       const selected = await selectFirstAvailable(pi, ctx, visionCandidates(cfg), roleThinking(cfg, "vision"), skip);
       if (selected) ctx.ui.notify(`Yitec router: image input detected, switched to vision model ${selected}`, "info");
     } else {
       const role = turnMagic.cheap ? "executor" : "planner";
-      const selected = await selectFirstAvailable(pi, ctx, roleCandidates(cfg, role), turnMagic.ultrathink ? "high" : roleThinking(cfg, role), skip);
-      if (selected) ctx.ui.setStatus("yitec-router", `${role} on ${selected}`);
+      const profileDefault = strict || profileModeFromConfig(cfg) === "claude" ? [] : [role === "planner" ? "9router/MainAgent" : "9router/SubAgent"];
+      const selected = await selectFirstAvailable(pi, ctx, dedupeEntries([...roleCandidates(cfg, role), ...profileDefault]), turnMagic.ultrathink ? "high" : roleThinking(cfg, role), skip);
+      if (selected) ctx.ui.setStatus("yitec-router", `${role} on ${selected}${strict ? " (strict)" : ""}`);
+      else if (strict) ctx.ui.notify(`RedPi strict routing: ${role} model ${roleModelLabel(cfg, role) || "(unset)"} is not available; staying on the current model. Fix it with /redpi-config.`, "warning");
     }
     const mem = cfg.memory?.enabled === false ? "" : readCapped(memoryPaths(ctx.cwd, ctx.isProjectTrusted()), cfg.memory?.injectionCharLimit ?? 5000);
     const watch = watchdogText(ctx.cwd, ctx.isProjectTrusted());
@@ -810,6 +1120,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!cfg.retry?.enabled || !errorText || !errorMatches(errorText, cfg.retry?.errorPatterns ?? [])) return;
+    // Strict configs and manual pins never fail over to a model the user did not choose.
+    if (pinnedModel || cfg.routing?.mode === "strict") {
+      ctx.ui.notify(`RedPi: ${ctx.model?.provider}/${ctx.model?.id} failed (${errorText}). No automatic failover because ${pinnedModel ? "you pinned this model" : "this config is strict"}.`, "warning");
+      return;
+    }
     if (retriesForPrompt >= (cfg.retry?.maxPerUserPrompt ?? 2)) return;
     if (ctx.model) {
       const key = `${ctx.model.provider}/${ctx.model.id}`;
@@ -820,7 +1135,7 @@ export default function (pi: ExtensionAPI) {
     const selected = await selectFirstAvailable(pi, ctx, candidates, roleThinking(cfg, "planner"), failedModelsForPrompt);
     if (!selected) return;
     retriesForPrompt++;
-    ctx.ui.notify(`Yitec router: provider/model failed (${errorText}); switched to ${selected} and retrying.`, "warn");
+    ctx.ui.notify(`Yitec router: provider/model failed (${errorText}); switched to ${selected} and retrying.`, "warning");
     pi.sendUserMessage(`Retry the previous request after automatic provider failover. Original user request:\n\n${currentUserPrompt}`, { deliverAs: "followUp" });
   });
 
@@ -859,7 +1174,7 @@ export default function (pi: ExtensionAPI) {
           text = `${install}\n\n--- retry result ---\n${(result.stdout || result.stderr || "").trim()}`.trim();
         }
       } else if (missingBrowser) {
-        text += "\n\nBrowser runtime is optional. Run /redpi-browser-install in Pi, or reinstall with REDPI_FULL_INSTALL=1.";
+        text += "\n\nBrowser runtime is missing. Run /redpi-browser-install in Pi, or rerun the RedPi installer.";
       }
       return { content: [{ type: "text", text }], details: { command: params.command, status: result.status } };
     },

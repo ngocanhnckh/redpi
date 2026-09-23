@@ -33,26 +33,36 @@ cat > "$PROJECT/.pi/WATCHDOG.md" <<'EOF'
 # Watchdog
 - Flag skipped validation.
 EOF
-python3 - "$ROOT" "$PROJECT" <<'PY'
+# Never touch the real ~/.pi/agent: typed test commands must not land in onboarding/setup prompts.
+AGENT_DIR="$(mktemp -d -t redpi-smoke-agent-XXXXXX)"
+trap 'rm -rf "$AGENT_DIR"' EXIT
+mkdir -p "$AGENT_DIR/yitec"
+echo '{ "completed": true, "provider": "manual" }' > "$AGENT_DIR/yitec/onboarding.json"
+python3 - "$ROOT" "$PROJECT" "$AGENT_DIR" <<'PY'
 import os, pty, subprocess, time, select, re, sys
-root, cwd = sys.argv[1], sys.argv[2]
-env=os.environ.copy(); env.update({'PI_NO_TITLE':'1','TERM':'xterm-256color','COLUMNS':'120','LINES':'40'})
+root, cwd, agent_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+env=os.environ.copy(); env.update({'PI_NO_TITLE':'1','TERM':'xterm-256color','COLUMNS':'120','LINES':'40','PI_CODING_AGENT_DIR':agent_dir})
+for k in ('NINE_ROUTER_API_KEY','ROUTER9_API_KEY','NINEROUTER_API_KEY','NINE_ROUTER_BASE_URL','ROUTER9_BASE_URL'): env.pop(k, None)
 master, slave = pty.openpty()
 p=subprocess.Popen(['pi','-ne','-e',f'{root}/extensions/yitec-model-router.ts'],cwd=cwd,env=env,stdin=slave,stdout=slave,stderr=slave,close_fds=True)
 os.close(slave); out=b''
-def drain(sec):
+def clean():
+ t=out.decode('utf-8','ignore'); t=re.sub(r'\x1b\][^\a]*(?:\a|\x1b\\)','',t); return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',t)
+def drain(sec, until=None):
+ # Wait for the expected screen text instead of fixed sleeps, which flake under load.
  global out
- end=time.time()+sec
+ start=len(clean()); end=time.time()+sec
  while time.time()<end:
+  if until and until in clean()[start:]: return drain(0.3)
   r,_,_=select.select([master],[],[],0.1)
   if r:
    try: d=os.read(master,8192)
    except OSError: break
    if not d: break
    out += d
-drain(4)
-for line in ['/yitec-9router\r','/yitec-doctor\r','/yitec-agents\r','/yitec-memory\r']:
- os.write(master,line.encode()); drain(2)
+drain(15,'RedPi high:')
+for line,until in [('/yitec-9router\r','9Router provider:'),('/yitec-doctor\r','Project config trusted:'),('/yitec-agents\r','subagent:'),('/yitec-memory\r','Keep tests small')]:
+ os.write(master,line.encode()); drain(15,until)
 os.write(master,b'\x04'); drain(1)
 try: p.terminate(); p.wait(timeout=3)
 except Exception: p.kill()

@@ -39,7 +39,7 @@ RedPi is designed so a teammate does **not** need to understand model routing, s
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
 pi
-/redpi-setup
+# RedPi automatically opens first-run provider onboarding
 ```
 
 After that, daily use is simply:
@@ -88,14 +88,14 @@ RedPi is designed to **auto-create the best usable harness** from your available
 |  | Feature | Default behavior | User effort |
 | --- | --- | --- | --- |
 | 🔌 | **Auto-loaded harness** | Installed as a Pi package; normal `pi` startup loads RedPi. | None after install |
-| 🧙 | **Friendly setup TUI** | `/redpi-setup` walks through 9Router login, browser install, status, and role config. | One command |
+| 🧙 | **Automatic first-run setup** | The first `pi` launch asks which provider to authenticate; `/redpi-setup` remains available later. | Guided once |
 | 🧠 | **9Router provider** | Registers native provider `9router` with OpenAI-compatible `/v1` API. | Paste URL/key once |
 | 🎯 | **Auto 9Router role config** | Auto-generates planner/executor/reviewer/subagent roles from live `/models`. | Confirm once |
 | ✳️ | **Claude subscription bridge** | Optional [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) provider: use a signed-in Claude Code subscription in Pi. | `/redpi-claude` |
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
-| 🧰 | **Skills** | Installs Matt Pocock skills and liquid-glass frontend skill. | None |
-| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Browser runtime installs only when requested/needed. | Optional |
+| 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, and the RedPi Playwright browser skill. | None |
+| 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Chromium installs with RedPi (opt out with `REDPI_SKIP_BROWSER=1`). | None |
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
@@ -121,17 +121,17 @@ The installer:
 - installs `pi-claude-bridge` for optional Claude Code subscription access
 - installs Matt Pocock skills
 - installs the liquid-glass frontend skill
-- creates a default model routing config
+- creates a default `MainAgent`/`SubAgent` routing config
 - configures Pi skill discovery
-- skips the large Playwright Chromium download by default for a fast install
+- downloads Playwright Chromium for the `redpi_browser` tool and `redpi-browser` skill
 
-Optional full install with browser runtime:
+Skip the browser download for a faster install:
 
 ```bash
-REDPI_FULL_INSTALL=1 curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ngocanhnckh/redpi/main/install.sh | REDPI_SKIP_BROWSER=1 bash
 ```
 
-Or install the browser later inside Pi:
+Then install the browser later inside Pi:
 
 ```text
 /redpi-browser-install
@@ -155,17 +155,24 @@ If you want the full ASCII banner in the TUI, start Pi with:
 REDPI_FULL_BANNER=1 pi
 ```
 
-### 3. Run the setup wizard
+### 3. Complete automatic first-run onboarding
+
+The first time you start Pi after installing RedPi, it automatically asks which provider you want:
 
 ```text
-/redpi-setup
+Welcome to RedPi — choose your provider
+  9Router (recommended): MainAgent + SubAgent
+  Claude Code subscription: Opus + Sonnet
+  Other / configure later
 ```
 
-Choose:
+Choose the 9Router option to continue into `/redpi-setup`, then choose:
 
 ```text
 9Router login / connection
 ```
+
+You can rerun the setup wizard later with `/redpi-setup`.
 
 Paste:
 
@@ -310,6 +317,30 @@ cheap summarize this folder
 orchestrate inspect auth, database, and frontend in parallel
 ```
 
+### 📁 Strict role models for one folder
+
+By default RedPi picks the planner model at the start of every turn and can fail over to other models. When a project needs exact models, open:
+
+```text
+/redpi-config
+```
+
+| Choice | Applies to | Behavior |
+| --- | --- | --- |
+| 📁 **This folder** | every new session in this folder and its subfolders | **strict**: only the models you set, no `MainAgent` default, no fallbacks or failover |
+| ⏱ **This session only** | the current session | strict, forgotten when a new session starts |
+| 🌐 **Global default** | folders without their own config | normal routing with tiers and fallbacks |
+| 📦 **Project file** | `.pi/yitec/model-tiers.json` (trusted projects) | shared with the repo if committed |
+
+Pick a role, choose its model and thinking level, repeat for other roles, then **💾 Save**. Roles you don't touch keep the model they currently resolve to, so the saved folder config is complete on its own.
+
+- Folder configs are stored privately in `~/.pi/agent/yitec/folders/`, keyed by the folder path, so they need no project trust and never land in the repo.
+- Subagent models for the folder are written to the folder's `.pi/settings.json`, the only per-project place pi-subagents reads.
+- New sessions in the folder start directly on its planner model.
+- `🔎 Show current routing` shows which config is active and the model for each role; `🗑 Remove this folder's config` returns the folder to the global defaults.
+
+**Manual `/model` picks stick.** If you switch models with `/model` (or by cycling), RedPi pins that model for the rest of the session: it no longer switches back to the planner model on the next turn and does not fail over. Use `/redpi-config` → `▶ Resume role routing` to unpin.
+
 ---
 
 ## 🤖 Subagents
@@ -345,20 +376,16 @@ api: openai-completions
 base: https://your-9router/v1
 ```
 
-Model IDs look like:
+RedPi lists **only 9Router combos** (models 9Router marks `owned_by: "combo"`), in Pi's `/model` list, `/redpi-config`, and the setup wizard. Raw provider routes such as `kr/…`, `cx/…`, or `nano/…` are hidden, so a gateway with hundreds of routes still shows a short, curated list.
 
 ```text
-9router/<model-or-combo-id>
+9router/MainAgent
+9router/SubAgent
+9router/<your-combo>
 ```
 
-Examples:
-
-```text
-9router/cx/gpt-5.6-terra
-9router/cx/gpt-5.6-terra-review
-9router/kr/auto
-9router/kr/claude-sonnet-4.5
-```
+- Need a raw route anyway? Choose `✍️ manual entry` in the picker and type e.g. `9router/cx/gpt-5.6-terra`, or start Pi with `REDPI_9ROUTER_ALL_MODELS=1` to list everything (a search option appears on long lists).
+- The model list is cached in `~/.pi/agent/yitec/9router-models.json`, so menus and startup still work when 9Router is slow to answer.
 
 Check live status:
 
@@ -370,7 +397,7 @@ Check live status:
 
 ## 🌐 Browser automation without MCP
 
-RedPi includes optional Playwright browser automation, but intentionally avoids MCP because MCP can be context-heavy. The default RedPi install does **not** download Chromium, so first install stays fast. When the agent actually needs a browser, `redpi_browser` can prompt to install the runtime, or you can install it explicitly:
+RedPi includes optional Playwright browser automation, but intentionally avoids MCP because MCP can be context-heavy. The default RedPi install downloads Chromium using the package's own Playwright version. If you skipped it with `REDPI_SKIP_BROWSER=1`, `redpi_browser` prompts to install the runtime when first needed, or you can install it explicitly:
 
 ```text
 /redpi-browser-install
@@ -440,8 +467,10 @@ node scripts/redpi-browser.js text --max 3000
 RedPi adds skills to Pi settings automatically:
 
 ```text
-~/.pi/agent/vendor/mattpocock-skills/.agents/skills
+~/.pi/agent/vendor/mattpocock-skills/skills/engineering
+~/.pi/agent/vendor/mattpocock-skills/skills/productivity
 ~/.pi/agent/vendor/liquid-glass-frontend-skill
+<redpi package>/skills/redpi-browser   (Playwright browser skill)
 ```
 
 Examples:
@@ -579,10 +608,10 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | --- | --- | --- |
 | 🧙 | `/redpi-setup` | Friendly TUI setup wizard for 9Router login, browser install/check, auto role config, and status. |
 | 🧙 | `/yitec-setup` | Alias for `/redpi-setup`. |
-| 🎯 | `/redpi-config` | TUI role/model configurator. Pick live 9Router models/combos and thinking levels. |
+| 🎯 | `/redpi-config` | Set role models and thinking for this folder (strict), this session, the project file, or globally; show or unpin routing. |
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
-| 🌐 | `/redpi-browser-install` | Install optional Playwright Chromium runtime when browser automation is needed. |
+| 🌐 | `/redpi-browser-install` | Install or reinstall the Playwright Chromium runtime. |
 | 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
 | ✳️ | `/redpi-claude` | Flexibly switch between Claude subscription (Opus/Sonnet) and 9Router MainAgent/SubAgent profiles. |
 | ⬆️ | `/yitec-update` | Alias for `/redpi-update`. |
@@ -695,6 +724,7 @@ npm pack --dry-run
 
 Smoke coverage includes:
 
+- automatic first-run provider onboarding
 - core extension load
 - commands/roles/memory in a real Pi TUI
 - `/redpi-setup` one-shot flow in a real Pi TUI
@@ -703,6 +733,9 @@ Smoke coverage includes:
 - local 9Router key file creation
 - timeout settings patching
 - guard that setup does not loop after success
+- strict per-folder role config: saved, scoped subagents, global untouched, new sessions start on the folder planner
+- manual `/model` picks stay pinned across turns
+- smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 
 Browser CLI test:
 

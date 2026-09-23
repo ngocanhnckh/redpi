@@ -43,6 +43,8 @@ env.update({
     'PI_CODING_AGENT_DIR': agent_dir,
     'REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS': '1000',
 })
+for k in ('NINE_ROUTER_API_KEY', 'ROUTER9_API_KEY', 'NINEROUTER_API_KEY', 'NINE_ROUTER_BASE_URL', 'ROUTER9_BASE_URL'):
+    env.pop(k, None)
 
 master, slave = pty.openpty()
 proc = subprocess.Popen(
@@ -77,7 +79,7 @@ def send(text, wait=0.8):
 
 try:
     drain(3)
-    send('/redpi-setup\r', 1.2)
+    send('\r', 1.5)               # first-run provider screen: 9Router opens /redpi-setup
     send('\r', 0.8)               # menu: 9Router login / connection
     send(base_url + '\r', 0.8)    # base URL
     send('test-key\r', 1.2)       # API key
@@ -100,7 +102,8 @@ text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
 cfg_path = os.path.join(agent_dir, 'yitec', 'model-tiers.json')
 settings_path = os.path.join(agent_dir, 'settings.json')
 local_path = os.path.join(agent_dir, 'yitec', '9router.local.json')
-for path in (cfg_path, settings_path, local_path):
+onboarding_path = os.path.join(agent_dir, 'yitec', 'onboarding.json')
+for path in (cfg_path, settings_path, local_path, onboarding_path):
     if not os.path.exists(path):
         print(text[-5000:])
         raise SystemExit(f'missing expected file: {path}')
@@ -108,6 +111,7 @@ for path in (cfg_path, settings_path, local_path):
 cfg = json.load(open(cfg_path))
 settings = json.load(open(settings_path))
 local = json.load(open(local_path))
+onboarding = json.load(open(onboarding_path))
 checks = [
     ('planner', '9router/team/MainAgent:high'),
     ('executor', '9router/team/SubAgent:low'),
@@ -122,10 +126,17 @@ for role, expected in checks:
 
 if settings.get('defaultProvider') != '9router' or settings.get('defaultModel') != 'team/MainAgent':
     raise SystemExit(f'bad default settings: {settings}')
+subagents = settings.get('subagents', {})
+if subagents.get('defaultModel') != '9router/team/SubAgent' or subagents.get('agentOverrides', {}).get('oracle', {}).get('model') != '9router/team/MainAgent':
+    raise SystemExit(f'bad subagent default: {settings}')
+if any('fallbackModels' in override for override in subagents.get('agentOverrides', {}).values()):
+    raise SystemExit(f'removed fallbackModels survived repair: {settings}')
 if settings.get('retry', {}).get('provider', {}).get('timeoutMs', 0) < 900000:
     raise SystemExit(f'timeout settings not patched: {settings}')
 if local.get('baseUrl') != base_url or local.get('apiKey') != 'test-key':
     raise SystemExit(f'bad local 9router config: {local}')
+if onboarding.get('completed') is not True or onboarding.get('provider') != 'router':
+    raise SystemExit(f'onboarding was not completed: {onboarding}')
 if 'Auto-configured RedPi roles' not in text:
     print(text[-5000:])
     raise SystemExit('setup wizard did not reach success notification')
@@ -135,5 +146,8 @@ if 'Role model setup' in after_success or '9Router login / connection' in after_
     print(text[-5000:])
     raise SystemExit('setup wizard appears to loop after success')
 
-print('RedPi setup wizard smoke passed: one-shot setup, MainAgent/SubAgent mapping, local auth, and timeout settings verified.')
+if 'Welcome to RedPi' not in text:
+    raise SystemExit('automatic first-run onboarding screen was not shown')
+
+print('RedPi setup wizard smoke passed: automatic onboarding, one-shot setup, MainAgent/SubAgent mapping, local auth, and timeout settings verified.')
 PY

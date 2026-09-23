@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "smoke": "./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh",
+    "smoke": "./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh",
+    "smoke:folder": "./scripts/folder-config-smoke-test.sh",
     "smoke:core": "./scripts/smoke-test.sh",
     "smoke:setup": "./scripts/setup-wizard-smoke-test.sh",
     "browser:install": "playwright install chromium"
@@ -19,6 +20,7 @@
   },
   "pi": {
     "extensions": ["./extensions/yitec-model-router.ts"],
+    "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]
   }
