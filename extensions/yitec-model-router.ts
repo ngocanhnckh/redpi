@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 type TierName = "high" | "low" | "uncapable" | string;
@@ -494,9 +494,39 @@ function doctor(cfg: LoadedConfig, ctx: ExtensionContext): string {
   notes.push(`Project config trusted: ${cfg.__projectTrusted ? "yes" : "no"}`);
   return [`Yitec doctor`, problems.length ? `Problems:\n- ${problems.join("\n- ")}` : "Problems: none", `Notes:\n- ${notes.join("\n- ")}`].join("\n\n");
 }
-function runPiPrint(cwd: string, model: string, prompt: string): string {
-  const args = ["-p", "--model", model, prompt];
-  const result = spawnSync("pi", args, { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 10 });
+type RunResult = { status: number | null; stdout: string; stderr: string; timedOut: boolean };
+
+// Never use spawnSync for anything slow: it blocks Pi's event loop, so the TUI stops
+// taking keystrokes until the child exits. This runs the child in its own process group
+// and kills the whole group (e.g. Chromium) on timeout or when the user aborts.
+function runAsync(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; signal?: AbortSignal; maxBytes?: number } = {}): Promise<RunResult> {
+  return new Promise((resolvePromise) => {
+    const maxBytes = opts.maxBytes ?? 1024 * 1024 * 4;
+    let stdout = "", stderr = "", timedOut = false, settled = false;
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: process.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const killTree = () => { try { process.kill(-child.pid!, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} } };
+    const timer = opts.timeoutMs ? setTimeout(() => { timedOut = true; killTree(); }, opts.timeoutMs) : undefined;
+    const onAbort = () => killTree();
+    opts.signal?.addEventListener?.("abort", onAbort, { once: true });
+    child.stdout.on("data", (d) => { if (stdout.length < maxBytes) stdout += d; });
+    child.stderr.on("data", (d) => { if (stderr.length < maxBytes) stderr += d; });
+    const finish = (status: number | null, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener?.("abort", onAbort);
+      if (error) stderr += `${stderr ? "\n" : ""}${error.message}`;
+      if (timedOut) stderr += `${stderr ? "\n" : ""}Timed out after ${Math.round((opts.timeoutMs || 0) / 1000)}s and was stopped.`;
+      resolvePromise({ status, stdout, stderr, timedOut });
+    };
+    // "exit" (not "close"): a leftover grandchild holding the pipes must not keep us waiting.
+    child.on("exit", (code) => finish(code));
+    child.on("error", (err) => finish(null, err));
+  });
+}
+
+async function runPiPrint(cwd: string, model: string, prompt: string, signal?: AbortSignal): Promise<string> {
+  const result = await runAsync("pi", ["-p", "--model", model, prompt], { cwd, signal, timeoutMs: 10 * 60 * 1000, maxBytes: 1024 * 1024 * 10 });
   return result.stdout || result.stderr || `pi exited with status ${result.status}`;
 }
 
@@ -534,17 +564,28 @@ function nineRouterContextWindow(id: string): number {
   return /^(MainAgent|SubAgent)$/i.test(id) ? 1_000_000 : 200_000;
 }
 
-function installBrowserRuntime(): string {
+// One browser command at a time: every command reopens the same persistent Chromium
+// profile, and parallel launches on one profile fail or stall.
+const BROWSER_TIMEOUT_MS = Number(process.env.REDPI_BROWSER_TOOL_TIMEOUT_MS || 60000);
+let browserQueue: Promise<unknown> = Promise.resolve();
+function serializeBrowser<T>(task: () => Promise<T>): Promise<T> {
+  const next = browserQueue.then(task, task);
+  browserQueue = next.catch(() => {});
+  return next;
+}
+
+async function installBrowserRuntime(): Promise<string> {
   const root = packageRoot();
   const lines: string[] = [];
-  lines.push(run("npm", ["install"], root));
-  lines.push(run("npx", ["playwright", "install", "chromium"], root));
+  lines.push(await run("npm", ["install", "--no-audit", "--no-fund"], root, 10 * 60 * 1000));
+  lines.push(await run("npx", ["playwright", "install", "chromium"], root, 10 * 60 * 1000));
   try { chmodSync(join(root, "scripts", "redpi-browser.js"), 0o755); } catch {}
   return lines.join("\n\n");
 }
 
 function claudeAuthStatus(): { installed: boolean; loggedIn: boolean; summary: string } {
-  const result = spawnSync("claude", ["auth", "status"], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  // Bounded: a hung `claude` CLI must not freeze onboarding or the Claude menu.
+  const result = spawnSync("claude", ["auth", "status"], { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 8000 });
   if (result.error && (result.error as any).code === "ENOENT") return { installed: false, loggedIn: false, summary: "Claude Code CLI is not installed. Install it first: https://docs.anthropic.com/en/docs/claude-code" };
   const raw = `${result.stdout || ""}${result.stderr || ""}`.trim();
   try {
@@ -691,8 +732,8 @@ function packageRoot(): string {
   return resolve(here, "..");
 }
 
-function run(cmd: string, args: string[], cwd?: string): string {
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 3 });
+async function run(cmd: string, args: string[], cwd?: string, timeoutMs = 2 * 60 * 1000): Promise<string> {
+  const r = await runAsync(cmd, args, { cwd, timeoutMs, maxBytes: 1024 * 1024 * 3 });
   const text = [r.stdout, r.stderr].filter(Boolean).join("\n").trim();
   return `${cmd} ${args.join(" ")} -> ${r.status ?? "?"}${text ? `\n${text}` : ""}`;
 }
@@ -708,17 +749,17 @@ function shouldAutoUpdate(cfg: Config): boolean {
   return true;
 }
 
-function updateRedPi(cfg: Config, force = false): string {
+async function updateRedPi(cfg: Config, force = false): Promise<string> {
   const lines = [`RedPi update ${force ? "forced" : "auto"}`];
   if (!force && !shouldAutoUpdate(cfg)) return "RedPi auto-update skipped: interval has not elapsed.";
   if (cfg.autoUpdate?.updateHarness !== false) {
     const root = packageRoot();
-    if (existsSync(join(root, ".git"))) lines.push(run("git", ["pull", "--ff-only"], root));
+    if (existsSync(join(root, ".git"))) lines.push(await run("git", ["pull", "--ff-only"], root));
     else lines.push(`Harness package root is not a git checkout: ${root}. Run: pi update --extensions`);
   }
   if (cfg.autoUpdate?.updateSkills !== false) {
     for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill")]) {
-      if (existsSync(join(dir, ".git"))) lines.push(run("git", ["pull", "--ff-only"], dir));
+      if (existsSync(join(dir, ".git"))) lines.push(await run("git", ["pull", "--ff-only"], dir));
       else lines.push(`Skill repo not found, skipping: ${dir}`);
     }
   }
@@ -779,27 +820,27 @@ export default function (pi: ExtensionAPI) {
     return ctx.ui.notify(`Enabled AskClaude in ${CLAUDE_BRIDGE_CONFIG_PATH}. Restart Pi or run /reload. AskClaude uses your Claude Code session; use read mode for advice and full mode only when you want Claude to edit/run commands.`, "info");
   } });
   pi.registerCommand("yitec-claude", { description: "Alias for /redpi-claude", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-claude", { deliverAs: "followUp", expandPromptTemplates: true }) });
-  pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
-  pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(await updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(await updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
     const ok = !ctx.hasUI || await ctx.ui.confirm("Install RedPi browser runtime?", "This downloads Playwright Chromium. It can take a few minutes but only needs to run once.");
-    if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+    if (ok) { ctx.ui.notify("Installing Playwright Chromium in the background; Pi stays usable…", "info"); ctx.ui.notify((await installBrowserRuntime()) || "Browser install completed.", "info"); }
   } });
   pi.registerCommand("redpi-frontend-check", { description: "Run a compact browser frontend check: page text, console/errors, network failures, optional screenshot", handler: async (args, ctx) => {
     const url = (args || await (ctx.hasUI ? ctx.ui.input("Frontend URL", "http://localhost:3000") : undefined) || "").trim();
     if (!url) return ctx.ui.notify("Usage: /redpi-frontend-check http://localhost:3000", "error");
     const script = join(packageRoot(), "scripts", "redpi-browser.js");
-    const runBrowser = (cmd: string[]) => spawnSync("node", [script, ...cmd], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
-    let goto = runBrowser(["goto", url, "--max", "1800"]);
+    const runBrowser = (cmd: string[]) => runAsync("node", [script, ...cmd], { cwd: ctx.cwd, signal: ctx.signal, timeoutMs: BROWSER_TIMEOUT_MS });
+    let goto = await runBrowser(["goto", url, "--max", "1800"]);
     let out = (goto.stdout || goto.stderr || "").trim();
     if (goto.status !== 0 && /Playwright is not installed|Executable doesn't exist|playwright install/i.test(out) && ctx.hasUI) {
       const ok = await ctx.ui.confirm("RedPi browser runtime is missing", "Install Playwright Chromium now? This can take a few minutes and only needs to run once.");
-      if (ok) { installBrowserRuntime(); goto = runBrowser(["goto", url, "--max", "1800"]); out = (goto.stdout || goto.stderr || "").trim(); }
+      if (ok) { await installBrowserRuntime(); goto = await runBrowser(["goto", url, "--max", "1800"]); out = (goto.stdout || goto.stderr || "").trim(); }
     }
-    const errors = (runBrowser(["errors", "--max", "2500"]).stdout || "").trim();
+    const errors = ((await runBrowser(["errors", "--max", "2500"])).stdout || "").trim();
     const shotPath = join(ctx.cwd, CONFIG_DIR_NAME, "yitec", `frontend-${Date.now()}.png`);
     mkdirSync(dirname(shotPath), { recursive: true });
-    const shot = (runBrowser(["screenshot", shotPath]).stdout || "").trim();
+    const shot = ((await runBrowser(["screenshot", shotPath])).stdout || "").trim();
     ctx.ui.notify(`Frontend check: ${url}\n\nPage:\n${out}\n\nErrors/Network:\n${errors || "none"}\n\n${shot}`, "info");
   } });
   pi.registerCommand("redpi-repair-config", { description: "Repair RedPi 9Router role config from live models, avoiding stale/inactive combos", handler: async (_args, ctx) => {
@@ -859,7 +900,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (choice === "Install Playwright + Chromium") {
         const ok = await ctx.ui.confirm("Install browser runtime?", "This runs npm install and npx playwright install chromium for the RedPi package.");
-        if (ok) ctx.ui.notify(installBrowserRuntime() || "Browser install completed.", "info");
+        if (ok) { ctx.ui.notify("Installing Playwright Chromium in the background; Pi stays usable…", "info"); ctx.ui.notify((await installBrowserRuntime()) || "Browser install completed.", "info"); }
         return;
       }
       if (choice === "Configure role models") {
@@ -867,7 +908,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (choice === "Check status") {
-        const browserOk = spawnSync("node", [join(packageRoot(), "scripts", "redpi-browser.js"), "--help"], { encoding: "utf8", maxBuffer: 1024 * 128 }).status === 0;
+        const browserOk = (await runAsync("node", [join(packageRoot(), "scripts", "redpi-browser.js"), "--help"], { timeoutMs: 15000 })).status === 0;
         const claude = claudeAuthStatus();
         ctx.ui.notify(`9Router: ${await pingNineRouter(ctx.signal)}\n\nClaude bridge: ${claude.summary}\n\nBrowser CLI: ${browserOk ? "installed" : "missing dependencies; choose Install Playwright + Chromium"}\nConfig file: ${NINE_ROUTER_LOCAL_PATH}`, "info");
         return;
@@ -998,7 +1039,7 @@ export default function (pi: ExtensionAPI) {
     const model = roleCandidates(cfg, cfg.advisor?.modelRole || "reviewer")[0] || roleCandidates(cfg, "reviewer")[0];
     if (!model) return ctx.ui.notify("No reviewer model configured.", "error");
     const watch = watchdogText(ctx.cwd, ctx.isProjectTrusted());
-    const out = runPiPrint(ctx.cwd, entryModel(model), `Advisor-lite review. Severity labels: nit, concern, blocker. WATCHDOG guidance:\n${watch || "(none)"}\n\nReview this request/context and give concise actionable findings:\n${args || currentUserPrompt}`);
+    const out = await runPiPrint(ctx.cwd, entryModel(model), `Advisor-lite review. Severity labels: nit, concern, blocker. WATCHDOG guidance:\n${watch || "(none)"}\n\nReview this request/context and give concise actionable findings:\n${args || currentUserPrompt}`, ctx.signal);
     ctx.ui.notify(out, "info");
   }});
 
@@ -1051,8 +1092,10 @@ export default function (pi: ExtensionAPI) {
       if (selected) ctx.ui.setStatus("yitec-router", `folder config · planner on ${selected}`);
       else ctx.ui.notify(`RedPi folder config: planner model ${roleModelLabel(cfg, "planner") || "(unset)"} is not available. Fix it with /redpi-config.`, "warning");
     }
-    const updateResult = updateRedPi(cfg, false);
-    if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
+    // Background: a slow or stuck git pull must never hold up startup or typing.
+    void updateRedPi(cfg, false).then((updateResult) => {
+      if (!updateResult.includes("skipped")) ctx.ui.notify(`${updateResult}\n\nRestart Pi or run /reload to use updated extension code.`, "info");
+    }).catch(() => {});
   });
 
   pi.on("before_provider_request", async (event: any, ctx: any) => {
@@ -1142,12 +1185,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "yitec_vision_task", label: "Vision Task", description: "Run a one-off image analysis task through the configured vision model when the active model has no image capability.",
     parameters: Type.Object({ imagePath: Type.String({ description: "Path to the image file." }), prompt: Type.String({ description: "What to inspect or extract from the image." }) }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
       const model = visionCandidates(cfg)[0];
       if (!model) throw new Error("No vision model configured in yitec/model-tiers.json");
       const imagePath = resolve(ctx.cwd, params.imagePath);
-      const result = spawnSync("pi", ["-p", "--model", entryModel(model), `@${imagePath}`, params.prompt], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 10 });
+      const result = await runAsync("pi", ["-p", "--model", entryModel(model), `@${imagePath}`, params.prompt], { cwd: ctx.cwd, signal, timeoutMs: 10 * 60 * 1000, maxBytes: 1024 * 1024 * 10 });
       const text = result.stdout || result.stderr || "";
       return { content: [{ type: "text", text }], details: { model: entryModel(model), status: result.status } };
     },
@@ -1160,17 +1203,19 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Run compact Playwright browser commands without MCP context bloat",
     promptGuidelines: ["Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters."],
     parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto https://example.com --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `screenshot /tmp/page.png`, or `reset`." }) }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const script = join(packageRoot(), "scripts", "redpi-browser.js");
       const args = String(params.command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((s) => s.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
-      let result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+      const runBrowser = () => serializeBrowser(() => runAsync("node", [script, ...args], { cwd: ctx.cwd, signal, timeoutMs: BROWSER_TIMEOUT_MS }));
+      let result = await runBrowser();
       let text = (result.stdout || result.stderr || "").trim();
+      if (result.timedOut) text += "\n\nThe browser command was stopped after the time limit. The page may be slow or never finish loading; try `text` or `screenshot`, or check the dev server.";
       const missingBrowser = result.status !== 0 && /Playwright is not installed|Executable doesn't exist|playwright install/i.test(text);
       if (missingBrowser && ctx.hasUI) {
         const ok = await ctx.ui.confirm("RedPi browser runtime is missing", "Install Playwright Chromium now? This can take a few minutes and only needs to run once.");
         if (ok) {
-          const install = installBrowserRuntime();
-          result = spawnSync("node", [script, ...args], { cwd: ctx.cwd, encoding: "utf8", maxBuffer: 1024 * 1024 * 4, env: process.env });
+          const install = await installBrowserRuntime();
+          result = await runBrowser();
           text = `${install}\n\n--- retry result ---\n${(result.stdout || result.stderr || "").trim()}`.trim();
         }
       } else if (missingBrowser) {

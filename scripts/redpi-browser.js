@@ -16,6 +16,12 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.p
 const STATE_DIR = process.env.REDPI_BROWSER_DIR || path.join(AGENT_DIR, 'yitec', 'browser');
 const STATE_PATH = path.join(STATE_DIR, 'state.json');
 const DEFAULT_TIMEOUT = Number(process.env.REDPI_BROWSER_TIMEOUT || 15000);
+// Hard cap for one command, so a page that never settles cannot hang the caller.
+const MAX_RUNTIME = Number(process.env.REDPI_BROWSER_MAX_MS || 50000);
+setTimeout(() => {
+  console.error(`redpi-browser: stopped after ${Math.round(MAX_RUNTIME / 1000)}s (page too slow or still loading).`);
+  process.exit(124);
+}, MAX_RUNTIME).unref();
 
 function usage(code = 0) {
   console.log(`RedPi browser CLI\n\nCommands:\n  goto <url> [--max N]\n  text [--max N]\n  html [--max N]\n  title\n  click <selector> [--max N]\n  type <selector> <text> [--submit] [--max N]\n  eval <javascript> [--max N]\n  wait-for-text <text> [--max N]\n  console [--max N]\n  errors [--max N]\n  network [--max N]\n  screenshot <path>\n  reset\n\nSelectors use Playwright syntax: text=Login, role=button[name="Save"], css selectors, etc.\nOutput is intentionally compact for token efficiency.`);
@@ -80,7 +86,8 @@ async function withPage(fn) {
     writeState(state);
     return result;
   } finally {
-    await ctx.close();
+    // A busy page can stall close(); do not let shutdown hang the command.
+    await Promise.race([ctx.close().catch(() => {}), new Promise(r => setTimeout(r, 5000))]);
   }
 }
 function pageSummary(page, max) {
