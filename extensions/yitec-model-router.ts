@@ -44,6 +44,29 @@ const FOLDER_CONFIG_DIR = join(USER_YITEC_DIR, "folders");
 const ROLE_NAMES = ["planner", "executor", "subagent", "reviewer", "vision", "commit", "tiny", "default"];
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const THINKING_SUFFIX = /:(off|minimal|low|medium|high|xhigh|max)$/;
+// Preset role profiles for /redpi-config. They reference 9Router combos by exact name, so
+// they only work on a gateway that defines combos with these names (see README).
+const ROLE_PROFILES: Record<string, { label: string; summary: string; roles: Record<string, [string, string]> }> = {
+  cybersecurity: {
+    label: "🛡 Cybersecurity",
+    summary: "Security research and pentest work: OpenMed plans, reviews and reads screenshots; norail executes and runs subagents; SubAgent writes commits; OpenSmall handles tiny tasks.",
+    roles: {
+      planner: ["OpenMed", "high"],
+      executor: ["norail", "high"],
+      subagent: ["norail", "xhigh"],
+      reviewer: ["OpenMed", "high"],
+      vision: ["OpenMed", "medium"],
+      commit: ["SubAgent", "low"],
+      tiny: ["OpenSmall", "off"],
+      default: ["norail", "medium"],
+    },
+  },
+};
+
+function profileRoles(key: string): Record<string, RoleConfig> {
+  return Object.fromEntries(Object.entries(ROLE_PROFILES[key].roles).map(([role, [combo, thinking]]) => [role, { models: [`9router/${combo}:${thinking}`], thinking }]));
+}
+
 // Role config chosen with "This session only"; cleared when a new session starts.
 let sessionOverride: Config | undefined;
 // True while RedPi itself switches models, so model_select can tell user picks apart.
@@ -102,12 +125,6 @@ function redpiBanner() {
   return process.env.REDPI_FULL_BANNER === "1"
     ? REDPI_BANNER_FULL.map((line, i) => i < 6 ? `${RED_SIGNAL}${line.slice(0, 25)}${MATRIX_BRIGHT}${line.slice(25)}${RESET}` : `${CYAN}${line}${RESET}`)
     : REDPI_BANNER_COMPACT;
-}
-function collectStrings(v: any, out: string[] = []): string[] {
-  if (typeof v === "string") out.push(v);
-  else if (Array.isArray(v)) for (const x of v) collectStrings(x, out);
-  else if (v && typeof v === "object") for (const x of Object.values(v)) collectStrings(x, out);
-  return out;
 }
 function contextBar(used: number, total?: number) {
   if (!total || total <= 0) return `${used.toLocaleString()} tok`;
@@ -952,25 +969,31 @@ export default function (pi: ExtensionAPI) {
     return [
       `Source: ${cfg.__path || "built-in defaults"}`,
       `Mode: ${cfg.routing?.mode === "strict" ? "strict (only these models, no fallbacks)" : "auto (tiers and fallbacks allowed)"}`,
+      ...((cfg as any).profile && ROLE_PROFILES[(cfg as any).profile] ? [`Profile: ${ROLE_PROFILES[(cfg as any).profile].label}`] : []),
       `Manual /model pin: ${pinnedModel || "none"}`,
       "",
       ...rows,
     ].join("\n");
   }
 
+  const SCOPE = {
+    folder: "📁 This folder: strict role models for every new session here",
+    session: "⏱ This session only",
+    global: "🌐 Global default (folders without their own config)",
+    project: "📦 Project file .pi/yitec (can be committed and shared)",
+  };
+
   pi.registerCommand("redpi-config", { description: "Set RedPi role models for this folder (strict), this session, the project file, or globally", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return ctx.ui.notify("/redpi-config needs an interactive UI. Edit ~/.pi/agent/yitec/model-tiers.json in print/headless mode.", "error");
     const trusted = ctx.isProjectTrusted();
     const folderPath = findFolderConfig(ctx.cwd);
-    const FOLDER = "📁 This folder: strict role models for every new session here";
-    const SESSION = "⏱ This session only";
-    const GLOBAL = "🌐 Global default (folders without their own config)";
-    const PROJECT = "📦 Project file .pi/yitec (can be committed and shared)";
+    const { folder: FOLDER, session: SESSION, global: GLOBAL, project: PROJECT } = SCOPE;
+    const PROFILE = "🛡 Apply a preset profile (e.g. Cybersecurity)";
     const SHOW = "🔎 Show current routing";
     const UNPIN = `▶ Resume role routing (unpin ${pinnedModel})`;
     const REMOVE = "🗑 Remove this folder's config (back to global)";
     const choice = await ctx.ui.select(`RedPi role models${folderPath ? " (this folder has its own strict config)" : ""}`, [
-      FOLDER, SESSION, GLOBAL, ...(trusted ? [PROJECT] : []), SHOW, ...(pinnedModel ? [UNPIN] : []), ...(folderPath ? [REMOVE] : []), "Done",
+      FOLDER, SESSION, GLOBAL, PROFILE, ...(trusted ? [PROJECT] : []), SHOW, ...(pinnedModel ? [UNPIN] : []), ...(folderPath ? [REMOVE] : []), "Done",
     ]);
     if (!choice || choice === "Done") return;
     if (choice === SHOW) return ctx.ui.notify(routingSummary(ctx), "info");
@@ -985,28 +1008,54 @@ export default function (pi: ExtensionAPI) {
       return ctx.ui.notify(`Removed ${folderPath}.\n\nSubagent models in ${join(folder, CONFIG_DIR_NAME, "settings.json")} were left as they are; delete its "subagents" block if you no longer want them.`, "info");
     }
     const effective = loadConfig(ctx.cwd, trusted);
+    if (choice === PROFILE) {
+      const labels = Object.values(ROLE_PROFILES).map(p => p.label);
+      const picked = await ctx.ui.select("Preset profile", labels);
+      const key = Object.keys(ROLE_PROFILES).find(k => ROLE_PROFILES[k].label === picked);
+      if (!key) return;
+      const profile = ROLE_PROFILES[key];
+      const combos = [...new Set(Object.values(profile.roles).map(([combo]) => combo))];
+      const live = (await fetchNineRouterModels(ctx.signal, { cache: true })).map((m: any) => m.id);
+      const missing = combos.filter(c => !live.includes(c));
+      const plan = Object.entries(profile.roles).map(([role, [combo, thinking]]) => `  ${role.padEnd(9)} 9router/${combo}:${thinking}`).join("\n");
+      if (missing.length && !(await ctx.ui.confirm(`Your 9Router is missing combos for ${profile.label}`, `Not found: ${missing.join(", ")}.\n\nThis profile needs 9Router combos named exactly: ${combos.join(", ")}. Roles using a missing combo will fail until you create it.\n\nApply anyway?`))) return;
+      ctx.ui.notify(`${profile.label} profile\n${profile.summary}\n\n${plan}`, "info");
+      const where = await ctx.ui.select(`${profile.label}: apply where?`, [FOLDER, SESSION, GLOBAL, ...(trusted ? [PROJECT] : [])]);
+      if (!where) return;
+      const base: any = where === FOLDER ? { ...snapshotConfig(effective), folder: resolve(ctx.cwd) } : where === SESSION ? snapshotConfig(effective) : deepMerge(DEFAULT_CONFIG, readJson(configWritePath(ctx.cwd, trusted, where === PROJECT ? "project" : "global"), {}));
+      if (where === FOLDER && folderPath) base.folder = readJson(folderPath, {}).folder || base.folder;
+      // Profiles are strict everywhere: exactly these combos, never a MainAgent fallback.
+      const next = { ...base, roles: profileRoles(key), routing: { ...(base.routing || {}), mode: "strict" }, profile: key };
+      return saveRoleConfig(ctx, where, next, folderPath, `Applied ${profile.label} profile.`);
+    }
     let next: any;
     if (choice === FOLDER) next = folderPath ? deepMerge(DEFAULT_CONFIG, readJson(folderPath, {})) : { ...snapshotConfig(effective), folder: resolve(ctx.cwd) };
     else if (choice === SESSION) next = sessionOverride ? deepMerge(DEFAULT_CONFIG, sessionOverride) : snapshotConfig(effective);
     else next = deepMerge(DEFAULT_CONFIG, readJson(configWritePath(ctx.cwd, trusted, choice === PROJECT ? "project" : "global"), {}));
     if (choice === FOLDER || choice === SESSION) next.routing = { ...(next.routing || {}), mode: "strict" };
     if (!(await editRoles(ctx, next, choice === FOLDER ? "This folder" : choice === SESSION ? "This session" : choice === PROJECT ? "Project file" : "Global"))) return;
+    await saveRoleConfig(ctx, choice, next, folderPath);
+  } });
+
+  async function saveRoleConfig(ctx: any, where: string, next: any, folderPath: string | undefined, heading?: string) {
+    const trusted = ctx.isProjectTrusted();
     // An explicit config choice replaces any earlier manual /model pin.
     pinnedModel = undefined;
-    const lines: string[] = [];
-    if (choice === FOLDER) {
+    const lines: string[] = heading ? [heading] : [];
+    if (where === SCOPE.folder) {
       const path = folderPath || folderConfigPath(ctx.cwd);
       writeJson(path, next);
       lines.push(`Saved strict role models for ${next.folder}.`, `Every new session in this folder uses exactly these models; no MainAgent default or fallbacks.`, `Config: ${path}`);
       lines.push(`Subagent models: ${writeFolderSubagents(next.folder, next)}`);
-    } else if (choice === SESSION) {
+    } else if (where === SCOPE.session) {
       sessionOverride = next;
       lines.push("Role models set for this session only (strict). New sessions go back to the folder or global config.");
     } else {
-      const path = configWritePath(ctx.cwd, trusted, choice === PROJECT ? "project" : "global");
+      const project = where === SCOPE.project;
+      const path = configWritePath(ctx.cwd, trusted, project ? "project" : "global");
       writeJson(path, next);
-      lines.push(`Saved ${choice === PROJECT ? "project" : "global"} role models in ${path}.`);
-      if (choice === GLOBAL) {
+      lines.push(`Saved ${project ? "project" : "global"} role models in ${path}.`);
+      if (!project) {
         const planner = roleModelLabel(next, "planner");
         if (planner) patchPiDefaults(planner.replace(THINKING_SUFFIX, ""), roleThinking(next, "planner") || "high");
         else patchPiSettings();
@@ -1016,7 +1065,7 @@ export default function (pi: ExtensionAPI) {
     }
     lines.push("", await applyPlannerNow(ctx));
     ctx.ui.notify(lines.join("\n"), "info");
-  } });
+  }
   pi.registerCommand("yitec-config", { description: "Alias for /redpi-config", handler: async (_args, ctx) => pi.sendUserMessage("/redpi-config", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("yitec-tiers", { description: "Show Yitec model tier routing configuration", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(loadConfig(ctx.cwd, ctx.isProjectTrusted()), null, 2), "info") });
   pi.registerCommand("yitec-9router", { description: "Check RedPi native 9Router gateway integration", handler: async (_args, ctx) => {
@@ -1098,17 +1147,26 @@ export default function (pi: ExtensionAPI) {
     }).catch(() => {});
   });
 
-  pi.on("before_provider_request", async (event: any, ctx: any) => {
-    const strings = collectStrings(event.payload || {});
-    const approxTokens = Math.ceil(strings.reduce((n, s) => n + s.length, 0) / 4);
-    const total = ctx.model?.contextWindow || ctx.model?.context_window || ctx.model?.context || undefined;
-    const label = contextBar(approxTokens, total);
-    const color = total && approxTokens / total > 0.8 ? "\x1b[38;5;196m" : total && approxTokens / total > 0.5 ? "\x1b[38;5;226m" : MATRIX_BRIGHT;
+  // Show Pi's own context figure (the one auto-compaction uses). Estimating from the raw
+  // request payload overcounted wildly: base64 screenshots and tool schemas are not tokens.
+  function updateContextStatus(ctx: any) {
+    const usage = ctx.getContextUsage?.();
+    const total = usage?.contextWindow || ctx.model?.contextWindow;
+    if (!usage || usage.tokens == null) {
+      ctx.ui.setStatus("redpi-ctx", total ? `ctx ?/${Math.round(total / 1000)}k (updates after the next reply)` : "ctx waiting");
+      return;
+    }
+    const label = contextBar(usage.tokens, total);
+    const ratio = total ? usage.tokens / total : 0;
+    const color = ratio > 0.8 ? "\x1b[38;5;196m" : ratio > 0.5 ? "\x1b[38;5;226m" : MATRIX_BRIGHT;
     ctx.ui.setStatus("redpi-ctx", `ctx ${label}`);
     if (ctx.hasUI && ctx.mode === "tui" && process.env.REDPI_CONTEXT_WIDGET === "1") {
       ctx.ui.setWidget("redpi-context", [`${color}Context${RESET} ${label}`, `${DIM}${ctx.model?.provider || ""}/${ctx.model?.id || ""}${RESET}`]);
     }
-  });
+  }
+  pi.on("before_provider_request", async (_event: any, ctx: any) => updateContextStatus(ctx));
+  pi.on("turn_end", async (_event: any, ctx: any) => updateContextStatus(ctx));
+  pi.on("session_compact", async (_event: any, ctx: any) => updateContextStatus(ctx));
 
   pi.on("input", async (event) => {
     if (event.source === "extension") return { action: "continue" };

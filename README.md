@@ -339,6 +339,27 @@ Pick a role, choose its model and thinking level, repeat for other roles, then *
 - New sessions in the folder start directly on its planner model.
 - `🔎 Show current routing` shows which config is active and the model for each role; `🗑 Remove this folder's config` returns the folder to the global defaults.
 
+### 🛡 Preset profiles: Cybersecurity
+
+`/redpi-config` → **🛡 Apply a preset profile** applies a ready-made strict role setup in one step. Choose where it applies (this folder, this session, global, or the project file), just like a hand-made config.
+
+The **Cybersecurity** profile is tuned for security research and pentest work:
+
+| Role | 9Router combo | Thinking |
+| --- | --- | --- |
+| `planner` | `OpenMed` | `high` |
+| `executor` | `norail` | `high` |
+| `subagent` | `norail` | `xhigh` |
+| `reviewer` | `OpenMed` | `high` |
+| `vision` | `OpenMed` | `medium` |
+| `commit` | `SubAgent` | `low` |
+| `tiny` | `OpenSmall` | `off` |
+| `default` | `norail` | `medium` |
+
+> ⚠️ **Combo names must match exactly.** Presets point at 9Router combos by name, so they only work on a 9Router gateway that defines combos named **`OpenMed`**, **`norail`**, **`OpenSmall`**, and **`SubAgent`** (as the YITEC 9Router does). Names are case-sensitive. If your gateway names them differently, RedPi lists the missing combos and asks before applying; roles pointing at a missing combo fail until you create it. You can also apply the profile and then rename individual roles with `/redpi-config`.
+
+Profiles are always strict: exactly these combos, no `MainAgent` default and no automatic failover. `🔎 Show current routing` shows which profile is active.
+
 **Manual `/model` picks stick.** If you switch models with `/model` (or by cycling), RedPi pins that model for the rest of the session: it no longer switches back to the planner model on the next turn and does not fail over. Use `/redpi-config` → `▶ Resume role routing` to unpin.
 
 ---
@@ -608,7 +629,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | --- | --- | --- |
 | 🧙 | `/redpi-setup` | Friendly TUI setup wizard for 9Router login, browser install/check, auto role config, and status. |
 | 🧙 | `/yitec-setup` | Alias for `/redpi-setup`. |
-| 🎯 | `/redpi-config` | Set role models and thinking for this folder (strict), this session, the project file, or globally; show or unpin routing. |
+| 🎯 | `/redpi-config` | Set role models and thinking for this folder (strict), this session, the project file, or globally; apply preset profiles (Cybersecurity); show or unpin routing. |
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 🌐 | `/redpi-browser-install` | Install or reinstall the Playwright Chromium runtime. |
@@ -735,6 +756,7 @@ Smoke coverage includes:
 - guard that setup does not loop after success
 - strict per-folder role config: saved, scoped subagents, global untouched, new sessions start on the folder planner
 - manual `/model` picks stay pinned across turns
+- Cybersecurity preset profile applies its exact combos strictly
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 
 Browser CLI test:

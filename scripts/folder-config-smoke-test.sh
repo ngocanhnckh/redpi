@@ -11,8 +11,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.endswith('/models'):
             # Real 9Router marks combos with owned_by "combo"; raw provider routes must stay hidden.
-            body = json.dumps({'data': [{'id': 'team/MainAgent', 'owned_by': 'combo'}, {'id': 'team/SubAgent', 'owned_by': 'combo'},
-                                        {'id': 'team/Other', 'owned_by': 'combo'}, {'id': 'kr/raw-provider-model', 'owned_by': 'kr'}]}).encode()
+            combos = ['team/MainAgent', 'team/SubAgent', 'team/Other', 'OpenMed', 'norail', 'OpenSmall', 'SubAgent']
+            body = json.dumps({'data': [{'id': c, 'owned_by': 'combo'} for c in combos] + [{'id': 'kr/raw-provider-model', 'owned_by': 'kr'}]}).encode()
             self.send_response(200)
             self.send_header('content-type', 'application/json')
             self.send_header('content-length', str(len(body)))
@@ -141,5 +141,28 @@ after_prompt = third.split('hello', 1)[-1]
 if 'planner on 9router/team/Other' in after_prompt:
     print(third[-4000:]); raise SystemExit('role routing overrode the pinned model')
 
-print('RedPi folder config smoke passed: strict per-folder roles saved, subagents scoped, global untouched, new sessions start on the folder planner, manual /model picks stay pinned, picker lists combos only.')
+# The Cybersecurity preset applies its exact combos, strictly, to a fresh folder in one pass.
+folder2 = tempfile.mkdtemp(prefix='redpi-folder-')
+fourth = session(folder2, [
+    ('/redpi-config\r', 'Apply a preset profile'),
+    (DOWN * 3 + '\r', 'Preset profile'),
+    ('\r', 'apply where?'),
+    ('\r', 'Current session now on'),
+])
+before = set(configs)
+after = {os.path.join(agent_dir, 'yitec', 'folders', f) for f in os.listdir(os.path.join(agent_dir, 'yitec', 'folders'))}
+new_configs = after - before
+if len(new_configs) != 1:
+    print(fourth[-4000:]); raise SystemExit(f'profile did not create one folder config: {new_configs}')
+sec = json.load(open(new_configs.pop()))
+expected = {'planner': '9router/OpenMed:high', 'executor': '9router/norail:high', 'subagent': '9router/norail:xhigh',
+            'reviewer': '9router/OpenMed:high', 'vision': '9router/OpenMed:medium', 'commit': '9router/SubAgent:low',
+            'tiny': '9router/OpenSmall:off', 'default': '9router/norail:medium'}
+got = {r: v['models'][0] for r, v in sec['roles'].items()}
+if got != expected or sec.get('routing', {}).get('mode') != 'strict' or sec.get('profile') != 'cybersecurity':
+    raise SystemExit(f'cybersecurity profile applied wrongly: {got} {sec.get("routing")} {sec.get("profile")}')
+if 'Current session now on 9router/OpenMed' not in fourth:
+    print(fourth[-4000:]); raise SystemExit('cybersecurity profile was not applied to the live session')
+
+print('RedPi folder config smoke passed: strict per-folder roles saved, subagents scoped, global untouched, new sessions start on the folder planner, manual /model picks stay pinned, picker lists combos only, Cybersecurity profile applies.')
 PY

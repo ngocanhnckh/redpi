@@ -59,10 +59,21 @@ proc = subprocess.Popen(
 os.close(slave)
 out = b''
 
-def drain(seconds):
+def clean():
+    t = out.decode('utf-8', 'ignore')
+    t = re.sub(r'\x1b\][^\a]*(?:\a|\x1b\\)', '', t)
+    return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', t)
+
+def drain(seconds, until=None):
+    # Wait for the expected screen instead of fixed sleeps: a fresh agent dir makes Pi
+    # download fd/ripgrep on first start, which delays every screen.
     global out
+    start = len(clean())
     end = time.time() + seconds
     while time.time() < end:
+        if until and until in clean()[start:]:
+            drain(0.3)
+            return
         ready, _, _ = select.select([master], [], [], 0.05)
         if ready:
             try:
@@ -73,19 +84,18 @@ def drain(seconds):
                 break
             out += chunk
 
-def send(text, wait=0.8):
+def send(text, until):
     os.write(master, text.encode())
-    drain(wait)
+    drain(30, until)
 
 try:
-    drain(3)
-    send('\r', 1.5)               # first-run provider screen: 9Router opens /redpi-setup
-    send('\r', 0.8)               # menu: 9Router login / connection
-    send(base_url + '\r', 0.8)    # base URL
-    send('test-key\r', 1.2)       # API key
-    send('\r', 0.8)               # confirm auto-config
-    send('\r', 2.0)               # use recommended MainAgent/SubAgent mapping
-    drain(2)
+    drain(60, 'Welcome to RedPi')
+    send('\r', 'RedPi setup')                      # first-run provider screen: 9Router opens /redpi-setup
+    send('\r', '9Router base URL')                 # menu: 9Router login / connection
+    send(base_url + '\r', '9Router API key')       # base URL
+    send('test-key\r', 'Auto-configure RedPi')     # API key
+    send('\r', 'Role model setup')                 # confirm auto-config
+    send('\r', 'Auto-configured RedPi roles')      # use recommended MainAgent/SubAgent mapping
     os.write(master, b'\x04')
     drain(0.5)
 finally:
