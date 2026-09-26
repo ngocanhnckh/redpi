@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RedPi HQ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="/static/hq.css">
+<style>
+  .project { margin-bottom: 22px; }
+  .project > .section-title { margin: 0 0 8px; display: flex; gap: 10px; align-items: baseline; }
+  .runs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .run-card { display: block; padding: 14px; color: inherit; }
+  .run-card:hover { border-color: var(--green-dim); text-decoration: none; }
+  .run-card .t { font-weight: 600; margin: 6px 0 10px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--green); }
+  .run-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 16px; }
+  .run-head h1 { margin: 0; font-size: 22px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+  .kanban { display: grid; grid-template-columns: repeat(5, minmax(170px, 1fr)); gap: 10px; overflow-x: auto; }
+  .col { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; min-height: 160px; display: flex; flex-direction: column; }
+  .col h3 { margin: 0; padding: 10px 12px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); }
+  .col .cards { padding: 8px; display: grid; gap: 8px; align-content: start; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; }
+  .card .id { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .card .tt { font-weight: 600; font-size: 13px; margin: 2px 0 6px; }
+  .card .who { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .card .note { font-size: 12px; color: var(--amber); margin-top: 4px; }
+  .col.blocked h3 { color: var(--red); } .col.done h3 { color: var(--green); }
+  .avatar { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; color: #04130a; flex: none; }
+  .avatar.lg { width: 36px; height: 36px; font-size: 15px; }
+  .team { display: grid; gap: 8px; }
+  .member { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-align: left; width: 100%; }
+  .member:hover { border-color: var(--green-dim); }
+  .member .name { font-weight: 700; } .member .role { color: var(--muted); font-size: 12px; }
+  .member .doing { font-size: 12px; color: var(--text); opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat { max-height: 520px; overflow-y: auto; display: grid; gap: 8px; padding: 12px 14px; }
+  .msg { font-size: 13px; }
+  .msg .hdr { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+  .msg .from { font-weight: 700; } .msg .to { color: var(--muted); } .msg .when { color: var(--faint); font-size: 11px; margin-left: auto; }
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; padding: 7px 9px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); }
+  .msg.task .body { background: none; border: 0; padding: 0; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .msg.decision .body, .msg.system .body { border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+  .msg.interrupt .body, .msg.command .body { border-color: color-mix(in srgb, var(--cyan) 45%, transparent); }
+  .composer { display: grid; grid-template-columns: 130px minmax(0, 1fr) auto; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+  .composer select { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--panel); border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgba(0,0,0,.35); z-index: 40; display: flex; flex-direction: column; }
+  .drawer .scroll { overflow-y: auto; padding: 16px; display: grid; gap: 14px; align-content: start; }
+  .cmd { display: flex; gap: 8px; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .cmd code { flex: 1; overflow-x: auto; white-space: nowrap; color: var(--green); }
+  .last { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 280px; overflow-y: auto; }
+  .events { font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
+  .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
+  .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
+  @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand"><span class="r">Red</span><span class="p">Pi</span> <span class="hq">// HQ</span></span>
+  <span class="crumbs" id="crumbs"></span>
+  <a class="btn" href="/">All runs</a>
+</header>
+<main class="wrap" id="app"><div class="empty">Loading…</div></main>
+<div id="drawer-root"></div>
+<script type="module" src="/static/dashboard.js"></script>
+</body>
+</html>

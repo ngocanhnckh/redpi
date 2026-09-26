@@ -99,6 +99,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
+| 🗺️ | **RedPlan + HQ** | `/redplan`: plan with you, approve in a web page (stories, Gantt, critical path, architecture, verified tech), then a named team of Pi worker sessions in tmux builds it while you watch a live board. | One command |
 | 📊 | **Context display bar** | Shows approximate context usage in the Pi status bar during requests. | Automatic |
 | ⬆️ | **Auto-update** | Checks harness and skill repos on session start. | None |
 | 🔐 | **Public-safe** | No vault, no bundled secrets, no committed credentials. | Safer by default |
@@ -362,6 +363,56 @@ The **Cybersecurity** profile is tuned for security research and pentest work:
 Profiles are always strict: exactly these combos, no `MainAgent` default and no automatic failover. `🔎 Show current routing` shows which profile is active.
 
 **Manual `/model` picks stick.** If you switch models with `/model` (or by cycling), RedPi pins that model for the rest of the session: it no longer switches back to the planner model on the next turn and does not fail over. Use `/redpi-config` → `▶ Resume role routing` to unpin.
+
+---
+
+## 🗺️ RedPlan: plan, approve, then run a team
+
+```text
+/redplan build a security triage assistant with LangChain Deep Agents and a Next.js UI
+```
+
+The Pi session you type this into becomes the **CEO**. It works in four phases:
+
+1. **Intake.** If the request leaves decisions open, it uses Matt Pocock's `grill-me` skill and asks you one question at a time. If the request is already a clear spec or prototype, it skips straight to planning.
+2. **Verify the technology.** Every library, framework, or service is checked against its real docs or package registry. The plan records the exact package, what is used from it, the source link, and what it is *not* ("LangChain Deep Agents" is the `deepagents` package and `create_deep_agent`, not "an agent that thinks deeply"). Anything unverified is flagged.
+3. **Plan.** User stories with acceptance criteria, human-readable tasks with estimates and real dependencies, the architecture, and a proposed team. HQ validates it and computes the schedule, **critical path**, and what can run **in parallel**.
+4. **Execute** (only after you approve). The CEO starts one **worker** per parallel lane: a full Pi session in tmux with a name and a role ("Alex, backend developer", "Peter, full-stack developer"). Each works in the shared folder or in its own git worktree and branch, whichever avoids collisions.
+
+### The plan page
+
+RedPi prints a link like `http://<this-machine>:47291/plans/<id>?t=…`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status. **Approve** or **Request changes** there; your comment goes straight back to the CEO, which revises and submits a new version.
+
+### RedPi HQ dashboard
+
+`/hq` prints the dashboard link. One hub serves every project on the machine:
+
+- every run on the machine, grouped by project
+- a live **Kanban board** that workers update themselves (to do, in progress, review, blocked, done)
+- the **team**: each worker's status, current task, and latest message. Click one for its activity feed, its tasks, the `tmux attach` command to watch or type into its live session, and **Send** / **Interrupt + send**
+- the **team chat**: workers ask each other directly ("Peter → Alex: what does POST /investigations return?"), report to the CEO, and receive your messages
+
+Workers are real Pi sessions, not subagents: they keep running if the CEO is busy, you can attach to them (`tmux attach -t '=redpi-<run>-alex'`, detach with Ctrl-b d), and anything you or a teammate sends arrives in their session as a message. An interrupt stops the current turn first.
+
+| Command | What it does |
+| --- | --- |
+| `/redplan <request>` | Start a run in this session (this session becomes the CEO) |
+| `/redplan-status` | Plan status, board counts, blocked tasks, workers, links |
+| `/redplan-stop` | Leave RedPlan mode in this session (workers and the run stay in HQ) |
+| `/hq` | Print the HQ dashboard link |
+
+**No collisions between projects.** HQ is one small server (port **47291**) with one SQLite database in `~/.pi/agent/yitec/hq/`. Nothing is written into your projects except worktrees under `.redpi-worktrees/` (hidden from `git status` through `.git/info/exclude`) and the per-folder subagent settings. Every project, run, worker, and message has its own ID, so several projects, or several runs in one folder, run side by side.
+
+**Security.** HQ listens on the LAN so you can open it from your laptop, and every request needs the token in `~/.pi/agent/yitec/hq/token`. Links RedPi prints carry it once and the browser keeps it in a cookie; changes also need a header that other websites cannot send. Anyone with the token can instruct your agents, which run commands as your user, so do not share links. Set `REDPI_HQ_HOST=127.0.0.1` to keep HQ local-only.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REDPI_HQ_PORT` | `47291` | HQ port |
+| `REDPI_HQ_HOST` | `0.0.0.0` | Interface HQ listens on |
+| `REDPI_HQ_PUBLIC_HOST` | first LAN IPv4 | Host used in printed links |
+| `REDPI_WORKER_ARGS` | (none) | Extra `pi` flags for worker sessions |
+
+Requires `tmux` for workers.
 
 ---
 
@@ -772,6 +823,8 @@ Smoke coverage includes:
 - Cybersecurity preset profile applies its exact combos strictly
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
+- HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
+- RedPlan end to end: `/redplan` → plan → approval → two real Pi workers in tmux (shared folder + git worktree) → board updates, teammate chat, reports to the CEO, human instructions, and an interrupt that stops a running turn
 
 Browser CLI test:
 

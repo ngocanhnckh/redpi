@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RedPlan Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="/static/hq.css">
+<style>
+  .hero { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+  .hero h1 { margin: 6px 0 8px; font-size: 26px; line-height: 1.25; }
+  .hero .summary { color: var(--text); opacity: .9; max-width: 72ch; }
+  .decision { position: sticky; top: 64px; }
+  .decision textarea { min-height: 84px; resize: vertical; margin: 8px 0 10px; }
+  .decision .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .versions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .versions a { font-family: var(--mono); font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); }
+  .versions a.cur { color: var(--green); border-color: var(--green-dim); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 26px 0 16px; overflow-x: auto; }
+  .tabs button { background: none; border: 0; padding: 10px 14px; cursor: pointer; color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); }
+  details.story { margin-bottom: 10px; }
+  details.story > summary { list-style: none; cursor: pointer; padding: 14px 16px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+  details.story > summary::-webkit-details-marker { display: none; }
+  details.story > summary .chev { transition: transform .15s; color: var(--muted); font-family: var(--mono); }
+  details.story[open] > summary .chev { transform: rotate(90deg); }
+  .sid { font-family: var(--mono); color: var(--cyan); font-weight: 700; }
+  .story-title { font-weight: 600; }
+  .user-story { color: var(--muted); font-size: 13px; }
+  .story-body { padding: 0 16px 14px 44px; }
+  .acc { margin: 6px 0 12px; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .task { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; background: var(--panel-2); }
+  .task.crit { border-color: color-mix(in srgb, var(--red) 55%, transparent); }
+  .task .tid { font-family: var(--mono); font-weight: 700; color: var(--muted); }
+  .task .tt { font-weight: 600; }
+  .task .td { color: var(--text); opacity: .85; font-size: 13px; margin-top: 2px; }
+  .task .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .task .est { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+  .gantt-wrap { overflow-x: auto; }
+  .gantt text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+  .gantt .label { fill: var(--text); font-family: var(--sans); font-size: 12px; }
+  .gantt .grid { stroke: var(--border); }
+  .gantt .bar { fill: var(--green-dim); } .gantt .bar.crit { fill: var(--red); }
+  .gantt .slack { stroke: var(--faint); stroke-dasharray: 3 3; }
+  .gantt .story-row { fill: var(--panel-2); }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+  .legend i { display: inline-block; width: 18px; height: 8px; border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+  .waves { display: grid; gap: 8px; margin-top: 14px; }
+  .wave { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; align-items: start; }
+  .wave .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .arch text { font-size: 12px; fill: var(--text); font-family: var(--sans); }
+  .arch .kind { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+  .arch .edge { stroke: var(--faint); fill: none; stroke-width: 1.5; }
+  .arch .elabel { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+  .tech { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .tech .card { padding: 14px; }
+  .tech .pkg { font-family: var(--mono); color: var(--green); font-weight: 700; }
+  .tech dl { margin: 10px 0 0; display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
+  .tech dt { color: var(--muted); } .tech dd { margin: 0; overflow-wrap: anywhere; }
+  .warn-list { margin: 0; padding-left: 18px; color: var(--amber); font-size: 13px; }
+  @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } .decision { position: static; } .story-body { padding-left: 16px; } }
+  @media (max-width: 560px) { .task { grid-template-columns: 1fr; } .task .est { text-align: left; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand"><span class="r">Red</span><span class="p">Plan</span> <span class="hq">// HQ</span></span>
+  <span class="crumbs" id="crumbs"></span>
+  <a class="btn" href="/">Dashboard</a>
+</header>
+<main class="wrap" id="app"><div class="empty">Loading plan…</div></main>
+<script type="module" src="/static/plan.js"></script>
+</body>
+</html>

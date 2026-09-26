@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "smoke": "./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh",
+    "smoke": "node scripts/hq-api-test.mjs && ./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh && ./scripts/redplan-smoke-test.sh",
+    "smoke:hq": "node scripts/hq-api-test.mjs",
+    "smoke:redplan": "./scripts/redplan-smoke-test.sh",
     "smoke:folder": "./scripts/folder-config-smoke-test.sh",
     "smoke:core": "./scripts/smoke-test.sh",
     "smoke:setup": "./scripts/setup-wizard-smoke-test.sh",
@@ -19,7 +21,7 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions/yitec-model-router.ts"],
+    "extensions": ["./extensions/yitec-model-router.ts", "./extensions/redplan.ts"],
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]
