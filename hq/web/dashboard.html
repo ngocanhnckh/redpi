@@ -66,6 +66,14 @@
   .wf-track { height: 8px; background: var(--panel-2); border-radius: 3px; overflow: hidden; } .wf-track i { display: block; height: 100%; background: var(--green); } .wf-track i.bad { background: var(--red); }
   .wf-ms { text-align: right; color: var(--muted); }
   .history { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 13px; }
+  .btw { display: grid; gap: 6px; max-height: 300px; overflow-y: auto; margin-bottom: 8px; padding: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+  .btw-msg { max-width: 88%; padding: 7px 10px; border-radius: 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .btw-msg .faint { display: block; font-size: 10px; margin-top: 2px; }
+  .btw-msg.me { justify-self: end; background: color-mix(in srgb, var(--violet) 22%, var(--panel)); border: 1px solid color-mix(in srgb, var(--violet) 40%, transparent); }
+  .btw-msg.them { justify-self: start; background: var(--panel); border: 1px solid var(--border); }
+  .btw-msg.thinking { color: var(--muted); font-style: italic; }
+  .btw-msg .dots { display: inline-block; animation: pulse 1.2s infinite; }
+  @media (prefers-reduced-motion: reduce) { .btw-msg .dots { animation: none; } }
   .team { display: grid; gap: 8px; }
   .member { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-align: left; width: 100%; }
   .member:hover { border-color: var(--green-dim); }

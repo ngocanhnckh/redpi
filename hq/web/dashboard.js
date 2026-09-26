@@ -79,7 +79,7 @@ function needsYou() {
     else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
   }
   // Questions addressed to you that you have not answered yet.
-  for (const m of messages.filter((m) => m.recipient === "human" && m.kind !== "system")) {
+  for (const m of messages.filter((m) => m.recipient === "human" && m.kind !== "system" && m.kind !== "aside")) {
     if (!messages.some((r) => r.id > m.id && r.sender === "human" && r.recipient === m.sender)) items.push({ id: m.sender, level: "amber", text: `${m.senderName} asked you: ${m.body.slice(0, 140)}` });
   }
   return items.slice(0, 8);
@@ -196,8 +196,17 @@ async function resume(workerId) {
 }
 
 function msgView(m) {
-  return `<div class="msg ${esc(m.kind)}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}<span class="from">${esc(m.senderName)}</span>${m.kind !== "task" ? `<span class="to">→ ${esc(m.recipientName)}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : ""}<span class="when">${ago(m.created)}</span></div>
+  return `<div class="msg ${esc(m.kind)}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}<span class="from">${esc(m.senderName)}</span>${m.kind !== "task" ? `<span class="to">→ ${esc(m.recipientName)}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : m.kind === "aside" ? `<span class="pill violet">btw</span>` : ""}<span class="when">${ago(m.created)}</span></div>
     <div class="body">${esc(m.kind === "brief" && m.body.length > 600 ? m.body.slice(0, 600) + "…" : m.body)}</div></div>`;
+}
+
+// The "btw" side channel with one worker: your questions and their side answers.
+function btwThread(w) {
+  const msgs = (state?.messages || []).filter((m) => m.kind === "aside" && ((m.sender === "human" && m.recipient === w.id) || (m.sender === w.id && m.recipient === "human"))).slice(-20);
+  if (!msgs.length) return "";
+  const waiting = msgs.at(-1).sender === "human";
+  return `<div class="btw" aria-live="polite">${msgs.map((m) => `<div class="btw-msg ${m.sender === "human" ? "me" : "them"}"><div>${esc(m.body)}</div><span class="faint">${ago(m.created)}</span></div>`).join("")}
+    ${waiting ? `<div class="btw-msg them thinking"><div>${esc(w.name)} is answering<span class="dots">…</span></div></div>` : ""}</div>`;
 }
 
 // Tool waterfall (ported idea from munder-difflin's ToolWaterfall.tsx): one bar per
@@ -235,8 +244,12 @@ async function renderPanel() {
       <div><div class="section-title" style="margin-bottom:6px">Tool calls</div>${waterfall(d.events)}</div>
       <div><div class="section-title" style="margin-bottom:6px">Activity</div><div class="events">${d.events.length ? d.events.slice().reverse().map((e) => `<div class="ev"><span>${ago(e.created)}</span><span>${esc(e.kind)}</span><span>${esc(e.text)}</span></div>`).join("") : `<span class="muted">No activity yet.</span>`}</div></div>
       <div><div class="section-title" style="margin-bottom:6px">Talk to ${esc(w.name)}</div>
-        <textarea id="wmsg" rows="3" placeholder="Instruction or question for ${esc(w.name)}"></textarea>
-        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn primary" id="wsend">Send</button><button class="btn danger" id="wint" title="Stops what ${esc(w.name)} is doing now, then delivers your message">Interrupt + send</button></div></div>
+        ${btwThread(w)}
+        <textarea id="wmsg" rows="3" placeholder="Ask ${esc(w.name)} anything: they answer on the side without stopping. Say it naturally if you want the live work to change."></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn primary" id="wask" title="Answered from ${esc(w.name)}'s session without interrupting it; clear instructions are passed on to the live session">Ask (btw)</button>
+          <button class="btn" id="wsend" title="Delivered into ${esc(w.name)}'s live session as your next message">Send to session</button>
+          <button class="btn danger" id="wint" title="Stops what ${esc(w.name)} is doing now, then delivers your message">Interrupt + send</button></div></div>
     </div></aside>`;
   if (kept) { const t = document.getElementById("wmsg"); t.value = kept.value; if (kept.focused) t.focus(); }
   document.getElementById("close").onclick = closePanel;
@@ -246,10 +259,13 @@ async function renderPanel() {
   const send = async (kind) => {
     const body = document.getElementById("wmsg").value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
     if (!body) return;
-    try { await api("POST", `/api/runs/${w.run_id}/messages`, { from: "human", to: w.id, kind, body }); toast(kind === "interrupt" ? `Interrupting ${w.name}` : `Sent to ${w.name}`); document.getElementById("wmsg").value = ""; loadRun(); }
+    try { await api("POST", `/api/runs/${w.run_id}/messages`, { from: "human", to: w.id, kind, body }); toast(kind === "interrupt" ? `Interrupting ${w.name}` : kind === "aside" ? `Asked ${w.name} on the side` : `Sent to ${w.name}'s session`); document.getElementById("wmsg").value = ""; loadRun(); }
     catch (e) { toast(e.message); }
   };
+  document.getElementById("wask").onclick = () => send("aside");
   document.getElementById("wsend").onclick = () => send("command");
+  const thread = document.querySelector(".btw");
+  if (thread) thread.scrollTop = thread.scrollHeight;
   document.getElementById("wint").onclick = () => send("interrupt");
 }
 

@@ -21,7 +21,7 @@ const SEAT_CROP = 9;              // legs hidden behind the desk while seated
 const SIT_DROP = 6;
 const motionOK = () => !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const TOOL_ICONS = { read: "<", edit: ">", write: ">", bash: "$", grep: "?", find: "?", ls: "?", glob: "?", redpi_browser: "@", web: "@" };
-const KIND_COLOR = { chat: "#45e3ff", brief: "#b995ff", decision: "#ffc94d", system: "#ffc94d", task: "#3dff8f", command: "#ff4d5e", interrupt: "#ff4d5e" };
+const KIND_COLOR = { aside: "#f0a6ff", chat: "#45e3ff", brief: "#b995ff", decision: "#ffc94d", system: "#ffc94d", task: "#3dff8f", command: "#ff4d5e", interrupt: "#ff4d5e" };
 
 function toolIcon(tool) {
   const t = String(tool || "").toLowerCase();
@@ -426,7 +426,8 @@ export class Office {
   onMessage(msg, workers) {
     const from = msg.sender === "human" ? "human" : msg.sender;
     const targets = msg.recipient === "all" ? (msg.kind === "task" ? [] : workers.map((w) => w.id).filter((id) => id !== from).slice(0, 4)) : [msg.recipient];
-    const color = msg.sender === "human" || msg.recipient === "human" || msg.kind === "interrupt" ? "#ff4d5e" : KIND_COLOR[msg.kind] || "#45e3ff";
+    // Side questions keep their own colour; other traffic to or from you is red.
+    const color = msg.kind === "aside" ? KIND_COLOR.aside : msg.sender === "human" || msg.recipient === "human" || msg.kind === "interrupt" ? "#ff4d5e" : KIND_COLOR[msg.kind] || "#45e3ff";
     for (const to of targets) {
       const a = this.seatPos(from), b = this.seatPos(to);
       if (!a || !b) continue;

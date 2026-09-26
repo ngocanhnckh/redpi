@@ -416,7 +416,8 @@ route("POST", "/api/workers/:id/resume-request", (_b, p) => {
 route("POST", "/api/runs/:id/messages", (b, p) => {
   if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
   if (!b.body || !b.to) throw httpError(400, "to and body are required");
-  const kind = ["chat", "command", "interrupt"].includes(b.kind) ? b.kind : "chat";
+  // aside: a "btw" side question answered by the worker without touching its live session.
+  const kind = ["chat", "command", "interrupt", "aside"].includes(b.kind) ? b.kind : "chat";
   const id = addMessage(p.id, String(b.from || "human"), String(b.to), kind, String(b.body).slice(0, 20000));
   return { id };
 });

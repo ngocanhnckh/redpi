@@ -8,11 +8,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v tmux >/dev/null || { echo "tmux not installed; skipping RedPlan smoke test"; exit 0; }
 python3 - "$ROOT" <<'PY'
 import json, os, pty, re, select, signal, subprocess, sys, tempfile, threading, time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 
 root = sys.argv[1]
 requests = []  # (identity, last user text, system prompt)
-resumed_history = []  # for Alex's first request after resume: did it still carry his earlier conversation?
+resumed_history = []
+slow = {"aborted": False}  # for Alex's first request after resume: did it still carry his earlier conversation?
 
 PLAN = {
   "title": "Tiny todo API", "summary": "A small todo REST API with a CLI client.",
@@ -30,6 +31,8 @@ PLAN = {
 }
 
 def identity(system):
+    side = re.search(r"You are the side channel of (\w+)", system)
+    if side: return f"{side.group(1)}-side"
     m = re.search(r"RedPlan worker\. You are (\w+)", system)
     if m: return m.group(1)
     return "CEO" if "RedPlan mode is ON" in system else "other"
@@ -66,9 +69,13 @@ def slow_reply(handler):
     handler.send_response(200); handler.send_header("content-type", "text/event-stream"); handler.send_header("connection", "close"); handler.end_headers()
     first = {"id": "x", "object": "chat.completion.chunk", "model": "MainAgent", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Working on it"}, "finish_reason": None}]}
     handler.wfile.write(f"data: {json.dumps(first)}\n\n".encode()); handler.wfile.flush()
-    for _ in range(120):
-        time.sleep(0.5)
-        handler.wfile.write(b": still thinking\n\n"); handler.wfile.flush()
+    try:
+        for _ in range(120):
+            time.sleep(0.5)
+            handler.wfile.write(b": still thinking\n\n"); handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        slow["aborted"] = True
+        raise
     handler.close_connection = True
 
 def reply(handler, identity, messages, system=""):
@@ -80,8 +87,18 @@ def reply(handler, identity, messages, system=""):
     requests.append((identity, user_text or "", system))
     if identity == "Alex" and "AFTER-RESUME" in (user_text or ""):
         resumed_history.append(any("RedPlan brief from the CEO" in json.dumps(m) for m in messages))
+    if identity.endswith("-side"):
+        # Side-channel ("btw") answers: plain answer, or FORWARD when the human gives an instruction.
+        text = ("FORWARD: Also add a /health endpoint that returns ok.\nGot it, passing that to my live session."
+                if "please also" in (user_text or "").split("THE HUMAN ASKS")[-1].lower() else "Alex here (btw): I'm mid-way through the todo endpoints; tests are next.")
+        chunks = [{"choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
+        body = ("".join(f"data: {json.dumps({'id': 'x', 'object': 'chat.completion.chunk', 'model': 'MainAgent', **c})}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+        handler.send_response(200); handler.send_header("content-type", "text/event-stream"); handler.send_header("content-length", str(len(body))); handler.end_headers(); handler.wfile.write(body)
+        return
+    # Checked after the side channel: a side call's transcript mentions SLOWTASK too.
     if "SLOWTASK" in (user_text or "") and "INTERRUPTED-NOW" not in (user_text or ""):
         return slow_reply(handler)
+
     if done_steps < len(steps):
         name, args = steps[done_steps]
         delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"call_{identity}_{len(requests)}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
@@ -201,11 +218,31 @@ try:
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "command", "body": "SLOWTASK: write the docs."})
     wait("Alex busy on the slow task", lambda: any(i == "Alex" and "SLOWTASK" in u for i, u, _ in requests))
     time.sleep(1.5)
+    # btw while busy: answered on the side; the live session keeps its running turn.
+    main_before = sum(1 for i, u, _ in requests if i == "Alex")
+    t_ask = time.time()
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "aside", "body": "btw, how far along are you?"})
+    try: side = wait("side answer from Alex", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "aside" and m["senderName"] == "Alex"), None), 30)
+    except SystemExit:
+        print("---- Alex events ----"); print([ (e["kind"], e["text"][:120]) for e in hq("GET", f"/api/workers/{names['Alex']['id']}")["events"][-8:] ])
+        print("---- asides ----"); print([ (m["senderName"], m["recipientName"], m["kind"], m["body"][:80]) for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "aside" ])
+        print("---- Alex pane ----"); print(pane(names["Alex"]["tmux"])[-1500:]); raise
+    if time.time() - t_ask > 20: raise SystemExit("side answer took too long (waited behind the live turn?)")
+    if "mid-way through the todo endpoints" not in side["body"] or side["recipient"] != "human":
+        raise SystemExit(f"bad side answer: {side}")
+    if slow["aborted"] or sum(1 for i, u, _ in requests if i == "Alex") != main_before:
+        raise SystemExit("the side question disturbed Alex's live session")
+    if any(i == "Alex" and "how far along" in u for i, u, _ in requests):
+        raise SystemExit("the side question leaked into the live session")
     t0 = time.time()
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "interrupt", "body": "INTERRUPTED-NOW: stop and fix the failing test first."})
     try: wait("interrupt delivered to Alex", lambda: any(i == "Alex" and "INTERRUPTED-NOW" in u for i, u, _ in requests), 25)
     except SystemExit: print("---- Alex pane ----"); print(pane(names["Alex"]["tmux"])[-2000:]); raise
     if time.time() - t0 > 20: raise SystemExit("interrupt did not abort the running turn")
+    # btw that is really an instruction: answered, and relayed into the live session.
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "aside", "body": "Please also add a /health endpoint."})
+    fw = wait("forwarded side answer", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "aside" and "Forwarded to my live session" in m["body"]), None), 30)
+    wait("instruction relayed into Alex's session", lambda: any(i == "Alex" and "relayed from a side question" in u and "/health" in u for i, u, _ in requests), 30)
     detail = hq("GET", f"/api/workers/{names['Alex']['id']}")
     if not detail["events"] or not detail["worker"]["last_message"]:
         raise SystemExit(f"worker heartbeat/activity not reported: {detail['worker']}")
@@ -232,7 +269,7 @@ try:
     msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: /redplan → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)

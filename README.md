@@ -419,6 +419,8 @@ The office is drawn on a canvas that pauses when the tab is hidden, respects red
 - **Needs input.** Workers report when a rate limit or quota stops them, or when a prompt is waiting in their terminal.
 - **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
 
+**Talk to a worker without interrupting it ("btw").** In a worker's panel, **Ask (btw)** asks them anything while they keep working: their RedPi answers on the side with a separate call to the same model, reading the live session's conversation, tasks, and current activity. The live session never sees the question. If what you write is really an instruction ("please also make it return 202", "use Postgres instead"), the answer says so and passes it into the live session as a steer, without aborting what it is doing. **Send to session** delivers your message into the live session as its next message, and **Interrupt + send** stops the current turn first.
+
 Workers are real Pi sessions, not subagents: they keep running if the CEO is busy, you can attach to them (`tmux attach -t '=redpi-<run>-alex'`, detach with Ctrl-b d), and anything you or a teammate sends arrives in their session as a message. An interrupt stops the current turn first.
 
 | Command | What it does |
@@ -852,7 +854,7 @@ Smoke coverage includes:
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
-- RedPlan end to end: `/redplan` → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
+- RedPlan end to end: `/redplan` → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
 
 Browser CLI test:

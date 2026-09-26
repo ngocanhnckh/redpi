@@ -43,6 +43,7 @@ button, textarea, input, select { font: inherit; color: inherit; }
 .pill.red { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
 .pill.amber { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
 .pill.cyan { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, transparent); }
+.pill.violet { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot.working { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s infinite; }
 .dot.idle { background: var(--cyan); } .dot.starting { background: var(--amber); } .dot.offline { background: var(--red); }

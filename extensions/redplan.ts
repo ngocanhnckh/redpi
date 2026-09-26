@@ -210,6 +210,34 @@ function tmuxAlive(session: string): boolean {
   return spawnSync("tmux", tmuxArgs("has-session", "-t", `=${session}`), { encoding: "utf8" }).status === 0;
 }
 
+// ---------- side channel ("btw") ----------
+// A compact, capped view of what the live session's model currently sees, so a side
+// question can be answered from real context without touching the session itself.
+function sessionTranscript(ctx: any, maxChars = 60000): string {
+  const entries: any[] = ctx.sessionManager?.buildContextEntries?.() || ctx.sessionManager?.getBranch?.() || [];
+  const clip = (v: any, n: number) => { const t = typeof v === "string" ? v : JSON.stringify(v ?? ""); return t.length > n ? `${t.slice(0, n)}…` : t; };
+  const lines: string[] = [];
+  for (const e of entries) {
+    if (e.type !== "message" || !e.message) continue;
+    const m = e.message;
+    const parts = typeof m.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m.content) ? m.content : [];
+    if (m.role === "user") lines.push(`USER: ${clip(parts.filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n"), 1500)}`);
+    else if (m.role === "assistant") {
+      for (const p of parts) {
+        if (p.type === "text" && p.text?.trim()) lines.push(`YOU SAID: ${clip(p.text, 1500)}`);
+        else if (p.type === "toolCall") lines.push(`YOU RAN ${p.name}: ${clip(p.arguments, 240)}`);
+      }
+    } else if (m.role === "toolResult") lines.push(`RESULT${m.isError ? " (error)" : ""}: ${clip(parts.filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n"), 400)}`);
+  }
+  let out = "";
+  for (let i = lines.length - 1; i >= 0 && out.length + lines[i].length < maxChars; i--) out = `${lines[i]}\n${out}`;
+  return out || "(the session has no messages yet)";
+}
+
+const ASIDE_PROMPT = (name: string, role: string) => `You are the side channel of ${name}, a ${role} working in a RedPlan team. The human is asking you something "by the way" while your main session keeps working; your main session will not see this exchange.
+Answer from the session transcript and state below: what you are doing, why, what you found, what is left, where things are. Be concise and concrete, first person, as ${name}. If the transcript does not contain the answer, say so plainly; never invent progress.
+If the human's message is an instruction or change for the live work (e.g. "also add X", "stop doing Y", "use Z instead", "tell him to..."), begin your reply with one line "FORWARD: <the instruction, rewritten clearly for your live session>", then on the next lines confirm briefly to the human that you passed it on. Only forward when the human clearly wants the live work to change; questions are never forwarded.`;
+
 // ---------- extension ----------
 export default function (pi: ExtensionAPI) {
   let runId = WORKER_RUN || "";
@@ -257,14 +285,55 @@ export default function (pi: ExtensionAPI) {
     return `[RedPlan · message from ${from}]\n${m.body}\n(Reply with redplan_send to "${from === "CEO" ? "ceo" : from}" if needed.)`;
   }
 
+  let asideChain: Promise<void> = Promise.resolve();
+  async function answerAside(m: any) {
+    const ctx = latestCtx;
+    const started = Date.now();
+    beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
+    let reply = "", forward = "";
+    try {
+      const d = await hq("GET", `/api/workers/${WORKER_ID}`);
+      const state = [
+        `Status: ${ctx?.isIdle?.() ? "idle" : "working right now"}. Current activity: ${d.worker.activity?.text || "none"}.`,
+        `Tasks: ${d.tasks.map((t: any) => `${t.id} ${t.title} [${t.status}]${t.note ? ` (${t.note})` : ""}`).join("; ") || "none"}`,
+        `Workspace: ${d.worker.cwd}${d.worker.branch ? ` on ${d.worker.branch}` : ""}`,
+      ].join("\n");
+      const model = ctx?.model;
+      if (!model) throw new Error("no model selected in this session");
+      const res: any = await ctx.modelRegistry.complete(model, {
+        systemPrompt: ASIDE_PROMPT(d.worker.name, d.worker.role),
+        messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx)}\n\nTHE HUMAN ASKS (by the way):\n${m.body}` }],
+      }, { maxTokens: 1500 });
+      const text = (res?.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
+      if (res?.stopReason === "error" || !text) throw new Error(res?.errorMessage || "empty answer");
+      const fw = /^\s*FORWARD:\s*(.+)$/m.exec(text.split("\n")[0] || "");
+      if (fw) { forward = fw[1].trim(); reply = text.split("\n").slice(1).join("\n").trim() || `Passed on to my live session: ${forward}`; }
+      else reply = text;
+    } catch (e: any) {
+      reply = `(I couldn't answer that on the side: ${e.message}. Use "Send to session" to ask my live session directly.)`;
+    }
+    // Relay a real instruction into the live session without aborting it.
+    if (forward) {
+      const body = `[RedPlan · instruction from the human via HQ (relayed from a side question)]\n${forward}`;
+      if (latestCtx?.isIdle?.()) pi.sendUserMessage(body); else pi.sendUserMessage(body, { deliverAs: "steer" });
+    }
+    await hq("POST", `/api/runs/${runId}/messages`, { from: WORKER_ID, to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
+    beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
+  }
+
   async function pollInbox() {
     if (delivering || !runId || !latestCtx) return;
     delivering = true;
     try {
-      const msgs: any[] = await hq("GET", `/api/runs/${runId}/inbox?for=${encodeURIComponent(me())}&after=${inboxCursor}`);
+      let msgs: any[] = await hq("GET", `/api/runs/${runId}/inbox?for=${encodeURIComponent(me())}&after=${inboxCursor}`);
       if (!msgs.length) return;
       inboxCursor = msgs[msgs.length - 1].id;
       pi.appendEntry("redplan-cursor", { runId, cursor: inboxCursor });
+      // Side questions never enter the live session: answer them on the side, one at a time.
+      const asides = WORKER_ID ? msgs.filter((m) => m.kind === "aside") : [];
+      for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
+      msgs = msgs.filter((m) => !asides.includes(m));
+      if (!msgs.length) return;
       const urgent = msgs.some((m) => m.kind === "interrupt" || m.sender === "human");
       if (msgs.some((m) => m.kind === "interrupt") && !latestCtx.isIdle()) {
         // Abort, then wait for the run to wind down: a steer queued onto an aborted run is never read.
@@ -275,7 +344,10 @@ export default function (pi: ExtensionAPI) {
       if (latestCtx.isIdle()) pi.sendUserMessage(body);
       else pi.sendUserMessage(body, { deliverAs: urgent ? "steer" : "followUp" });
       beat({}, { kind: "inbox", text: msgs.map((m) => `${m.senderName}: ${String(m.body).slice(0, 120)}`).join(" | ") });
-    } catch { /* HQ restarting or unreachable: retry on the next tick */ }
+    } catch (e: any) {
+      // HQ restarting or unreachable: retry on the next tick. Anything else shows in the activity feed.
+      if (!/fetch failed|aborted|timeout|ECONNREFUSED/i.test(String(e?.message))) beat({}, { kind: "error", text: `inbox: ${String(e?.message || e).slice(0, 300)}` });
+    }
     finally { delivering = false; }
   }
 
