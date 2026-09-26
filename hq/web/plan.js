@@ -1,4 +1,4 @@
-import { api, esc, hours, live, pill, toast } from "/static/hq.js";
+import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
@@ -203,3 +203,4 @@ function trim(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 
 function safeUrl(u) { return /^https?:\/\//i.test(u) ? u : "#"; }
 
 load().then(() => data && live(data.runId, load));
+signedInAs();

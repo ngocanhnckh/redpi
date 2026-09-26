@@ -381,11 +381,17 @@ The Pi session you type this into becomes the **CEO**. It works in four phases:
 
 ### The plan page
 
-RedPi prints a link like `http://<this-machine>:47291/plans/<id>?t=…`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status. **Approve** or **Request changes** there; your comment goes straight back to the CEO, which revises and submits a new version.
+RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status. **Approve** or **Request changes** there; your comment goes straight back to the CEO, which revises and submits a new version.
 
 ### RedPi HQ dashboard
 
-`/hq` prints the dashboard link. One hub serves every project on the machine, and every run has three views:
+`/hq` prints the dashboard link. One hub serves every project on the machine.
+
+**Sign in.** The first time you run `/redplan` or `/hq`, RedPi asks you to choose an HQ username and password (the password is typed masked and stored only as a scrypt hash in `~/.pi/agent/yitec/hq/auth.json`, mode 0600). Browsers then sign in on a login page and stay signed in for 30 days. Change the password with `/hq-password`; that signs every browser out. Scripts can use HTTP Basic auth (`curl -u user:password`).
+
+**Home: all projects.** The home page lists every project on the machine as a card: its latest run, progress, blocked tasks, the faces of the workers online, and a red "needs you" count (plans awaiting approval, workers that are stuck or waiting on you). Projects with active runs come first. Switch between **Active** and **All**, or search by name or path. Click a project to see its runs, active first, then open a run.
+
+Every run has three views:
 
 **🏢 Office** (default once workers exist): an animated pixel office where the team works.
 
@@ -429,11 +435,12 @@ Workers are real Pi sessions, not subagents: they keep running if the CEO is bus
 | `/redplan-status` | Plan status, board counts, blocked tasks, workers, links |
 | `/redplan-stop` | Leave RedPlan mode in this session (workers and the run stay in HQ) |
 | `/redplan-doctor` | Health check for HQ, tmux, and every worker, with fixes |
-| `/hq` | Print the HQ dashboard link |
+| `/hq` | Print the HQ dashboard link (asks for an HQ password the first time) |
+| `/hq-password` | Change the HQ username and password |
 
 **No collisions between projects.** HQ is one small server (port **47291**) with one SQLite database in `~/.pi/agent/yitec/hq/`. Nothing is written into your projects except worktrees under `.redpi-worktrees/` (hidden from `git status` through `.git/info/exclude`) and the per-folder subagent settings. Every project, run, worker, and message has its own ID, so several projects, or several runs in one folder, run side by side.
 
-**Security.** HQ listens on the LAN so you can open it from your laptop, and every request needs the token in `~/.pi/agent/yitec/hq/token`. Links RedPi prints carry it once and the browser keeps it in a cookie; changes also need a header that other websites cannot send. Anyone with the token can instruct your agents, which run commands as your user, so do not share links. Set `REDPI_HQ_HOST=127.0.0.1` to keep HQ local-only.
+**Security.** HQ listens on the LAN so you can open it from your laptop. Browsers need your HQ password; RedPi and its workers use the token in `~/.pi/agent/yitec/hq/token`. Sessions are signed cookies (HttpOnly), wrong passwords are rate limited (8 per address per 10 minutes), and changes also need a header that other websites cannot send. HQ is plain HTTP, so use it on a network you trust (or behind an HTTPS reverse proxy). Anyone signed in can instruct your agents, which run commands as your user. Set `REDPI_HQ_HOST=127.0.0.1` to keep HQ local-only. Before a password is set, the links RedPi prints carry the token instead.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -854,7 +861,8 @@ Smoke coverage includes:
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
-- RedPlan end to end: `/redplan` → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
+- HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
+- RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
 
 Browser CLI test:

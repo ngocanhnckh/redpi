@@ -1,10 +1,11 @@
-import { ago, api, esc, live, pill, toast } from "/static/hq.js";
+import { ago, api, esc, live, pill, signedInAs, toast } from "/static/hq.js";
 import { portraitUrl } from "/static/office/people.js";
 import { Office } from "/static/office/office.js";
 import { renderGraph } from "/static/graph.js";
 
 const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
+const projectId = location.pathname.startsWith("/projects/") ? location.pathname.split("/")[2] : null;
 const COLUMNS = [["todo", "To do"], ["in_progress", "In progress"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done"]];
 let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null;
 
@@ -24,23 +25,95 @@ function announce(text) {
   if (el) { el.textContent = ""; setTimeout(() => { el.textContent = text; }, 30); }
 }
 
+const ACTIVE = new Set(["planning", "awaiting_approval", "approved", "executing"]);
+let homeFilter = store.get("redpi-home-filter"), homeQuery = "";
+
+function projectState(p) {
+  if (p.awaiting_approval) return ["Plan awaiting approval", "amber"];
+  if (p.active_runs) return [p.workers.some((w) => w.alive && w.status === "working") ? "Running" : "Active", "green"];
+  return ["Idle", ""];
+}
+
+function runCard(r) {
+  return `<a class="panel run-card" href="/runs/${esc(r.id)}">
+    <div style="display:flex;justify-content:space-between;gap:8px">${pill(r.status)}<span class="faint" style="font-size:12px">${ago(r.updated)}</span></div>
+    <div class="t">${esc(r.title)}</div>
+    <div class="bar"><i style="width:${r.tasks ? Math.round((r.done / r.tasks) * 100) : 0}%"></i></div>
+    <div class="muted" style="font-size:12px;margin-top:6px">${r.tasks ? `${r.done}/${r.tasks} tasks done` : "planning"} · ${r.workers} worker${r.workers === 1 ? "" : "s"}${r.live_workers ? ` (${r.live_workers} online)` : ""}</div>
+  </a>`;
+}
+
+// Home: every project on the machine, the ones with work going on first.
 async function loadHome() {
-  const runs = await api("GET", "/api/runs");
+  const projects = await api("GET", "/api/projects");
   document.title = "RedPi HQ";
   document.getElementById("crumbs").textContent = "All projects on this machine";
-  if (!runs.length) { app.innerHTML = `<div class="empty">No RedPlan runs yet. In any project, start Pi and run <code>/redplan &lt;what to build&gt;</code>.</div>`; return; }
-  const byProject = new Map();
-  for (const r of runs) (byProject.get(r.project_path) || byProject.set(r.project_path, []).get(r.project_path)).push(r);
-  app.innerHTML = [...byProject.entries()].map(([path, list]) => `
-    <section class="project"><h2 class="section-title">${esc(list[0].project_name)} <span class="mono faint" style="text-transform:none;letter-spacing:0">${esc(path)}</span></h2>
-      <div class="runs">${list.map((r) => `
-        <a class="panel run-card" href="/runs/${esc(r.id)}">
-          <div style="display:flex;justify-content:space-between;gap:8px">${pill(r.status)}<span class="faint" style="font-size:12px">${ago(r.updated)}</span></div>
-          <div class="t">${esc(r.title)}</div>
-          <div class="bar"><i style="width:${r.tasks ? Math.round((r.done / r.tasks) * 100) : 0}%"></i></div>
-          <div class="muted" style="font-size:12px;margin-top:6px">${r.tasks ? `${r.done}/${r.tasks} tasks done` : "planning"} · ${r.workers} worker${r.workers === 1 ? "" : "s"}</div>
-        </a>`).join("")}</div>
-    </section>`).join("");
+  if (!projects.length) { app.innerHTML = `<div class="empty">No RedPlan projects yet. In any project, start Pi and run <code>/redplan &lt;what to build&gt;</code>.</div>`; return; }
+  const active = projects.filter((p) => p.active_runs);
+  if (homeFilter !== "all" && homeFilter !== "active") homeFilter = active.length ? "active" : "all";
+  const online = projects.flatMap((p) => p.workers.filter((w) => w.alive));
+  const needs = projects.reduce((n, p) => n + p.awaiting_approval + p.workers.filter((w) => w.needsYou).length, 0);
+  const done = active.reduce((n, p) => n + p.done, 0), tasks = active.reduce((n, p) => n + p.tasks, 0);
+  const focused = document.activeElement?.id === "psearch";
+  app.innerHTML = `
+    <div class="stats" style="margin-bottom:16px">
+      <div class="panel stat"><div class="v">${active.length}</div><div class="k">project${active.length === 1 ? "" : "s"} with active runs</div></div>
+      <div class="panel stat"><div class="v">${online.length}</div><div class="k">worker${online.length === 1 ? "" : "s"} online</div></div>
+      <div class="panel stat"><div class="v" style="${needs ? "color:var(--red)" : ""}">${needs}</div><div class="k">need${needs === 1 ? "s" : ""} you</div></div>
+      <div class="panel stat"><div class="v">${done}<span class="faint" style="font-size:14px">/${tasks}</span></div><div class="k">active tasks done</div></div>
+    </div>
+    <div class="home-bar">
+      <div class="viewtabs" role="tablist" aria-label="Which projects">
+        <button role="tab" data-f="active" aria-selected="${homeFilter === "active"}">Active <span class="faint">${active.length}</span></button>
+        <button role="tab" data-f="all" aria-selected="${homeFilter === "all"}">All <span class="faint">${projects.length}</span></button>
+      </div>
+      <input type="search" id="psearch" placeholder="Find a project" aria-label="Find a project" value="${esc(homeQuery)}">
+    </div>
+    <div class="projects" id="plist"></div>`;
+  const list = document.getElementById("plist");
+  const paint = () => {
+    const q = homeQuery.toLowerCase();
+    const shown = projects.filter((p) => (homeFilter === "all" || p.active_runs) && (!q || `${p.name} ${p.path} ${p.latest?.title || ""}`.toLowerCase().includes(q)));
+    list.innerHTML = shown.length ? shown.map(projectCard).join("") : `<div class="empty">${q ? "No project matches." : `No active runs right now. <button class="btn" data-f="all">Show all projects</button>`}</div>`;
+    list.querySelector("[data-f]")?.addEventListener("click", () => setFilter("all"));
+  };
+  const setFilter = (f) => { homeFilter = f; store.set("redpi-home-filter", f); loadHome(); };
+  app.querySelectorAll(".home-bar [data-f]").forEach((b) => b.addEventListener("click", () => setFilter(b.dataset.f)));
+  const search = document.getElementById("psearch");
+  search.addEventListener("input", () => { homeQuery = search.value; paint(); });
+  if (focused) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+  paint();
+}
+
+function projectCard(p) {
+  const [label, tone] = projectState(p);
+  const live = p.workers.filter((w) => w.alive);
+  const needs = p.awaiting_approval + p.workers.filter((w) => w.needsYou).length;
+  const faces = live.slice(0, 8).map((w) => `<img class="avatar sm ${w.needsYou ? "needs-ring" : ""}" alt="" title="${esc(w.name)} · ${esc(w.role)}${w.needsYou ? " · needs you" : ""}" src="${portraitUrl(w.name, w.role)}">`).join("");
+  return `<a class="panel project-card ${p.active_runs ? "on" : ""}" href="/projects/${esc(p.id)}">
+    <div class="pc-top"><span class="pc-name">${esc(p.name)}</span><span class="pill ${tone}">${esc(label)}</span></div>
+    <div class="mono faint pc-path" title="${esc(p.path)}">${esc(p.path)}</div>
+    ${p.latest ? `<div class="pc-run">${esc(p.latest.title)}</div>` : ""}
+    ${p.active_runs && p.tasks ? `<div class="bar"><i style="width:${Math.round((p.done / p.tasks) * 100)}%"></i></div>` : ""}
+    <div class="pc-meta">
+      <span>${p.active_runs ? `${p.active_runs} active run${p.active_runs === 1 ? "" : "s"}` : `${p.runs} run${p.runs === 1 ? "" : "s"}`}${p.active_runs && p.tasks ? ` · ${p.done}/${p.tasks} tasks${p.blocked ? ` · <span style="color:var(--red)">${p.blocked} blocked</span>` : ""}` : ""}</span>
+      <span class="faint">${p.updated ? ago(p.updated) : ""}</span>
+    </div>
+    ${live.length || needs ? `<div class="pc-team"><span class="pc-faces">${faces}${live.length > 8 ? `<span class="faint">+${live.length - 8}</span>` : ""}</span>
+      ${needs ? `<span class="pill red">${needs} need${needs === 1 ? "s" : ""} you</span>` : `<span class="faint" style="font-size:12px">${live.length} online</span>`}</div>` : ""}
+  </a>`;
+}
+
+// One project: its runs, active first.
+async function loadProject() {
+  const { project, runs } = await api("GET", `/api/projects/${projectId}`);
+  document.title = `${project.name} · RedPi HQ`;
+  document.getElementById("crumbs").innerHTML = `<a href="/">All projects</a> / ${esc(project.name)} <span class="faint mono">${esc(project.path)}</span>`;
+  const active = runs.filter((r) => ACTIVE.has(r.status)), past = runs.filter((r) => !ACTIVE.has(r.status));
+  app.innerHTML = `
+    <div class="run-head"><h1>${esc(project.name)}</h1><span class="mono faint">${esc(project.path)}</span></div>
+    ${active.length ? `<section class="project"><h2 class="section-title">Active runs</h2><div class="runs">${active.map(runCard).join("")}</div></section>` : `<div class="empty">No active run in this project. Start one in Pi here with <code>/redplan &lt;what to build&gt;</code>.</div>`}
+    ${past.length ? `<section class="project"><h2 class="section-title">Finished</h2><div class="runs">${past.map(runCard).join("")}</div></section>` : ""}`;
 }
 
 async function loadRun() {
@@ -88,7 +161,7 @@ function needsYou() {
 function renderRun() {
   const { run, project, plan, workers, tasks, messages } = state;
   document.title = `${run.title} · RedPi HQ`;
-  document.getElementById("crumbs").innerHTML = `${esc(project.name)} <span class="faint mono">${esc(project.path)}</span>`;
+  document.getElementById("crumbs").innerHTML = `<a href="/projects/${esc(project.id)}">${esc(project.name)}</a> <span class="faint mono">${esc(project.path)}</span>`;
   if (!view) view = workers.length ? "office" : "board";
   const done = tasks.filter((t) => t.status === "done").length;
   const byId = Object.fromEntries(workers.map((w) => [w.id, w]));
@@ -288,6 +361,7 @@ async function renderTask(root, taskId) {
 function closePanel() { openPanel = null; document.getElementById("drawer-root").innerHTML = ""; }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openPanel) closePanel(); });
 
-const refresh = () => (runId ? loadRun() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
+const refresh = () => (runId ? loadRun() : projectId ? loadProject() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
 refresh();
 live(runId, refresh);
+signedInAs();

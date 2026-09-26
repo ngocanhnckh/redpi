@@ -177,9 +177,28 @@ def drain(sec):
 try:
     wait("CEO TUI ready", lambda: (drain(0.3), b"RedPi high:" in out)[1], 90)
     os.write(master, b"/redplan Build a tiny todo API with a CLI"); drain(0.5); os.write(master, b"\r")
+    # First use: RedPi asks for an HQ username and password (typed masked) before the run starts.
+    def seen_after(mark, text): return lambda: (drain(0.2), text in out[mark:])[1]
+    mark = len(out); wait("HQ username prompt", seen_after(mark, b"HQ username"), 30)
+    os.write(master, b"\r")                                   # accept the default username
+    mark = len(out); wait("password prompt", seen_after(mark, b"Password for"), 15)
+    os.write(master, b"short"); drain(0.3); os.write(master, b"\r")
+    mark = len(out); wait("short password rejected", seen_after(mark, b"at least 8"), 15)
+    wait("password prompt again", seen_after(mark, b"Password for"), 15)
+    os.write(master, b"hunter2hunter2"); drain(0.3); os.write(master, b"\r")
+    mark = len(out); wait("confirm prompt", seen_after(mark, b"Type the password again"), 15)
+    os.write(master, b"hunter2hunter2"); drain(0.3); os.write(master, b"\r")
+    wait("auth.json written", lambda: os.path.exists(f"{hqdir}/auth.json"), 15)
+    if os.stat(f"{hqdir}/auth.json").st_mode & 0o077: raise SystemExit("auth.json must be private (0600)")
+    if b"hunter2hunter2" in out or b"short\x1b" in out: raise SystemExit("the password was echoed on screen")
+    basic = "Basic " + __import__("base64").b64encode(f"{os.environ.get('USER') or 'admin'}:hunter2hunter2".encode()).decode()
     run = wait("plan submitted", lambda: next((r for r in hq("GET", "/api/runs") if r["status"] == "awaiting_approval"), None))
     state = hq("GET", f"/api/runs/{run['id']}")
     plan = state["plan"]
+    import urllib.request, urllib.error
+    who = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/api/session", headers={"authorization": basic}), timeout=5).read())
+    if not who.get("signedIn"): raise SystemExit(f"the password set in RedPi does not sign in to HQ: {who}")
+    if b"?t=" in out[mark:]: raise SystemExit("dashboard links still carry the token after a password was set")
     if plan["schedule"]["criticalPath"] != ["T1"] or plan["schedule"]["maxParallel"] != 2:
         raise SystemExit(f"schedule wrong: {plan['schedule']}")
     ceo_sys = next(s for i, u, s in requests if i == "CEO")
@@ -269,7 +288,7 @@ try:
     msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)

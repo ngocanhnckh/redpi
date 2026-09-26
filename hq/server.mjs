@@ -3,11 +3,11 @@
 // One SQLite database for every project on the machine; nothing is written into
 // project folders, so concurrent projects never collide on paths.
 import { createServer } from "node:http";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { schedulePlan, validatePlan } from "./schedule.mjs";
@@ -28,6 +28,77 @@ const TOKEN_PATH = join(HQ_DIR, "token");
 if (!existsSync(TOKEN_PATH)) writeFileSync(TOKEN_PATH, randomBytes(24).toString("base64url") + "\n", { mode: 0o600 });
 try { chmodSync(TOKEN_PATH, 0o600); } catch {}
 const TOKEN = readFileSync(TOKEN_PATH, "utf8").trim();
+
+// ---------- browser login ----------
+// RedPi asks for a username and password the first time RedPlan or /hq runs and writes
+// auth.json (scrypt hash). Browsers sign in with it; RedPi itself and its workers keep
+// using the bearer token. Before a password exists, the old ?t=<token> links still work.
+const AUTH_PATH = join(HQ_DIR, "auth.json");
+const SECRET_PATH = join(HQ_DIR, "session-secret");
+if (!existsSync(SECRET_PATH)) writeFileSync(SECRET_PATH, randomBytes(32).toString("base64url") + "\n", { mode: 0o600 });
+const SESSION_SECRET = readFileSync(SECRET_PATH, "utf8").trim();
+const SESSION_DAYS = 30;
+let authCache = { mtime: -1, auth: null };
+function loadAuth() {
+  let mtime;
+  try { mtime = statSync(AUTH_PATH).mtimeMs; } catch { authCache = { mtime: -1, auth: null }; return null; }
+  if (mtime !== authCache.mtime) {
+    let auth = null;
+    try { const a = JSON.parse(readFileSync(AUTH_PATH, "utf8")); if (a.user && a.salt && a.hash) auth = a; } catch {}
+    authCache = { mtime, auth };
+  }
+  return authCache.auth;
+}
+const safeEqual = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+function checkPassword(user, password) {
+  const auth = loadAuth();
+  if (!auth) return Promise.resolve(false);
+  const { N = 16384, r = 8, p = 1 } = auth;
+  return new Promise((resolve) => scrypt(String(password), Buffer.from(auth.salt, "hex"), 64, { N, r, p, maxmem: 64 * 1024 * 1024 }, (err, key) => {
+    resolve(!err && safeEqual(user, auth.user) && safeEqual(key.toString("hex"), auth.hash));
+  }));
+}
+// Signed with the password hash too, so changing the password signs everyone out.
+const sessionSig = (user, exp, auth) => createHmac("sha256", SESSION_SECRET).update(`${user}.${exp}.${auth.hash}`).digest("base64url");
+function makeSession(user) {
+  const exp = now() + SESSION_DAYS * 86400000;
+  return `${Buffer.from(user).toString("base64url")}.${exp}.${sessionSig(user, exp, loadAuth())}`;
+}
+function sessionUser(req) {
+  const auth = loadAuth();
+  const m = /(?:^|;\s*)redpi_hq_s=([^;]+)/.exec(req.headers.cookie || "");
+  if (!auth || !m) return null;
+  const [u, exp, sig] = decodeURIComponent(m[1]).split(".");
+  const user = Buffer.from(u || "", "base64url").toString();
+  if (!sig || Number(exp) < now() || user !== auth.user) return null;
+  return safeEqual(sig, sessionSig(user, exp, auth)) ? user : null;
+}
+// HTTP Basic auth for scripts (curl -u). Verified headers are cached briefly: scrypt is slow on purpose.
+const basicOk = new Map();
+async function basicUser(req) {
+  const h = /^Basic (.+)$/.exec(req.headers.authorization || "")?.[1];
+  const auth = loadAuth();
+  if (!h || !auth) return null;
+  const key = createHash("sha256").update(`${auth.hash}:${h}`).digest("hex");
+  if ((basicOk.get(key) || 0) > now()) return auth.user;
+  const raw = Buffer.from(h, "base64").toString(), i = raw.indexOf(":");
+  if (i < 0 || !(await checkPassword(raw.slice(0, i), raw.slice(i + 1)))) return null;
+  if (basicOk.size > 100) basicOk.clear();
+  basicOk.set(key, now() + 5 * 60000);
+  return auth.user;
+}
+// Slow down password guessing: 8 failures per address per 10 minutes, then a lockout.
+const failures = new Map();
+function loginAllowed(ip) {
+  const f = failures.get(ip);
+  if (!f || f.until < now()) { failures.delete(ip); return true; }
+  return f.count < 8;
+}
+function loginFailed(ip) {
+  const f = failures.get(ip);
+  if (!f || f.until < now()) failures.set(ip, { count: 1, until: now() + 10 * 60000 });
+  else f.count++;
+}
 
 const db = new DatabaseSync(join(HQ_DIR, "hq.db"));
 db.exec(`
@@ -195,15 +266,19 @@ function cookieToken(req) {
 }
 
 function tokenOk(candidate) {
-  const a = Buffer.from(String(candidate || ""));
-  const b = Buffer.from(TOKEN);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return !!candidate && safeEqual(candidate, TOKEN);
 }
 
-function authed(req, url) {
+// Who is asking: "token" (RedPi and its workers), a signed-in user, or null.
+async function whoIs(req, url) {
   const bearer = /^Bearer (.+)$/.exec(req.headers.authorization || "")?.[1];
-  return tokenOk(bearer) || tokenOk(cookieToken(req)) || tokenOk(url.searchParams.get("t"));
+  if (tokenOk(bearer)) return "token";
+  if (!loadAuth()) return tokenOk(cookieToken(req)) || tokenOk(url.searchParams.get("t")) ? "token" : null;
+  return sessionUser(req) || (await basicUser(req));
 }
+
+const sessionCookie = (value, maxAge) => `redpi_hq_s=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+const safeNext = (n) => (typeof n === "string" && /^\/(?!\/)[\w\-./?=&%]*$/.test(n) ? n : "/");
 
 async function readBody(req) {
   const chunks = [];
@@ -214,9 +289,11 @@ async function readBody(req) {
 }
 
 const STATIC_TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml" };
+const WEB = join(HERE, "web");
 function serveFile(res, file) {
-  const path = join(HERE, "web", file);
-  if (!existsSync(path)) return send(res, 404, "not found");
+  // Static files are public (no sign-in), so never serve anything outside hq/web.
+  const path = resolve(WEB, file);
+  if (!path.startsWith(WEB + sep) || !existsSync(path) || !statSync(path).isFile()) return send(res, 404, "not found");
   res.writeHead(200, { "content-type": STATIC_TYPES[extname(path)] || "application/octet-stream", "cache-control": "no-store",
     "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'",
     "x-frame-options": "DENY", "referrer-policy": "no-referrer" });
@@ -234,6 +311,35 @@ route("GET", "/api/runs", () => all(`SELECT r.*, p.path AS project_path, p.name 
     (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id) AS tasks,
     (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id AND t.status = 'done') AS done
   FROM runs r JOIN projects p ON p.id = r.project_id ORDER BY r.updated DESC LIMIT 200`));
+
+// Every project on the machine with what is going on in it, busiest first.
+const ACTIVE = "('planning', 'awaiting_approval', 'approved', 'executing')";
+route("GET", "/api/projects", () => all(`SELECT p.*,
+    (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id) AS runs,
+    (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id AND r.status IN ${ACTIVE}) AS active_runs,
+    (SELECT MAX(r.updated) FROM runs r WHERE r.project_id = p.id) AS updated,
+    (SELECT COUNT(*) FROM plans pl JOIN runs r ON r.id = pl.run_id WHERE r.project_id = p.id AND pl.status = 'pending') AS awaiting_approval,
+    (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE}) AS tasks,
+    (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE} AND t.status = 'done') AS done,
+    (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE} AND t.status = 'blocked') AS blocked
+  FROM projects p ORDER BY active_runs > 0 DESC, updated DESC`).map((p) => {
+  const workers = all(`SELECT w.id, w.name, w.role, w.status, w.alive, w.needs_human, w.needs_input, w.parked_level, w.run_id FROM workers w
+    JOIN runs r ON r.id = w.run_id WHERE r.project_id = ? AND r.status IN ${ACTIVE} AND w.status != 'finished' ORDER BY w.created`, p.id);
+  const latest = one("SELECT id, title, status, updated FROM runs WHERE project_id = ? ORDER BY (status IN " + ACTIVE + ") DESC, updated DESC LIMIT 1", p.id);
+  return { ...p, latest, workers: workers.map((w) => ({ id: w.id, name: w.name, role: w.role, status: w.status, alive: !!w.alive,
+    needsYou: !!(w.needs_human || w.needs_input || w.parked_level > 0), runId: w.run_id })) };
+}));
+
+route("GET", "/api/projects/:id", (_b, p) => {
+  const project = one("SELECT * FROM projects WHERE id = ?", p.id);
+  if (!project) return notFound();
+  return { project, runs: all(`SELECT r.*,
+      (SELECT COUNT(*) FROM workers w WHERE w.run_id = r.id) AS workers,
+      (SELECT COUNT(*) FROM workers w WHERE w.run_id = r.id AND w.alive = 1 AND w.status != 'finished') AS live_workers,
+      (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id) AS tasks,
+      (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id AND t.status = 'done') AS done
+    FROM runs r WHERE r.project_id = ? ORDER BY (r.status IN ${ACTIVE}) DESC, r.updated DESC`, p.id) };
+});
 
 route("POST", "/api/runs", (b) => {
   if (!b.projectPath || !b.title) throw httpError(400, "projectPath and title are required");
@@ -437,18 +543,41 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
     if (url.pathname === "/api/health") return send(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT });
-    if (!authed(req, url)) {
-      if (req.method === "GET" && !url.pathname.startsWith("/api/")) return send(res, 401, "RedPi HQ: open the link RedPi printed (it carries your access token).");
+    // Public: the login page and the static assets (the open-source UI code, no data).
+    if (req.method === "GET" && url.pathname.startsWith("/static/")) { let f; try { f = decodeURIComponent(url.pathname.slice(8)); } catch { return send(res, 404, "not found"); } return serveFile(res, f); }
+    if (req.method === "GET" && url.pathname === "/login") return serveFile(res, "login.html");
+    // Mutations need a custom header, which cross-site pages cannot send without CORS approval.
+    if (req.method !== "GET" && req.headers["x-redpi-hq"] !== "1") return send(res, 403, { error: "missing X-RedPi-HQ header" });
+    if (req.method === "POST" && url.pathname === "/api/login") {
+      const ip = req.socket.remoteAddress || "?";
+      if (!loadAuth()) return send(res, 409, { error: "No HQ password yet. In RedPi, run /hq to set one." });
+      if (!loginAllowed(ip)) return send(res, 429, { error: "Too many failed sign-ins. Try again in 10 minutes." });
+      const b = await readBody(req);
+      if (!(await checkPassword(b.user || "", b.password || ""))) { loginFailed(ip); return send(res, 401, { error: "Wrong username or password." }); }
+      failures.delete(ip);
+      return send(res, 200, { ok: true, next: safeNext(b.next) }, { "set-cookie": sessionCookie(makeSession(loadAuth().user), SESSION_DAYS * 86400) });
+    }
+    if (req.method === "POST" && url.pathname === "/api/logout") return send(res, 200, { ok: true }, { "set-cookie": sessionCookie("", 0) });
+    if (req.method === "GET" && url.pathname === "/api/session") {
+      const who = await whoIs(req, url);
+      return send(res, 200, { passwordSet: !!loadAuth(), signedIn: !!who, user: who && who !== "token" ? who : null });
+    }
+    const who = await whoIs(req, url);
+    if (!who) {
+      if (req.method === "GET" && !url.pathname.startsWith("/api/")) {
+        url.searchParams.delete("t");
+        return send(res, 302, "", { location: `/login?next=${encodeURIComponent(url.pathname + url.search)}` });
+      }
       return send(res, 401, { error: "unauthorized" });
     }
-    // Pages: a ?t= link sets the cookie once, then redirects to a clean URL.
-    if (req.method === "GET" && !url.pathname.startsWith("/api/") && url.searchParams.get("t")) {
+    // Pages: a ?t= link (before a password exists) sets the cookie once, then redirects to a clean URL.
+    if (req.method === "GET" && !url.pathname.startsWith("/api/") && url.searchParams.has("t")) {
+      const ok = tokenOk(url.searchParams.get("t")) && !loadAuth();
       url.searchParams.delete("t");
-      return send(res, 302, "", { location: url.pathname + (url.search || ""), "set-cookie": `redpi_hq=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000` });
+      return send(res, 302, "", { location: url.pathname + (url.search || ""), ...(ok ? { "set-cookie": `redpi_hq=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000` } : {}) });
     }
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/runs/"))) return serveFile(res, "dashboard.html");
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/runs/") || url.pathname.startsWith("/projects/"))) return serveFile(res, "dashboard.html");
     if (req.method === "GET" && url.pathname.startsWith("/plans/")) return serveFile(res, "plan.html");
-    if (req.method === "GET" && url.pathname.startsWith("/static/")) return serveFile(res, url.pathname.slice(8).replace(/\.\./g, ""));
     if (req.method === "GET" && url.pathname === "/api/events") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
       res.write(": connected\n\n");
@@ -458,8 +587,6 @@ const server = createServer(async (req, res) => {
       req.on("close", () => { clearInterval(ping); listeners.delete(l); });
       return;
     }
-    // Mutations need a custom header, which cross-site pages cannot send without CORS approval.
-    if (req.method !== "GET" && req.headers["x-redpi-hq"] !== "1") return send(res, 403, { error: "missing X-RedPi-HQ header" });
     for (const r of routes) {
       if (r.method !== req.method) continue;
       const m = r.re.exec(url.pathname);

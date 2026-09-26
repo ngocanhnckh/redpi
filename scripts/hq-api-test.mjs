@@ -2,7 +2,8 @@
 // RedPi HQ API test: runs a private hub (temp dir, random port) and exercises the plan,
 // approval, worker, task, message, and auth flows. Never touches ~/.pi/agent.
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,5 +155,56 @@ if (!inbox.some((m) => m.body.startsWith("All tasks are done"))) fail("CEO not t
 const list = (await api("GET", "/api/runs")).body;
 if (!list.some((r) => r.id === runId && r.done === 4 && r.workers === 2)) fail("run list counts wrong", list);
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder.");
+// Home page data: projects with their live team, active ones first.
+await api("POST", "/api/runs", { projectPath: "/tmp/other-project", title: "Other project" });
+await api("PATCH", `/api/runs/${runId}`, { status: "executing" });
+const projects = (await api("GET", "/api/projects")).body;
+const demo = projects.find((p) => p.path === "/tmp/demo-project");
+if (!demo || demo.runs !== 2 || demo.active_runs !== 2 || demo.workers.length !== 2 || demo.done !== 4) fail("project summary wrong", demo);
+if (!projects.some((p) => p.path === "/tmp/other-project" && p.runs === 1)) fail("second project missing from home", projects);
+const proj = (await api("GET", `/api/projects/${demo.id}`)).body;
+if (proj.runs.length !== 2 || !proj.runs.some((r) => r.id === runId)) fail("project page runs wrong", proj);
+
+// Browser sign-in: once auth.json exists, pages need a password; RedPi's bearer token keeps working.
+const setPassword = (user, pw) => {
+  const salt = randomBytes(16);
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ version: 1, user, salt: salt.toString("hex"), hash: scryptSync(pw, salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex"), N: 16384, r: 8, p: 1 }));
+};
+const cookieJar = page.headers.get("set-cookie").split(";")[0];
+if ((await fetch(`${base}/api/runs`, { headers: { cookie: cookieJar } })).status !== 200) fail("token cookie should work before a password exists");
+setPassword("boss", "correct horse");
+await new Promise((r) => setTimeout(r, 20));
+if ((await fetch(`${base}/api/runs`, { headers: { cookie: cookieJar } })).status !== 401) fail("old token cookie still works after a password was set");
+const gate = await fetch(`${base}/runs/${runId}?x=1`, { redirect: "manual" });
+if (gate.status !== 302 || gate.headers.get("location") !== `/login?next=${encodeURIComponent(`/runs/${runId}?x=1`)}`) fail("page did not redirect to sign-in", gate.headers.get("location"));
+const tlink = await fetch(`${base}/?t=${token}`, { redirect: "manual" });
+if (/redpi_hq=/.test(tlink.headers.get("set-cookie") || "")) fail("token link must not sign browsers in once a password exists");
+for (const evil of ["/static/..%2fserver.mjs", "/static/%2e%2e/server.mjs", "/static/..%2f..%2fpackage.json", "/static/office"])
+  { const r = await fetch(base + evil, { redirect: "manual" }); if (r.status === 200 || /machine-wide hub|"name": "redpi"/.test(await r.text())) fail(`static path escaped hq/web: ${evil}`); }
+if ((await fetch(`${base}/login`)).status !== 200 || (await fetch(`${base}/static/hq.css`)).status !== 200) fail("login page and static files must be public");
+if ((await api("GET", "/api/runs")).status !== 200) fail("bearer token stopped working");
+const login = (user, password, headers = { "x-redpi-hq": "1" }) => fetch(`${base}/api/login`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ user, password, next: "//evil.example" }) });
+if ((await login("boss", "correct horse", {})).status !== 403) fail("login without X-RedPi-HQ should be 403");
+if ((await login("boss", "wrong")).status !== 401) fail("wrong password accepted");
+const ok = await login("boss", "correct horse");
+const okBody = await ok.json();
+const sess = (ok.headers.get("set-cookie") || "").split(";")[0];
+if (ok.status !== 200 || !sess.startsWith("redpi_hq_s=") || okBody.next !== "/") fail("sign-in failed or allowed an open redirect", okBody);
+if ((await fetch(`${base}/api/projects`, { headers: { cookie: sess } })).status !== 200) fail("session cookie rejected");
+if ((await fetch(`${base}/runs/${runId}`, { headers: { cookie: sess }, redirect: "manual" })).status !== 200) fail("signed-in page did not load");
+const who = await (await fetch(`${base}/api/session`, { headers: { cookie: sess } })).json();
+if (!who.signedIn || who.user !== "boss" || !who.passwordSet) fail("session endpoint wrong", who);
+if ((await fetch(`${base}/api/projects`, { headers: { cookie: sess.replace(/.$/, (c) => (c === "A" ? "B" : "A")) } })).status !== 401) fail("tampered session accepted");
+const basic = "Basic " + Buffer.from("boss:correct horse").toString("base64");
+if ((await fetch(`${base}/api/projects`, { headers: { authorization: basic } })).status !== 200) fail("HTTP Basic auth rejected");
+if ((await fetch(`${base}/api/projects`, { headers: { authorization: "Basic " + Buffer.from("boss:nope").toString("base64") } })).status !== 401) fail("bad Basic auth accepted");
+setPassword("boss", "a new password");
+await new Promise((r) => setTimeout(r, 20));
+if ((await fetch(`${base}/api/projects`, { headers: { cookie: sess } })).status !== 401) fail("changing the password did not sign browsers out");
+if ((await fetch(`${base}/api/projects`, { headers: { authorization: basic } })).status !== 401) fail("cached Basic auth survived a password change");
+let locked = false;
+for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
+if (!locked) fail("repeated wrong passwords were never rate limited");
+
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in.");
 cleanup();

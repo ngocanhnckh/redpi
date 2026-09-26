@@ -8,6 +8,8 @@ export async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  // Signed out (or the password changed): back to the sign-in page, then here again.
+  if (res.status === 401 && !path.startsWith("/api/login")) location.assign(`/login?next=${encodeURIComponent(location.pathname + location.search)}`);
   if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { data, status: res.status });
   return data;
 }
@@ -52,3 +54,13 @@ export const STATUS_LABEL = {
   pending: ["Awaiting approval", "amber"], changes_requested: ["Changes requested", "red"], superseded: ["Superseded", ""],
 };
 export const pill = (status) => { const [label, tone] = STATUS_LABEL[status] || [status, ""]; return `<span class="pill ${tone}">${esc(label)}</span>`; };
+
+// Header: who is signed in, with a sign-out button (only when HQ has a password).
+export async function signedInAs() {
+  const el = document.getElementById("account");
+  if (!el) return;
+  const s = await api("GET", "/api/session").catch(() => null);
+  if (!s?.user) return;
+  el.innerHTML = `<span class="faint">${esc(s.user)}</span> <button class="btn" type="button">Sign out</button>`;
+  el.querySelector("button").addEventListener("click", async () => { await api("POST", "/api/logout").catch(() => {}); location.assign("/login"); });
+}

@@ -2,10 +2,11 @@
 // worker sub-sessions (full Pi sessions in tmux) that coordinate through HQ.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Input } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, networkInterfaces } from "node:os";
+import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir, networkInterfaces, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -84,9 +85,75 @@ function lanHost(): string {
   return "localhost";
 }
 
-// Links carry the token once; the page then keeps it in a cookie.
+// With a password, links are plain (the browser signs in). Before one exists, links carry the token once.
 function hqUrl(path: string): string {
-  return `http://${lanHost()}:${HQ_PORT}${path}?t=${encodeURIComponent(hqToken())}`;
+  return `http://${lanHost()}:${HQ_PORT}${path}${hqAuth() ? "" : `?t=${encodeURIComponent(hqToken())}`}`;
+}
+
+// ---------- HQ password (browser sign-in) ----------
+const AUTH_PATH = join(HQ_DIR, "auth.json");
+function hqAuth(): { user: string } | null {
+  try { const a = JSON.parse(readFileSync(AUTH_PATH, "utf8")); return a.user && a.hash ? a : null; } catch { return null; }
+}
+
+function saveHqPassword(user: string, password: string): void {
+  mkdirSync(HQ_DIR, { recursive: true });
+  const salt = randomBytes(16);
+  const N = 16384, r = 8, p = 1;
+  const hash = scryptSync(password, salt, 64, { N, r, p, maxmem: 64 * 1024 * 1024 }).toString("hex");
+  const tmp = `${AUTH_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ version: 1, user, salt: salt.toString("hex"), hash, N, r, p, updated: Date.now() }, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, AUTH_PATH);
+  try { chmodSync(AUTH_PATH, 0o600); } catch {}
+}
+
+// A one-line input that shows dots instead of the text (Pi's input dialog echoes what you type).
+async function secretInput(ctx: any, title: string): Promise<string | undefined> {
+  return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: string | undefined) => void) => {
+    const input = new Input();
+    input.onSubmit = (v: string) => done(v);
+    input.onEscape = () => done(undefined);
+    return {
+      render(width: number) {
+        const dots = "•".repeat(input.getValue().length);
+        return [theme.fg("accent", title), `  ${dots}${theme.fg("accent", "▌")}`.slice(0, Math.max(10, width)), theme.fg("dim", "  enter to confirm · esc to cancel")];
+      },
+      invalidate() { input.invalidate(); },
+      handleInput(data: string) { input.handleInput(data); tui.requestRender(); },
+    };
+  });
+}
+
+// Ask for the HQ username and password. Returns false if the user backed out.
+async function setupHqPassword(ctx: any, changing = false): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  ctx.ui.notify(changing
+    ? "Change the RedPi HQ password. Browsers that are signed in will need to sign in again."
+    : `RedPi HQ (the RedPlan dashboard) is reachable from your network at http://${lanHost()}:${HQ_PORT}.\nChoose a username and password to protect it. You can change them later with /hq-password.`, "info");
+  const fallback = hqAuth()?.user || userInfo().username || "admin";
+  const user = ((await ctx.ui.input("HQ username", fallback)) ?? "").trim() || (changing ? "" : fallback);
+  if (!user) return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const pw = await secretInput(ctx, `Password for ${user} (at least 8 characters)`);
+    if (pw === undefined) return false;
+    if (pw.length < 8) { ctx.ui.notify("Use at least 8 characters.", "warning"); continue; }
+    const again = await secretInput(ctx, "Type the password again");
+    if (again === undefined) return false;
+    if (again !== pw) { ctx.ui.notify("The passwords did not match. Try again.", "warning"); continue; }
+    saveHqPassword(user, pw);
+    ctx.ui.notify(`HQ password saved. Sign in as "${user}" at http://${lanHost()}:${HQ_PORT}/`, "info");
+    return true;
+  }
+  return false;
+}
+
+// First use: RedPlan and /hq insist on a password before printing dashboard links.
+async function ensureHqPassword(ctx: any): Promise<boolean> {
+  if (hqAuth() || WORKER_ID) return true;
+  if (!ctx.hasUI) return true;
+  if (await setupHqPassword(ctx)) return true;
+  ctx.ui.notify("RedPi HQ needs a password before RedPlan can start. Run /hq to set one.", "warning");
+  return false;
 }
 
 function tmuxArgs(...args: string[]): string[] {
@@ -439,6 +506,7 @@ export default function (pi: ExtensionAPI) {
     request = request.trim();
     if (!request) return ctx.ui.notify("Usage: /redplan <what to build>", "error");
     if (runId && ctx.hasUI && !(await ctx.ui.confirm("Start a new RedPlan run?", "This session is already leading a run. Start a new one? (The old run stays in HQ.)"))) return;
+    if (!(await ensureHqPassword(ctx))) return;
     try { await ensureHq(); } catch (e: any) { return ctx.ui.notify(e.message, "error"); }
     const created = await hq("POST", "/api/runs", { projectPath: ctx.cwd, title: request.split("\n")[0].slice(0, 90), request, ceoSession: ctx.sessionManager?.getSessionFile?.() || null });
     runId = created.run.id;
@@ -475,6 +543,8 @@ export default function (pi: ExtensionAPI) {
     else if (health.version !== localVersion()) add("yellow", `HQ runs older code (${health.version})`, "Run /hq: RedPi restarts it with the installed version");
     else add("green", `HQ ${health.version} on port ${HQ_PORT}`);
     add(hqToken() ? "green" : "red", hqToken() ? "Access token present" : "No access token", "Start HQ once (/hq) to create it");
+    const auth = hqAuth();
+    add(auth ? "green" : "yellow", auth ? `Browser sign-in on (user "${auth.user}")` : "No HQ password: dashboard links carry the access token", "Run /hq-password to set one");
     const tmux = spawnSync("tmux", ["-V"], { encoding: "utf8" });
     add(tmux.status === 0 ? "green" : "red", tmux.status === 0 ? `${tmux.stdout.trim()} installed` : "tmux is not installed", "Install tmux: workers run in tmux sessions");
     if (health) {
@@ -499,9 +569,17 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify([`RedPlan doctor: ${worst}`, ...rows.map(([ok, what, fix]) => `${icon[ok as keyof typeof icon]} ${what}${fix ? `\n    → ${fix}` : ""}`)].join("\n"), worst === "healthy" ? "info" : "warning");
   } });
 
-  pi.registerCommand("hq", { description: "Open RedPi HQ: all RedPlan runs on this machine", handler: async (_args: string, ctx: any) => {
+  pi.registerCommand("hq", { description: "Open RedPi HQ: every RedPlan project on this machine", handler: async (_args: string, ctx: any) => {
+    if (!(await ensureHqPassword(ctx))) return;
     try { await ensureHq(); } catch (e: any) { return ctx.ui.notify(e.message, "error"); }
-    ctx.ui.notify(`RedPi HQ: ${hqUrl(runId ? `/runs/${runId}` : "/")}`, "info");
+    const auth = hqAuth();
+    ctx.ui.notify(`RedPi HQ: ${hqUrl("/")}${runId ? `\nThis run: ${hqUrl(`/runs/${runId}`)}` : ""}${auth ? `\nSign in as "${auth.user}" (change it with /hq-password).` : ""}`, "info");
+  } });
+
+  pi.registerCommand("hq-password", { description: "Set or change the RedPi HQ username and password (browser sign-in)", handler: async (_args: string, ctx: any) => {
+    if (WORKER_ID) return ctx.ui.notify("Set the HQ password from your own RedPi session, not a worker.", "warning");
+    if (!ctx.hasUI) return ctx.ui.notify("/hq-password needs the interactive UI.", "error");
+    await setupHqPassword(ctx, !!hqAuth());
   } });
 
   async function statusText(): Promise<string> {
