@@ -1,6 +1,6 @@
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -184,7 +184,13 @@ function writeJson(path: string, value: any) {
 
 function patchPiSettings(defaultModel?: string, thinking = "low") {
   const p = join(AGENT_DIR, "settings.json");
-  const s = readJson(p, {});
+  // Never rebuild settings from scratch because of a read error (a half-written or hand-edited
+  // file): that once dropped the user's "packages" list, so Pi stopped loading RedPi at all.
+  let s: any = {};
+  if (existsSync(p)) {
+    try { s = JSON.parse(readFileSync(p, "utf8")); } catch { return; }
+    if (!s || typeof s !== "object" || Array.isArray(s)) return;
+  }
   if (defaultModel) {
     const full = defaultModel.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
     const slash = full.indexOf("/");
@@ -200,7 +206,9 @@ function patchPiSettings(defaultModel?: string, thinking = "low") {
   // Subagent models follow the active global RedPi profile (9Router combos or Claude bridge).
   s.subagents = subagentSettings(s.subagents, readJson(join(USER_YITEC_DIR, "model-tiers.json"), {}));
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+  const tmp = `${p}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n");
+  renameSync(tmp, p);
 }
 
 // obra/superpowers is MIT-licensed. Only its plan-and-subagent workflow is registered; the

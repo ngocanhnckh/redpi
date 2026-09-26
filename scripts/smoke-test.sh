@@ -74,3 +74,30 @@ if missing:
  print(s[-5000:]); raise SystemExit('Missing smoke checks: '+', '.join(missing))
 print('Yitec smoke passed: real Pi TUI loaded extension, commands, roles, trusted project config, and memory.')
 PY
+
+# A settings.json RedPi cannot parse (half-written or hand-edited) must be left alone, never
+# rebuilt from scratch: that once dropped the user's "packages" list and Pi stopped loading RedPi.
+BROKEN_DIR="$(mktemp -d -t redpi-smoke-broken-XXXXXX)"
+trap 'rm -rf "$AGENT_DIR" "$BROKEN_DIR"' EXIT
+mkdir -p "$BROKEN_DIR/yitec"
+echo '{ "completed": true, "provider": "manual" }' > "$BROKEN_DIR/yitec/onboarding.json"
+printf '{\n  "packages": ["git:github.com/ngocanhnckh/redpi"],\n  "defaultModel": "MainAgent",\n' > "$BROKEN_DIR/settings.json"
+cp "$BROKEN_DIR/settings.json" "$BROKEN_DIR/settings.expected"
+python3 - "$ROOT" "$PROJECT" "$BROKEN_DIR" <<'PY'
+import os, pty, subprocess, time, select, sys
+root, cwd, agent_dir = sys.argv[1:4]
+env = os.environ.copy(); env.update({'PI_NO_TITLE': '1', 'TERM': 'xterm-256color', 'PI_CODING_AGENT_DIR': agent_dir, 'REDPI_AUTO_UPDATE': '0'})
+master, slave = pty.openpty()
+p = subprocess.Popen(['pi', '-ne', '-e', f'{root}/extensions/yitec-model-router.ts'], cwd=cwd, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave); out = b''; end = time.time() + 20
+while time.time() < end and b'RedPi' not in out and p.poll() is None:
+    r, _, _ = select.select([master], [], [], 0.1)
+    if r:
+        try: out += os.read(master, 8192)
+        except OSError: break
+time.sleep(1)
+try: p.terminate(); p.wait(timeout=3)
+except Exception: p.kill()
+PY
+cmp -s "$BROKEN_DIR/settings.json" "$BROKEN_DIR/settings.expected" || { echo "FAIL: RedPi rewrote an unreadable settings.json:"; cat "$BROKEN_DIR/settings.json"; exit 1; }
+echo "Settings safety passed: an unreadable settings.json is left untouched."
