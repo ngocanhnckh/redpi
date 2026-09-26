@@ -1,0 +1,80 @@
+RedPi
+Copyright (c) YITEC. Licensed under the MIT License (see LICENSE).
+
+This project includes code ported from, and designs adapted from, the projects
+below. Their licenses and copyright notices are reproduced here.
+
+-------------------------------------------------------------------------------
+munder-difflin — https://github.com/chaitanyagiri/munder-difflin
+Copyright (c) 2026 Chaitanya Giri — MIT License
+
+Ported (rewritten from TypeScript/Pixi.js to plain JavaScript/Canvas 2D):
+  hq/web/office/people.js        from scene/office/portraitArt.ts (procedural pixel people)
+  hq/web/office/office.js        from scene/office/Camera.ts, Character.ts, CharacterSprite.ts,
+                                 ToolBubble.ts, ThoughtBubble.ts, MessageEnvelope.ts, DeskScreen.ts
+  hq/web/office/pathfinding.js   from scene/office/pathfinding.ts
+  hq/web/graph.js                from components/memoryGraph/forceLayout.ts
+  hq/web/dashboard.js            tool waterfall idea from components/ToolWaterfall.tsx
+
+Not included: munder-difflin's office tilesets and Tiled maps are LimeZu
+"Modern Interiors" assets under a separate license that forbids redistribution.
+RedPi's office room, furniture, and layout are original art drawn in code
+(hq/web/office/tiles.js, hq/web/office/map.js).
+
+-------------------------------------------------------------------------------
+the-office — https://github.com/shahar061/the-office
+Copyright (c) 2026 shahar061 — ISC License
+
+munder-difflin's camera, BFS pathfinding, character sprite animation, and tool
+bubble were ported from this project; RedPi's ports of those files carry this
+lineage.
+
+-------------------------------------------------------------------------------
+OpenRig — https://github.com/mvschwarz/openrig
+Apache License 2.0
+
+Designs adapted (no source code copied) in extensions/redplan.ts and hq/server.mjs:
+  worker resume from a saved session file with --session, per-launch ids and
+  explicit restore outcomes (pi-resume.ts, pi-runner-protocol.ts); required
+  closure reasons, handoffs, and an append-only transition log
+  (hot-potato-enforcer.ts, queue_transitions); parked-agent detection and the
+  escalating wake ladder (agent-state-taxonomy.md, parked-query.ts,
+  queue-wake-ladder.ts); the read-only restore check (restore-check-service.ts);
+  team norms and the independent reviewer (specs/rigs/launch/*/CULTURE.md).
+
+-------------------------------------------------------------------------------
+MIT License (munder-difflin)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+ISC License (the-office)
+
+Copyright (c) 2026 shahar061
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.

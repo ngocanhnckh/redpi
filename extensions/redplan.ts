@@ -3,7 +3,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -15,10 +15,13 @@ const TMUX_SOCKET = process.env.REDPI_TMUX_SOCKET || "";
 // Set in worker sessions by redplan_spawn_worker; absent in the CEO session.
 const WORKER_ID = process.env.REDPI_HQ_WORKER || "";
 const WORKER_RUN = process.env.REDPI_HQ_RUN || "";
+const LAUNCH_ID = process.env.REDPI_HQ_LAUNCH || "";
+// Error text that means the worker is stuck on its provider, not on the task (same families the router retries on).
+const PROVIDER_STUCK = /rate limit|429|quota|insufficient_quota|weekly limit|session limit|credits|tokens exhausted|overloaded|401|api key/i;
 const PKG_ROOT = resolve(typeof __dirname === "string" ? __dirname : process.cwd(), "..");
 const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
-const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run"];
+const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run"];
 const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status"];
 const NAMES = ["Alex", "Peter", "Mia", "Sam", "Nina", "Leo", "Ivy", "Omar", "Zoe", "Kai", "Ruby", "Theo", "Maya", "Finn", "Lena", "Ravi"];
 
@@ -140,6 +143,7 @@ const PlanSchema = Type.Object({
     tasks: Type.Array(TaskSchema),
   })),
   team: Type.Optional(Type.Array(Type.Object({ name: Type.String(), role: Type.String(), taskIds: Type.Array(Type.String()) }), { description: "Proposed workers: one per parallel lane" })),
+  review: Type.Optional(Type.Union([Type.Literal("independent"), Type.Literal("self")], { description: "independent (default): builders move tasks to review and a separate reviewer marks them done. self: builders mark their own tasks done." })),
   risks: Type.Optional(Type.Array(Type.String())),
   outOfScope: Type.Optional(Type.Array(Type.String())),
 });
@@ -153,25 +157,57 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks, and keep the board honest. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
   const w = d.worker;
-  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]`).join("\n") || "- (none yet; ask the CEO)";
+  const independent = d.review !== "self";
+  const reviewer = /review|qa|audit/i.test(w.role);
+  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
   const team = d.teammates.map((t: any) => `- ${t.name} (${t.role})${t.current_task ? `: working on ${t.current_task}` : ""}`).join("\n") || "- (just you)";
+  const finish = reviewer
+    ? "done only after you have checked the exact diff against the task's acceptance criteria and run its tests; otherwise move it back to in_progress and send the author concrete findings."
+    : independent
+      ? "review (not done) once it is implemented and you verified it yourself; an independent reviewer marks it done."
+      : "done once it is implemented and verified (tests/build pass), with a note on how you verified it.";
   return `RedPlan worker. You are ${w.name}, ${w.role}, in a team led by the CEO session (another Pi). Run: "${d.run.title}". Workspace: ${w.cwd}${w.branch ? ` on branch ${w.branch}` : " (shared with teammates)"}.
 Your tasks:
 ${tasks}
 Teammates:
 ${team}
 How you work:
-1. Move your cards with redplan_update_task: in_progress when you start a task, done when it is implemented and verified (tests/build pass), blocked with a reason when stuck.
+1. Move your cards with redplan_update_task: in_progress when you start; ${finish} Blocked needs a note with the reason and what would unblock it. If someone else should finish a task, hand it off (handoffTo) with a note on what is done and what is next.
 2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.
 3. Messages arrive as user messages starting with [RedPlan …]. Instructions from the human override everything else.
 4. Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge.
 5. Use the exact technologies and APIs in your brief; do not substitute look-alikes.
-6. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.`;
+6. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
+Team norms: review the exact change, not a description of it. Never close or mark someone else's task on their behalf unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in your task notes or messages so the next person can follow them.`;
+}
+
+// Start (or restart) a worker's Pi in tmux. Every launch gets a new launch id so HQ can
+// ignore heartbeats from an earlier process (OpenRig's launchId idea).
+function launchWorker(w: { id: string; name: string; cwd: string; tmux: string }, runId: string, opts: { launchId: string; sessionFile?: string; cursor?: number }): { ok: boolean; error?: string; launchId: string } {
+  const launchId = opts.launchId;
+  const env: Record<string, string> = {
+    REDPI_HQ_WORKER: w.id, REDPI_HQ_RUN: runId, REDPI_HQ_NAME: w.name, REDPI_HQ_LAUNCH: launchId, REDPI_HQ_PORT: String(HQ_PORT), REDPI_HQ_DIR: HQ_DIR,
+    PATH: process.env.PATH || "", ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}),
+    ...(TMUX_SOCKET ? { REDPI_TMUX_SOCKET: TMUX_SOCKET } : {}),
+    ...(opts.cursor ? { REDPI_HQ_CURSOR: String(opts.cursor) } : {}),
+  };
+  for (const k of ["REDPI_AUTO_UPDATE", "NINE_ROUTER_API_KEY", "NINE_ROUTER_BASE_URL", "REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS", "TERM", "REDPI_WORKER_ARGS"]) if (process.env[k]) env[k] = process.env[k]!;
+  // Workers load RedPi from the installed packages like any Pi; REDPI_WORKER_ARGS adds CLI flags (tests pass -e).
+  const extra = (process.env.REDPI_WORKER_ARGS || "").split(/\s+/).filter(Boolean);
+  // Resume with --session <file>, never --resume (that opens an interactive picker).
+  const sessionArgs = opts.sessionFile ? ["--session", opts.sessionFile] : [];
+  const r = spawnSync("tmux", tmuxArgs("new-session", "-d", "-s", w.tmux, "-x", "200", "-y", "50", "-c", w.cwd,
+    ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]), process.execPath, process.argv[1], ...extra, ...sessionArgs), { encoding: "utf8" });
+  return r.status === 0 ? { ok: true, launchId } : { ok: false, launchId, error: (r.stderr || r.stdout || "").trim() };
+}
+
+function tmuxAlive(session: string): boolean {
+  return spawnSync("tmux", tmuxArgs("has-session", "-t", `=${session}`), { encoding: "utf8" }).status === 0;
 }
 
 // ---------- extension ----------
@@ -181,7 +217,9 @@ export default function (pi: ExtensionAPI) {
   let inboxCursor = 0;
   let poller: NodeJS.Timeout | undefined;
   let delivering = false;
-  const pendingEvents: { kind: string; text: string }[] = [];
+  const pendingEvents: { kind: string; text: string; ms?: number; ok?: boolean }[] = [];
+  const toolStarts = new Map<string, { at: number; line: string }>();
+  let openDialogs = 0;
   let beatTimer: NodeJS.Timeout | undefined;
   let beatState: any = {};
 
@@ -196,14 +234,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ----- heartbeat (workers) -----
-  function beat(patch: any, event?: { kind: string; text: string }) {
+  function beat(patch: any, event?: { kind: string; text: string; ms?: number; ok?: boolean }) {
     if (!WORKER_ID) return;
     beatState = { ...beatState, ...patch };
     if (event) pendingEvents.push(event);
     if (beatTimer) return;
     beatTimer = setTimeout(async () => {
       beatTimer = undefined;
-      const body = { ...beatState, events: pendingEvents.splice(0) };
+      const body = { ...beatState, launchId: LAUNCH_ID || undefined, events: pendingEvents.splice(0) };
       beatState = {};
       await hq("POST", `/api/workers/${WORKER_ID}/heartbeat`, body).catch(() => {});
     }, 700);
@@ -256,11 +294,13 @@ export default function (pi: ExtensionAPI) {
       runId = lastRun?.data?.runId || "";
     }
     const cursor = [...(ctx.sessionManager?.getEntries?.() || [])].reverse().find((e: any) => e.type === "custom" && e.customType === "redplan-cursor" && e.data?.runId === runId);
-    inboxCursor = cursor?.data?.cursor || 0;
+    // A fresh relaunch starts after the messages its predecessor already handled.
+    inboxCursor = Math.max(cursor?.data?.cursor || 0, Number(process.env.REDPI_HQ_CURSOR || 0));
     setTools();
     if (WORKER_ID) {
       await ensureHq().catch(() => {});
-      beat({ status: "idle" }, { kind: "session", text: "Worker session started" });
+      const sessionFile = ctx.sessionManager?.getSessionFile?.();
+      beat({ status: "idle", ...(sessionFile ? { sessionFile } : {}) }, { kind: "session", text: sessionFile && inboxCursor ? "Worker session resumed" : "Worker session started" });
       ctx.ui.setStatus("redplan", `RedPlan worker · ${process.env.REDPI_HQ_NAME || ""}`);
     } else if (runId) {
       ctx.ui.setStatus("redplan", `RedPlan CEO · ${hqUrl(`/runs/${runId}`)}`);
@@ -278,14 +318,30 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
     const last = event.messages?.filter((m: any) => m.role === "assistant").at(-1);
     const said = (Array.isArray(last?.content) ? last.content : []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
-    beat({ status: "idle", ...(said ? { lastMessage: said } : {}) }, said ? { kind: "reply", text: said.slice(0, 300) } : undefined);
+    const err = [last?.errorMessage, last?.stopReason === "error" ? "error" : ""].filter(Boolean).join(" ");
+    const stuck = err && PROVIDER_STUCK.test(err) ? { count: 1, reason: `Model provider problem: ${String(last?.errorMessage || err).slice(0, 200)}` } : null;
+    beat({ status: "idle", ...(said ? { lastMessage: said } : {}), ...(openDialogs ? {} : { needsInput: stuck }) }, said ? { kind: "reply", text: said.slice(0, 300) } : stuck ? { kind: "error", text: stuck.reason } : undefined);
   });
   pi.on("tool_execution_start", async (event: any) => {
     const a = event.args || {};
     const detail = a.command || a.path || a.file_path || a.pattern || a.to || a.taskId || "";
     const line = `${event.toolName}${detail ? `: ${String(detail).split("\n")[0].slice(0, 160)}` : ""}`;
-    beat({ activity: { text: line, at: Date.now() } }, { kind: "tool", text: line });
+    toolStarts.set(event.toolCallId, { at: Date.now(), line });
+    beat({ activity: { text: line, tool: event.toolName, at: Date.now() } });
   });
+  // One timed event per finished call feeds the dashboard's tool waterfall.
+  pi.on("tool_execution_end", async (event: any) => {
+    const start = toolStarts.get(event.toolCallId);
+    toolStarts.delete(event.toolCallId);
+    beat({}, { kind: "tool", text: start?.line || event.toolName, ms: start ? Date.now() - start.at : undefined, ok: !event.isError });
+  });
+  pi.on("turn_end", async (_e: any, ctx: any) => {
+    const u = ctx.getContextUsage?.();
+    if (u) beat({ context: { tokens: u.tokens, window: u.contextWindow, percent: u.percent } });
+  });
+  // A dialog open in the worker's terminal (trust, confirm, select) waits on a person.
+  pi.on("ui_prompt_start" as any, async () => { openDialogs++; beat({ needsInput: { count: openDialogs, reason: "A prompt is waiting in the worker's terminal: attach to its tmux session to answer" } }); });
+  pi.on("ui_prompt_end" as any, async () => { openDialogs = Math.max(0, openDialogs - 1); beat({ needsInput: openDialogs ? { count: openDialogs, reason: "A prompt is waiting in the worker's terminal" } : null }); });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     latestCtx = ctx;
@@ -337,6 +393,38 @@ export default function (pi: ExtensionAPI) {
     setTools();
     ctx.ui.setStatus("redplan", undefined);
     ctx.ui.notify("RedPlan mode off for this session.", "info");
+  } });
+
+  pi.registerCommand("redplan-doctor", { description: "Check RedPlan health: HQ, token, tmux, workers, worktrees, saved sessions (read-only)", handler: async (_args: string, ctx: any) => {
+    const rows: [string, string, string][] = [];
+    const add = (ok: "green" | "yellow" | "red", what: string, fix = "") => rows.push([ok, what, fix]);
+    const health = await hqHealth();
+    if (!health) add("red", `HQ is not running on port ${HQ_PORT}`, "Run /hq to start it; see ~/.pi/agent/yitec/hq/hq.log");
+    else if (health.version !== localVersion()) add("yellow", `HQ runs older code (${health.version})`, "Run /hq: RedPi restarts it with the installed version");
+    else add("green", `HQ ${health.version} on port ${HQ_PORT}`);
+    add(hqToken() ? "green" : "red", hqToken() ? "Access token present" : "No access token", "Start HQ once (/hq) to create it");
+    const tmux = spawnSync("tmux", ["-V"], { encoding: "utf8" });
+    add(tmux.status === 0 ? "green" : "red", tmux.status === 0 ? `${tmux.stdout.trim()} installed` : "tmux is not installed", "Install tmux: workers run in tmux sessions");
+    if (health) {
+      try {
+        const lan = await fetch(`http://${lanHost()}:${HQ_PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+        add(lan.ok ? "green" : "yellow", `Reachable at ${lanHost()}:${HQ_PORT}`);
+      } catch { add("yellow", `Not reachable at ${lanHost()}:${HQ_PORT}`, "Check REDPI_HQ_HOST and the firewall if you open HQ from another machine"); }
+    }
+    if (runId && health) {
+      const s = await hq("GET", `/api/runs/${runId}`);
+      for (const w of s.workers) {
+        const alive = w.tmux && tmuxAlive(w.tmux);
+        const saved = w.session_file && existsSync(w.session_file);
+        if (!existsSync(w.cwd)) add("red", `${w.name}: workspace ${w.cwd} is missing`, "Recreate the worktree or reassign the tasks");
+        else if (alive) add(w.parked ? "yellow" : "green", `${w.name}: running${w.parked ? " but parked (idle with open work)" : ""}`, w.parked ? `Message ${w.name} or reassign` : "");
+        else add(saved ? "yellow" : "red", `${w.name}: tmux session gone`, saved ? `Resume with redplan_resume_worker (saved session ${w.session_file})` : "No saved session: resume with allowFresh=true");
+        if (w.needs_input) add("yellow", `${w.name} needs input: ${w.needs_input.reason}`, w.attach || "");
+      }
+    }
+    const icon = { green: "✓", yellow: "!", red: "✗" } as const;
+    const worst = rows.some((r) => r[0] === "red") ? "not healthy" : rows.some((r) => r[0] === "yellow") ? "healthy with caveats" : "healthy";
+    ctx.ui.notify([`RedPlan doctor: ${worst}`, ...rows.map(([ok, what, fix]) => `${icon[ok as keyof typeof icon]} ${what}${fix ? `\n    → ${fix}` : ""}`)].join("\n"), worst === "healthy" ? "info" : "warning");
   } });
 
   pi.registerCommand("hq", { description: "Open RedPi HQ: all RedPlan runs on this machine", handler: async (_args: string, ctx: any) => {
@@ -435,25 +523,45 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief });
-      const env: Record<string, string> = {
-        REDPI_HQ_WORKER: worker.id, REDPI_HQ_RUN: runId, REDPI_HQ_NAME: name, REDPI_HQ_PORT: String(HQ_PORT), REDPI_HQ_DIR: HQ_DIR,
-        PATH: process.env.PATH || "", ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}),
-        ...(TMUX_SOCKET ? { REDPI_TMUX_SOCKET: TMUX_SOCKET } : {}),
-      };
-      for (const k of ["REDPI_AUTO_UPDATE", "NINE_ROUTER_API_KEY", "NINE_ROUTER_BASE_URL", "REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS", "TERM"]) if (process.env[k]) env[k] = process.env[k]!;
-      const piCli = process.argv[1];
-      // Workers load RedPi from the installed packages like any Pi; REDPI_WORKER_ARGS adds CLI flags (tests pass -e).
-      const extra = (process.env.REDPI_WORKER_ARGS || "").split(/\s+/).filter(Boolean);
-      if (process.env.REDPI_WORKER_ARGS) env.REDPI_WORKER_ARGS = process.env.REDPI_WORKER_ARGS;
-      const r = spawnSync("tmux", tmuxArgs("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", cwd,
-        ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]), process.execPath, piCli, ...extra), { encoding: "utf8" });
-      if (r.status !== 0) {
+      // The launch id is recorded before the process starts, so its first heartbeat is recognised.
+      const launchId = randomUUID();
+      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief, launchId });
+      const launched = launchWorker({ id: worker.id, name, cwd, tmux: session }, runId, { launchId });
+      if (!launched.ok) {
         await hq("PATCH", `/api/workers/${worker.id}`, { status: "failed" }).catch(() => {});
-        throw new Error(`tmux failed to start ${name}: ${(r.stderr || r.stdout).trim()}`);
+        throw new Error(`tmux failed to start ${name}: ${launched.error}`);
       }
       const attach = `tmux ${TMUX_SOCKET ? `-L ${TMUX_SOCKET} ` : ""}attach -t '=${session}'`;
       return text(`${name} (${params.role}) started on ${params.taskIds.join(", ")} in ${cwd}${branch ? ` [branch ${branch}]` : ""}.\nWatch or join: ${attach}\nDashboard: ${hqUrl(`/runs/${runId}`)}\n${name} receives the brief automatically and will message you with questions and reports.`, { workerId: worker.id, name, session });
+    },
+  } as any);
+
+  pi.registerTool({
+    name: "redplan_resume_worker", label: "Resume RedPlan worker",
+    description: "Bring back a worker whose tmux session is gone (crash, reboot, kill). It continues its saved Pi session, so it keeps its context. If the session file is missing it only starts fresh when allowFresh is true, and then gets its original brief again.",
+    parameters: Type.Object({ name: Type.String({ description: "Worker name" }), allowFresh: Type.Optional(Type.Boolean({ description: "Start a fresh session if the saved one is missing" })) }),
+    async execute(_id: string, params: any) {
+      if (!runId) throw new Error("No RedPlan run in this session.");
+      const s = await hq("GET", `/api/runs/${runId}`);
+      const w = s.workers.find((x: any) => x.name.toLowerCase() === String(params.name).trim().toLowerCase());
+      if (!w) throw new Error(`No worker named ${params.name}. Team: ${s.workers.map((x: any) => x.name).join(", ")}`);
+      if (w.tmux && tmuxAlive(w.tmux)) return text(`outcome: failed — ${w.name} is still running (tmux ${w.tmux}). Message them instead.`, { outcome: "failed" });
+      const detail = await hq("GET", `/api/workers/${w.id}`);
+      const hasSession = !!(w.session_file && existsSync(w.session_file));
+      if (!hasSession && !params.allowFresh) {
+        return text(`outcome: failed — no saved session for ${w.name}${w.session_file ? ` (${w.session_file} is missing)` : ""}. Call again with allowFresh=true to start them fresh with their original brief.`, { outcome: "failed" });
+      }
+      if (!existsSync(w.cwd)) return text(`outcome: failed — ${w.name}'s workspace ${w.cwd} no longer exists.`, { outcome: "failed" });
+      const launchId = randomUUID();
+      await hq("PATCH", `/api/workers/${w.id}`, { launchId, status: "starting", tmux: w.tmux });
+      const launched = launchWorker({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux }, runId, hasSession ? { launchId, sessionFile: w.session_file } : { launchId, cursor: detail.lastMessageId });
+      if (!launched.ok) return text(`outcome: failed — tmux: ${launched.error}`, { outcome: "failed" });
+      if (!hasSession) {
+        await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: w.id, kind: "chat",
+          body: `You are replacing ${w.name}'s previous session, which ended. Check the workspace (git status/log) and the board to see what is already done before continuing.\n\nOriginal brief:\n${detail.brief || "(not found; ask the CEO)"}` });
+      }
+      const outcome = hasSession ? "resumed" : "fresh";
+      return text(`outcome: ${outcome} — ${w.name} is back in tmux ${w.tmux}${hasSession ? ` continuing ${w.session_file}` : " with a fresh session and the original brief"}.`, { outcome });
     },
   } as any);
 
@@ -486,16 +594,20 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "redplan_update_task", label: "Update RedPlan task",
-    description: "Move a task card on the RedPlan board: todo, in_progress, review, blocked (give a reason), or done (verified).",
+    description: "Move a task card on the RedPlan board (todo, in_progress, review, blocked, done), or hand it to a teammate. Blocked needs a note with the reason; done needs a note with how it was verified; a handoff needs a note with what is done and what is next.",
     parameters: Type.Object({
       taskId: Type.String(),
-      status: Type.Union(["todo", "in_progress", "review", "blocked", "done"].map((s) => Type.Literal(s))),
-      note: Type.Optional(Type.String({ description: "Reason when blocked; short result or verification when done" })),
+      status: Type.Optional(Type.Union(["todo", "in_progress", "review", "blocked", "done"].map((s) => Type.Literal(s)))),
+      note: Type.Optional(Type.String({ description: "Required for blocked (reason), done (how verified), and handoffs (state and next step)" })),
+      handoffTo: Type.Optional(Type.String({ description: "Teammate name to hand this task to" })),
     }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
-      const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
-      return text(`${t.id} is now ${t.status}.`);
+      if (!params.status && !params.handoffTo) throw new Error("Give a status or handoffTo.");
+      try {
+        const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, handoffTo: params.handoffTo, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
+        return text(params.handoffTo ? `${t.id} handed to ${params.handoffTo}.` : `${t.id} is now ${t.status}.`);
+      } catch (e: any) { throw new Error(e.message); }
     },
   } as any);
 

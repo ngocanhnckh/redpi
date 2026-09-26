@@ -30,6 +30,7 @@ export function validatePlan(plan) {
   if (!plan || typeof plan !== "object") return { errors: ["plan must be an object"], warnings };
   if (!text(plan.title)) errors.push("title is required");
   if (!text(plan.summary)) errors.push("summary is required: one paragraph a non-engineer can follow");
+  if (plan.review !== undefined && !["independent", "self"].includes(plan.review)) errors.push('review must be "independent" (default: a separate reviewer marks tasks done) or "self"');
   const stories = list(plan.stories);
   if (!stories.length) errors.push("at least one story is required");
 

@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 root = sys.argv[1]
 requests = []  # (identity, last user text, system prompt)
+resumed_history = []  # for Alex's first request after resume: did it still carry his earlier conversation?
 
 PLAN = {
   "title": "Tiny todo API", "summary": "A small todo REST API with a CLI client.",
@@ -40,14 +41,20 @@ SCRIPTS = {
     ("APPROVED", [
       ("redplan_spawn_worker", {"role": "backend developer", "name": "Alex", "taskIds": ["T1"], "workspace": "shared", "brief": "Build T1. Tell Peter the endpoint shape."}),
       ("redplan_spawn_worker", {"role": "full-stack developer", "name": "Peter", "taskIds": ["T2"], "workspace": "worktree", "brief": "Build T2. Wait for Alex's endpoint shape."}),
+      ("redplan_spawn_worker", {"role": "independent reviewer", "name": "Rita", "taskIds": [], "workspace": "shared", "brief": "Review tasks the CEO sends you."}),
     ]),
+    ("ready for review", [("redplan_send", {"to": "Rita", "message": "Please review T1 (Alex, shared workspace)."})]),
+    ("RESUME-ALEX", [("redplan_resume_worker", {"name": "Alex"})]),
   ],
   "Alex": [
     ("[RedPlan brief", [
       ("redplan_update_task", {"taskId": "T1", "status": "in_progress"}),
       ("redplan_send", {"to": "Peter", "message": "Endpoints: GET/POST /todos returning {id, text}."}),
-      ("redplan_update_task", {"taskId": "T1", "status": "done", "note": "3 tests pass"}),
+      ("redplan_update_task", {"taskId": "T1", "status": "review", "note": "implemented; 3 tests pass"}),
     ]),
+  ],
+  "Rita": [
+    ("Please review T1", [("redplan_update_task", {"taskId": "T1", "status": "done", "note": "reviewed the diff; tests pass"})]),
   ],
   "Peter": [
     ("message from Alex", [("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."})]),
@@ -71,6 +78,8 @@ def reply(handler, identity, messages, system=""):
     done_steps = sum(1 for m in messages[last_user + 1:] if m.get("role") == "tool")
     steps = next((s for trig, s in SCRIPTS.get(identity, []) if trig in (user_text or "")), [])
     requests.append((identity, user_text or "", system))
+    if identity == "Alex" and "AFTER-RESUME" in (user_text or ""):
+        resumed_history.append(any("RedPlan brief from the CEO" in json.dumps(m) for m in messages))
     if "SLOWTASK" in (user_text or "") and "INTERRUPTED-NOW" not in (user_text or ""):
         return slow_reply(handler)
     if done_steps < len(steps):
@@ -161,10 +170,10 @@ try:
         raise SystemExit("CEO system prompt is missing the RedPlan protocol or the RedPi subagent policy (prompt chaining broken)")
 
     hq("POST", f"/api/plans/{plan['id']}/decision", {"decision": "approve", "comment": "ship it"})
-    workers = wait("two workers spawned", lambda: (lambda s: s["workers"] if len(s["workers"]) == 2 else None)(hq("GET", f"/api/runs/{run['id']}")))
+    workers = wait("three workers spawned", lambda: (lambda s: s["workers"] if len(s["workers"]) == 3 else None)(hq("GET", f"/api/runs/{run['id']}")))
     names = {w["name"]: w for w in workers}
     sessions = subprocess.run(["tmux", "-L", sock, "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True).stdout.split()
-    if len(sessions) != 2: raise SystemExit(f"expected 2 tmux worker sessions, got {sessions}")
+    if len(sessions) != 3: raise SystemExit(f"expected 3 tmux worker sessions, got {sessions}")
     peter = names["Peter"]
     if not peter["branch"] or ".redpi-worktrees" not in peter["cwd"] or not os.path.isdir(peter["cwd"]):
         raise SystemExit(f"Peter's worktree missing: {peter}")
@@ -173,8 +182,11 @@ try:
 
     def pane(name):
         return subprocess.run(["tmux", "-L", sock, "capture-pane", "-p", "-t", f"={name}"], capture_output=True, text=True).stdout
-    try: wait("Alex finished T1", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None), 90)
+    try: wait("Rita reviewed T1 to done", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None), 90)
     except SystemExit: print("---- Alex pane ----"); print(pane(names["Alex"]["tmux"])[-2500:]); raise
+    history = hq("GET", f"/api/runs/{run['id']}/tasks/T1/history")
+    if [h["to_status"] for h in history] != ["in_progress", "review", "done"] or history[-1]["actorName"] != "Rita":
+        raise SystemExit(f"review gate not honoured: {history}")
     wait("Alex finished T1 (confirmed)", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None))
     wait("Peter received Alex's message", lambda: any(i == "Peter" and "message from Alex" in u for i, u, _ in requests))
     wait("CEO received Peter's report", lambda: any(i == "CEO" and "message from Peter" in u for i, u, _ in requests))
@@ -197,10 +209,30 @@ try:
     detail = hq("GET", f"/api/workers/{names['Alex']['id']}")
     if not detail["events"] or not detail["worker"]["last_message"]:
         raise SystemExit(f"worker heartbeat/activity not reported: {detail['worker']}")
+    if not any(e["kind"] == "tool" and e["ms"] is not None for e in detail["events"]):
+        raise SystemExit("tool calls were not timed")
+    if not detail["worker"]["session_file"]:
+        raise SystemExit("worker did not report its session file")
+
+    # Crash + resume: kill Alex's tmux session, ask the CEO to resume, and prove the saved session continued.
+    subprocess.run(["tmux", "-L", sock, "kill-session", "-t", f"={names['Alex']['tmux']}"], check=True)
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "command", "body": "RESUME-ALEX: his session crashed."})
+    wait("Alex relaunched in tmux", lambda: subprocess.run(["tmux", "-L", sock, "has-session", "-t", f"={names['Alex']['tmux']}"], capture_output=True).returncode == 0, 40)
+    time.sleep(3)
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "command", "body": "AFTER-RESUME: are you back?"})
+    wait("resumed Alex answered", lambda: resumed_history, 40)
+    if not resumed_history[0]:
+        raise SystemExit("resumed worker lost its earlier conversation (session not continued)")
+
+    os.write(master, b"/redplan-doctor"); drain(0.3); os.write(master, b"\r")
+    wait("doctor report", lambda: b"RedPlan doctor:" in out, 20)
+    report = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", out.decode("utf8", "ignore")).split("RedPlan doctor:")[-1][:1200]
+    if "not healthy" in report or "tmux session gone" in report:
+        raise SystemExit(f"doctor not healthy after resume:\n{report}")
     msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → plan + critical path → approval → 2 tmux workers (shared + worktree) → board updates, teammate chat, CEO reports, human instructions and interrupts.")
+    print("RedPlan smoke passed: /redplan → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)

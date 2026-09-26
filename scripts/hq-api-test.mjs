@@ -48,7 +48,7 @@ const badDep = structuredClone(plan);
 badDep.stories[1].tasks[0].dependsOn = ["T99"];
 if (!validatePlan(badDep).errors.some((e) => e.includes("T99"))) fail("unknown dependency not detected");
 
-proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1" }, stdio: "ignore" });
+proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600" }, stdio: "ignore" });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
@@ -89,7 +89,7 @@ if ((await api("POST", `/api/plans/${v2.body.id}/decision`, { decision: "approve
 let state = (await api("GET", `/api/runs/${runId}`)).body;
 if (state.tasks.length !== 4 || state.run.status !== "approved") fail("approval did not create tasks", state.run);
 
-const alex = (await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "backend developer", cwd: "/tmp/demo-project", taskIds: ["T1", "T2"], brief: "Build the API" })).body;
+const alex = (await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "backend developer", cwd: "/tmp/demo-project", taskIds: ["T1", "T2"], brief: "Build the API", launchId: "L1" })).body;
 const peter = (await api("POST", `/api/runs/${runId}/workers`, { name: "Peter", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"] })).body;
 if ((await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "x", cwd: "/tmp" })).status !== 409) fail("duplicate worker name allowed");
 inbox = (await api("GET", `/api/runs/${runId}/inbox?for=${alex.id}&after=0`)).body;
@@ -107,12 +107,52 @@ if (t1.body.status !== "in_progress") fail("task update failed", t1.body);
 const detail = (await api("GET", `/api/workers/${alex.id}`)).body;
 if (detail.worker.current_task !== "T1" || detail.events.length !== 1 || detail.teammates[0].name !== "Peter") fail("worker detail wrong", detail);
 
-for (const id of ["T1", "T2", "T3", "T4"]) await api("POST", `/api/runs/${runId}/tasks/${id}`, { status: "done", actor: "ceo" });
+// Closure rules: reasons are required, and the author cannot self-approve under independent review.
+if ((await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "blocked", actor: alex.id })).status !== 400) fail("blocked without a reason was accepted");
+if ((await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "done", actor: "ceo" })).status !== 400) fail("done without a verification note was accepted");
+if ((await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "done", note: "tests pass", actor: alex.id })).status !== 409) fail("author marked own task done under independent review");
+await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "review", note: "implemented, 3 tests pass", actor: alex.id });
+inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
+if (!inbox.some((m) => m.body.includes("ready for review"))) fail("CEO not told a task is ready for review");
+const reviewed = await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "done", note: "reviewed diff, tests pass", actor: peter.id });
+if (reviewed.body.status !== "done") fail("independent reviewer could not mark done", reviewed.body);
+const history = (await api("GET", `/api/runs/${runId}/tasks/T1/history`)).body;
+if (history.map((h) => h.to_status).join(",") !== "in_progress,review,done" || history[2].actorName !== "Peter") fail("transition history wrong", history);
+
+// Handoff: reassigns and records atomically, and tells the new owner.
+if ((await api("POST", `/api/runs/${runId}/tasks/T2`, { handoffTo: "Peter", actor: alex.id })).status !== 400) fail("handoff without a note accepted");
+const handed = await api("POST", `/api/runs/${runId}/tasks/T2`, { handoffTo: "peter", note: "schema done; endpoints next", actor: alex.id });
+if (handed.body.worker_id !== peter.id) fail("handoff did not reassign", handed.body);
+const peterMsgs = (await api("GET", `/api/runs/${runId}/inbox?for=${peter.id}&after=0`)).body;
+if (!peterMsgs.some((m) => m.body.startsWith("Handing T2"))) fail("new owner not told about the handoff");
+if ((await api("GET", `/api/runs/${runId}/tasks/T2/history`)).body.at(-1)?.target !== peter.id) fail("handoff not in history");
+
+// Stale launch: a heartbeat from an earlier process must be ignored.
+const stale = await api("POST", `/api/workers/${alex.id}/heartbeat`, { launchId: "OLD", status: "working", lastMessage: "ghost" });
+if (!stale.body.stale || (await api("GET", `/api/workers/${alex.id}`)).body.worker.last_message === "ghost") fail("stale-launch heartbeat was applied");
+await api("POST", `/api/workers/${alex.id}/heartbeat`, { launchId: "L1", sessionFile: "/tmp/s.jsonl", needsInput: { count: 1, reason: "rate limit" }, context: { tokens: 1000, window: 200000, percent: 0.5 },
+  events: [{ kind: "tool", text: "bash: npm test", ms: 1234, ok: false }] });
+const w2 = (await api("GET", `/api/workers/${alex.id}`)).body;
+if (w2.worker.session_file !== "/tmp/s.jsonl" || w2.worker.needs_input?.reason !== "rate limit" || w2.worker.context?.tokens !== 1000) fail("session file / needs input / context not stored", w2.worker);
+if (!w2.events.some((e) => e.ms === 1234 && e.ok === 0)) fail("timed tool event not stored", w2.events);
+
+// Parked ladder (REDPI_HQ_PARK_MS=600): idle + in_progress + silent → worker nudge → CEO → human.
+await api("POST", `/api/runs/${runId}/tasks/T3`, { status: "in_progress", actor: peter.id, workerId: peter.id });
+await api("POST", `/api/workers/${peter.id}/heartbeat`, { status: "idle" });
+const seen = async (who, text) => (await api("GET", `/api/runs/${runId}/inbox?for=${who}&after=0`)).body.some((m) => m.body.includes(text));
+let ladder = false;
+for (let i = 0; i < 60 && !ladder; i++) { await new Promise((r) => setTimeout(r, 150)); ladder = (await api("GET", `/api/workers/${peter.id}`)).body.worker.needs_human; }
+if (!ladder) fail("parked worker never escalated to the human");
+if (!(await seen(peter.id, "still own in-progress work")) || !(await seen("ceo", "Peter is parked")) || !(await seen("human", "Peter needs you"))) fail("wake ladder steps missing");
+await api("POST", `/api/workers/${peter.id}/heartbeat`, { status: "working" });
+if ((await api("GET", `/api/workers/${peter.id}`)).body.worker.parked) fail("activity did not reset the ladder");
+
+for (const id of ["T2", "T3", "T4"]) await api("POST", `/api/runs/${runId}/tasks/${id}`, { status: "done", note: "verified", actor: "ceo" });
 inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
 if (!inbox.some((m) => m.body.startsWith("All tasks are done"))) fail("CEO not told that all tasks are done");
 
 const list = (await api("GET", "/api/runs")).body;
 if (!list.some((r) => r.id === runId && r.done === 4 && r.workers === 2)) fail("run list counts wrong", list);
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, tasks.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder.");
 cleanup();

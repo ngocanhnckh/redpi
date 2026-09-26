@@ -385,12 +385,39 @@ RedPi prints a link like `http://<this-machine>:47291/plans/<id>?t=…`. It show
 
 ### RedPi HQ dashboard
 
-`/hq` prints the dashboard link. One hub serves every project on the machine:
+`/hq` prints the dashboard link. One hub serves every project on the machine, and every run has three views:
 
-- every run on the machine, grouped by project
-- a live **Kanban board** that workers update themselves (to do, in progress, review, blocked, done)
-- the **team**: each worker's status, current task, and latest message. Click one for its activity feed, its tasks, the `tmux attach` command to watch or type into its live session, and **Send** / **Interrupt + send**
-- the **team chat**: workers ask each other directly ("Peter → Alex: what does POST /investigations return?"), report to the CEO, and receive your messages
+**🏢 Office** (default once workers exist): an animated pixel office where the team works.
+
+- The CEO plans at the whiteboard, then leads from a glass office; each worker has a desk in a pod of four.
+- Working people sit and type, their monitor lit; a bubble shows what they are doing right now (`$ pytest -q`, `> Report.tsx`, `< README.md`) or `...` while the model thinks.
+- Idle people wander to the cafeteria and the meeting table.
+- Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`.
+- Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); messages to you land on the **YOU** terminal. A worker asking a teammate a question walks over to their desk.
+- Finishing a task after real work (at least a minute busy) earns confetti.
+- Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
+- The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
+
+**📋 Board**: the live Kanban (to do, in progress, review, blocked, done). Click a card for its full history: who moved it, when, and why.
+
+**🕸 Graph**: who talks to whom. Edge width is message volume, recent conversations glow; drag to pin a node.
+
+Around the views:
+
+- a sticky **Needs you** strip: blocked tasks, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered
+- the **team** with pixel portraits; each worker's panel shows its tasks, context usage, latest message, a **tool waterfall** (one bar per tool call, width by duration, red if it failed), the activity feed, the `tmux attach` command, **Send** / **Interrupt + send**, and **Resume** when its session is gone
+- the **team chat**, where workers ask each other directly, report to the CEO, and receive your messages
+
+The office is drawn on a canvas that pauses when the tab is hidden, respects reduced motion (people move without walking, no flying envelopes), and is decorative for screen readers: the roster, board, and a live announcement region carry the same information.
+
+### Reliability
+
+- **Resume after a crash or reboot.** Each worker reports its Pi session file. `redplan_resume_worker` (or the dashboard's **Resume** button, which asks the CEO) relaunches it in tmux with `pi --session <file>`, so it keeps its whole conversation. Without a saved session it only starts fresh when asked, and then gets its original brief. Every launch has its own id, so a leftover process can never make a new one look alive.
+- **Honest task closure.** Blocked needs a reason; done needs a note saying how it was verified; a handoff to a teammate needs a note on what is done and what is next, and happens atomically. Every change is kept in the task's history.
+- **Independent review** (default). Builders move tasks to *review*; a separate reviewer worker checks the exact diff against the acceptance criteria and marks it done or sends it back with findings. Set `"review": "self"` in the plan to let builders close their own tasks.
+- **Parked workers get nudged.** A worker that sits idle while owning in-progress work is nudged after 5 minutes, then the CEO is told, then it lands on your Needs-you strip (`REDPI_HQ_PARK_MS` changes the interval).
+- **Needs input.** Workers report when a rate limit or quota stops them, or when a prompt is waiting in their terminal.
+- **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
 
 Workers are real Pi sessions, not subagents: they keep running if the CEO is busy, you can attach to them (`tmux attach -t '=redpi-<run>-alex'`, detach with Ctrl-b d), and anything you or a teammate sends arrives in their session as a message. An interrupt stops the current turn first.
 
@@ -399,6 +426,7 @@ Workers are real Pi sessions, not subagents: they keep running if the CEO is bus
 | `/redplan <request>` | Start a run in this session (this session becomes the CEO) |
 | `/redplan-status` | Plan status, board counts, blocked tasks, workers, links |
 | `/redplan-stop` | Leave RedPlan mode in this session (workers and the run stay in HQ) |
+| `/redplan-doctor` | Health check for HQ, tmux, and every worker, with fixes |
 | `/hq` | Print the HQ dashboard link |
 
 **No collisions between projects.** HQ is one small server (port **47291**) with one SQLite database in `~/.pi/agent/yitec/hq/`. Nothing is written into your projects except worktrees under `.redpi-worktrees/` (hidden from `git status` through `.git/info/exclude`) and the per-folder subagent settings. Every project, run, worker, and message has its own ID, so several projects, or several runs in one folder, run side by side.
@@ -824,7 +852,8 @@ Smoke coverage includes:
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
-- RedPlan end to end: `/redplan` → plan → approval → two real Pi workers in tmux (shared folder + git worktree) → board updates, teammate chat, reports to the CEO, human instructions, and an interrupt that stops a running turn
+- RedPlan end to end: `/redplan` → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
+- HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
 
 Browser CLI test:
 
@@ -879,6 +908,16 @@ Because browser MCP servers can add large tool schemas and context overhead. Red
 ### Can I use native Pi `/login` instead of 9Router?
 
 Yes. RedPi supports native providers and 9Router. 9Router is recommended for team routing/combos.
+
+---
+
+## 🙏 Credits
+
+- The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens), the communication-graph layout, and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
+- Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
+- Plan-and-subagent workflow skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT) and skills from [Matt Pocock](https://github.com/mattpocock/skills).
+
+See [`NOTICE`](./NOTICE) for licenses and details.
 
 ---
 

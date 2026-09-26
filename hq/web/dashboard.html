@@ -29,8 +29,43 @@
   .card .who { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   .card .note { font-size: 12px; color: var(--amber); margin-top: 4px; }
   .col.blocked h3 { color: var(--red); } .col.done h3 { color: var(--green); }
-  .avatar { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; color: #04130a; flex: none; }
-  .avatar.lg { width: 36px; height: 36px; font-size: 15px; }
+  /* Pixel portraits (18×28 art), scaled with crisp pixels. */
+  .avatar { width: 27px; height: 42px; flex: none; image-rendering: pixelated; object-fit: contain; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); }
+  .avatar.sm { width: 18px; height: 28px; border-radius: 4px; }
+  .avatar.lg { width: 36px; height: 56px; }
+  .avatar.you { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; border: 0; }
+  .avatar.you.sm { width: 22px; height: 22px; font-size: 8px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .needs { position: sticky; top: 56px; z-index: 15; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; margin-bottom: 16px; border-radius: 10px;
+    background: color-mix(in srgb, var(--red) 10%, var(--panel)); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
+  .needs-title { font-weight: 700; color: var(--red); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin-right: 4px; }
+  .needs-item { border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; max-width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .needs-item.red { border-color: color-mix(in srgb, var(--red) 50%, transparent); } .needs-item.amber { border-color: color-mix(in srgb, var(--amber) 50%, transparent); }
+  .viewtabs { display: flex; gap: 4px; }
+  .viewtabs button { background: none; border: 1px solid transparent; border-radius: 8px; padding: 5px 12px; cursor: pointer; color: var(--muted); font-weight: 600; }
+  .viewtabs button[aria-selected="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
+  .view-panel .panel-body { padding: 10px; }
+  .office-host { position: relative; height: min(64vh, 640px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--bg); touch-action: none; cursor: grab; }
+  .office-host:active { cursor: grabbing; }
+  .office-canvas { display: block; }
+  .graph-host { overflow-x: auto; }
+  .graph .edge { stroke: var(--faint); stroke-linecap: round; }
+  .graph .edge.hot { stroke: var(--cyan); }
+  .graph .node circle { fill: var(--panel-2); stroke: var(--green-dim); stroke-width: 2; }
+  .graph .node circle.ceo { stroke: var(--red); } .graph .node circle.you { fill: var(--red); stroke: var(--red); }
+  .graph .node.off { opacity: .45; }
+  .graph .node { cursor: pointer; } .graph .node:focus { outline: none; } .graph .node:focus circle { stroke: var(--cyan); stroke-width: 3; }
+  .graph text { fill: var(--text); font: 600 12px var(--sans); } .graph .you-label { fill: #fff; font: 700 11px var(--mono); }
+  button.card { text-align: left; width: 100%; cursor: pointer; font: inherit; color: inherit; }
+  button.card:hover { border-color: var(--green-dim); }
+  .banner { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .banner.red { border-color: color-mix(in srgb, var(--red) 50%, transparent); color: var(--red); } .banner.amber { border-color: color-mix(in srgb, var(--amber) 50%, transparent); color: var(--amber); }
+  .wf { display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
+  .wf-row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 46px; gap: 8px; align-items: center; font-family: var(--mono); font-size: 11px; }
+  .wf-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .wf-track { height: 8px; background: var(--panel-2); border-radius: 3px; overflow: hidden; } .wf-track i { display: block; height: 100%; background: var(--green); } .wf-track i.bad { background: var(--red); }
+  .wf-ms { text-align: right; color: var(--muted); }
+  .history { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 13px; }
   .team { display: grid; gap: 8px; }
   .member { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-align: left; width: 100%; }
   .member:hover { border-color: var(--green-dim); }
@@ -54,7 +89,12 @@
   .events { font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
   .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
   .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
-  @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+  .side { display: grid; gap: 16px; align-content: start; }
+  /* Office view: the floor spans the page; team and chat sit side by side below it. */
+  .layout.wide { grid-template-columns: minmax(0, 1fr); }
+  .layout.wide .side { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
+  @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } .layout.wide .side { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 640px) { .office-host { height: 360px; } .needs { top: 52px; } }
   @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
 </style>
 </head>

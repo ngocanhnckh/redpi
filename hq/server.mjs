@@ -46,9 +46,25 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
     kind TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS task_transitions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, task_id TEXT NOT NULL, from_status TEXT,
+    to_status TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, target TEXT, created INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS messages_run ON messages (run_id, id);
+  CREATE INDEX IF NOT EXISTS transitions_task ON task_transitions (run_id, task_id, id);
   CREATE INDEX IF NOT EXISTS events_worker ON events (worker_id, id);
 `);
+
+// Columns added after the first release: ALTER only when missing, so existing hubs upgrade in place.
+for (const [table, col, type] of [
+  ["workers", "session_file", "TEXT"], ["workers", "launch_id", "TEXT"], ["workers", "needs_input", "TEXT"], ["workers", "context", "TEXT"],
+  ["workers", "parked_level", "INTEGER NOT NULL DEFAULT 0"], ["workers", "parked_at", "INTEGER"], ["workers", "needs_human", "TEXT"],
+  ["events", "ms", "INTEGER"], ["events", "ok", "INTEGER"],
+]) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+}
+
+// Parked = alive, idle, owns in_progress work, and silent this long. Each ladder step waits this long again.
+const PARK_MS = Number(process.env.REDPI_HQ_PARK_MS || 5 * 60 * 1000);
 
 const now = () => Date.now();
 const shortId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
@@ -114,7 +130,18 @@ function runView(runId) {
 
 function workerView(w) {
   const attach = w.tmux ? `tmux ${TMUX.length ? `-L ${TMUX[1]} ` : ""}attach -t '=${w.tmux}'` : null;
-  return { ...w, activity: w.activity ? JSON.parse(w.activity) : null, alive: !!w.alive, attach };
+  const json = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+  return { ...w, activity: json(w.activity), needs_input: json(w.needs_input), context: json(w.context), alive: !!w.alive, attach, parked: w.parked_level > 0 };
+}
+
+function planReview(runId) {
+  const row = one("SELECT json FROM plans WHERE run_id = ? AND status = 'approved' ORDER BY version DESC LIMIT 1", runId);
+  try { return JSON.parse(row?.json || "{}").review === "self" ? "self" : "independent"; } catch { return "independent"; }
+}
+
+function recordTransition(runId, taskId, from, to, actor, reason, target) {
+  run("INSERT INTO task_transitions (run_id, task_id, from_status, to_status, actor, reason, target, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    runId, taskId, from, to, actor, reason || null, target || null, now());
 }
 
 // ---------- tmux liveness ----------
@@ -131,6 +158,29 @@ function refreshAlive() {
   }
 }
 setInterval(refreshAlive, 10000).unref();
+
+// Wake ladder for parked workers: nudge the worker, then tell the CEO, then flag the human.
+function sweepParked() {
+  const rows = all(`SELECT w.* FROM workers w WHERE w.alive = 1 AND w.status = 'idle'
+    AND EXISTS (SELECT 1 FROM tasks t WHERE t.run_id = w.run_id AND t.worker_id = w.id AND t.status = 'in_progress')`);
+  for (const w of rows) {
+    const since = w.parked_at || w.updated;
+    if (now() - (w.parked_level ? since : w.updated) < PARK_MS) continue;
+    const tasks = all("SELECT id FROM tasks WHERE run_id = ? AND worker_id = ? AND status = 'in_progress'", w.run_id, w.id).map((t) => t.id).join(", ");
+    const mins = Math.max(1, Math.round((now() - w.updated) / 60000));
+    const level = w.parked_level + 1;
+    if (level === 1) addMessage(w.run_id, "human", w.id, "system", `You still own in-progress work (${tasks}) but have been idle for ~${mins} min. Continue it, mark it blocked with the reason, or hand it off.`);
+    else if (level === 2) addMessage(w.run_id, "human", "ceo", "system", `${w.name} is parked: idle ~${mins} min while owning ${tasks}, and did not respond to a nudge. Check on them, reassign, or resume them.`);
+    else if (level === 3) {
+      run("UPDATE workers SET needs_human = ? WHERE id = ?", `Idle ~${mins} min on ${tasks}; nudges to the worker and the CEO did not help.`, w.id);
+      addMessage(w.run_id, w.id, "human", "system", `${w.name} needs you: idle ~${mins} min on ${tasks} after nudging the worker and the CEO.`);
+    } else continue;
+    // Stamp without touching updated: the ladder keeps counting from the last real activity.
+    run("UPDATE workers SET parked_level = ?, parked_at = ? WHERE id = ?", level, now(), w.id);
+    notify(w.run_id, "worker");
+  }
+}
+setInterval(sweepParked, Math.min(15000, Math.max(500, PARK_MS / 4))).unref();
 
 // ---------- HTTP ----------
 function send(res, status, body, headers = {}) {
@@ -255,8 +305,8 @@ route("POST", "/api/runs/:id/workers", (b, p) => {
   if (!b.name || !b.role || !b.cwd) throw httpError(400, "name, role, and cwd are required");
   if (one("SELECT id FROM workers WHERE run_id = ? AND name = ?", p.id, b.name)) throw httpError(409, `a worker named ${b.name} already exists in this run`);
   const id = shortId("wkr");
-  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
-    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, now(), now());
+  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?)`,
+    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now());
   for (const t of b.taskIds || []) run("UPDATE tasks SET worker_id = ?, updated = ? WHERE run_id = ? AND id = ?", id, now(), p.id, String(t));
   if (b.brief) addMessage(p.id, "ceo", id, "brief", b.brief);
   touchRun(p.id, "executing");
@@ -268,6 +318,8 @@ route("PATCH", "/api/workers/:id", (b, p) => {
   const w = one("SELECT * FROM workers WHERE id = ?", p.id);
   if (!w) return notFound();
   if (b.tmux !== undefined) run("UPDATE workers SET tmux = ?, alive = 1, updated = ? WHERE id = ?", b.tmux, now(), p.id);
+  // A relaunch gets a new launch id; heartbeats from the previous process are ignored from now on.
+  if (b.launchId) run("UPDATE workers SET launch_id = ?, alive = 1, parked_level = 0, needs_human = NULL, needs_input = NULL, updated = ? WHERE id = ?", String(b.launchId), now(), p.id);
   if (b.status) run("UPDATE workers SET status = ?, updated = ? WHERE id = ?", String(b.status), now(), p.id);
   notify(w.run_id, "worker");
   return workerView(one("SELECT * FROM workers WHERE id = ?", p.id));
@@ -279,15 +331,24 @@ route("GET", "/api/workers/:id", (_b, p) => {
   const teammates = all("SELECT id, name, role, status, current_task FROM workers WHERE run_id = ? AND id != ?", w.run_id, w.id);
   const tasks = all("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ?", w.run_id, w.id);
   const events = all("SELECT * FROM (SELECT * FROM events WHERE worker_id = ? ORDER BY id DESC LIMIT 120) ORDER BY id", w.id);
-  return { worker: workerView(w), teammates, tasks, events, run: one("SELECT * FROM runs WHERE id = ?", w.run_id) };
+  const brief = one("SELECT id, body FROM messages WHERE run_id = ? AND recipient = ? AND kind = 'brief' ORDER BY id LIMIT 1", w.run_id, w.id);
+  return { worker: workerView(w), teammates, tasks, events, run: one("SELECT * FROM runs WHERE id = ?", w.run_id), review: planReview(w.run_id), brief: brief?.body || null,
+    lastMessageId: one("SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE run_id = ?", w.run_id).id };
 });
 
 route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   const w = one("SELECT * FROM workers WHERE id = ?", p.id);
   if (!w) return notFound();
-  run("UPDATE workers SET status = COALESCE(?, status), current_task = COALESCE(?, current_task), last_message = COALESCE(?, last_message), activity = COALESCE(?, activity), alive = 1, updated = ? WHERE id = ?",
-    b.status ?? null, b.currentTask ?? null, b.lastMessage != null ? String(b.lastMessage).slice(0, 8000) : null, b.activity ? JSON.stringify(b.activity) : null, now(), p.id);
-  for (const e of (b.events || []).slice(0, 50)) run("INSERT INTO events (worker_id, kind, text, created) VALUES (?, ?, ?, ?)", p.id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), now());
+  // A heartbeat from an earlier launch (a leftover process) must not make the new launch look alive or idle.
+  if (b.launchId && w.launch_id && b.launchId !== w.launch_id) return { ok: false, stale: true };
+  run(`UPDATE workers SET status = COALESCE(?, status), current_task = COALESCE(?, current_task), last_message = COALESCE(?, last_message), activity = COALESCE(?, activity),
+    session_file = COALESCE(?, session_file), context = COALESCE(?, context), alive = 1, parked_level = 0, parked_at = NULL, needs_human = NULL, updated = ? WHERE id = ?`,
+    b.status ?? null, b.currentTask ?? null, b.lastMessage != null ? String(b.lastMessage).slice(0, 8000) : null, b.activity ? JSON.stringify(b.activity) : null,
+    b.sessionFile ? String(b.sessionFile) : null, b.context ? JSON.stringify(b.context) : null, now(), p.id);
+  // needsInput: {count, reason} while something waits on a person; null clears it.
+  if (b.needsInput !== undefined) run("UPDATE workers SET needs_input = ? WHERE id = ?", b.needsInput ? JSON.stringify(b.needsInput) : null, p.id);
+  for (const e of (b.events || []).slice(0, 50)) run("INSERT INTO events (worker_id, kind, text, ms, ok, created) VALUES (?, ?, ?, ?, ?, ?)",
+    p.id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", p.id, p.id);
   notify(w.run_id, "worker");
   return { ok: true };
@@ -297,15 +358,59 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   const t = one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
   if (!t) throw httpError(404, `no task ${p.task} in this run (tasks exist after the plan is approved)`);
   if (b.status && !TASK_STATUSES.includes(b.status)) throw httpError(400, `status must be one of ${TASK_STATUSES.join(", ")}`);
+  const actor = String(b.actor || "ceo");
+  const note = b.note != null ? String(b.note).trim().slice(0, 2000) : "";
+
+  // Handoff: reassign and record in one transaction, so work is never silently dropped.
+  if (b.handoffTo) {
+    const target = one("SELECT * FROM workers WHERE run_id = ? AND (id = ? OR lower(name) = lower(?))", p.id, String(b.handoffTo), String(b.handoffTo));
+    if (!target) throw httpError(400, `no worker ${b.handoffTo} in this run`);
+    if (!note) throw httpError(400, "a handoff needs a note: what is done and what the new owner should do next");
+    db.exec("BEGIN");
+    try {
+      run("UPDATE tasks SET worker_id = ?, status = 'todo', note = ?, updated = ? WHERE run_id = ? AND id = ?", target.id, note, now(), p.id, p.task);
+      recordTransition(p.id, p.task, t.status, "todo", actor, note, target.id);
+      db.exec("COMMIT");
+    } catch (e) { db.exec("ROLLBACK"); throw e; }
+    addMessage(p.id, actor, target.id, "chat", `Handing ${p.task} (${t.title}) to you. ${note}`);
+    addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: handed off to ${target.name} (${note})`);
+    notify(p.id, "task");
+    return one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
+  }
+
+  if (b.status === "blocked" && !note) throw httpError(400, "blocked needs a note with the reason and what would unblock it");
+  if (b.status === "done" && !note) throw httpError(400, "done needs a note saying how the work was verified (tests, build, review)");
+  // Independent review: the author moves work to review; someone else marks it done.
+  if (b.status === "done" && t.worker_id && actor === t.worker_id && planReview(p.id) === "independent") {
+    throw httpError(409, "this plan uses independent review: move the task to review; the reviewer (or the CEO) marks it done");
+  }
+
   run("UPDATE tasks SET status = COALESCE(?, status), worker_id = COALESCE(?, worker_id), note = COALESCE(?, note), updated = ? WHERE run_id = ? AND id = ?",
-    b.status || null, b.workerId || null, b.note != null ? String(b.note).slice(0, 2000) : null, now(), p.id, p.task);
-  const actor = b.actor || "ceo";
-  if (b.status && b.status !== t.status) addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: ${t.status} → ${b.status}${b.note ? ` (${b.note})` : ""}`);
+    b.status || null, b.workerId || null, note || null, now(), p.id, p.task);
+  if (b.status && b.status !== t.status) {
+    recordTransition(p.id, p.task, t.status, b.status, actor, note, null);
+    addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: ${t.status} → ${b.status}${note ? ` (${note})` : ""}`);
+    if (b.status === "review" && t.worker_id) {
+      addMessage(p.id, "human", "ceo", "system", `${p.task} ${t.title} is ready for review. ${planReview(p.id) === "independent" ? "Have the independent reviewer check the exact diff against the acceptance criteria." : ""}`.trim());
+    }
+  }
   if (b.status === "in_progress" && actor.startsWith("wkr_")) run("UPDATE workers SET current_task = ?, updated = ? WHERE id = ?", p.task, now(), actor);
   const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status != 'done'", p.id).n;
-  if (!open) addMessage(p.id, "human", "ceo", "system", "All tasks are done. Integrate the work (merge worktrees), run the full verification, do a final review, then report to the human.");
+  if (!open && b.status === "done") addMessage(p.id, "human", "ceo", "system", "All tasks are done. Integrate the work (merge worktrees), run the full verification, do a final review, then report to the human.");
   notify(p.id, "task");
   return one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
+});
+
+route("GET", "/api/runs/:id/tasks/:task/history", (_b, p) =>
+  all("SELECT * FROM task_transitions WHERE run_id = ? AND task_id = ? ORDER BY id", p.id, p.task)
+    .map((h) => ({ ...h, actorName: participantName(p.id, h.actor), targetName: h.target ? participantName(p.id, h.target) : null })));
+
+// Dashboard "Resume" button: the CEO owns relaunching, so ask it.
+route("POST", "/api/workers/:id/resume-request", (_b, p) => {
+  const w = one("SELECT * FROM workers WHERE id = ?", p.id);
+  if (!w) return notFound();
+  addMessage(w.run_id, "human", "ceo", "command", `Please resume ${w.name} with redplan_resume_worker (its tmux session is gone).`);
+  return { ok: true };
 });
 
 route("POST", "/api/runs/:id/messages", (b, p) => {
