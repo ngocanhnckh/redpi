@@ -30,6 +30,8 @@ type Config = {
   // strict: use only each role's own models (no tiers, fallback chains, failover, or MainAgent default).
   routing?: { mode?: "auto" | "strict" };
   folder?: string;
+  // auto: the agent may spawn subagents on its own (pi-subagents otherwise waits for the user to ask).
+  subagents?: { auto?: boolean };
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -55,7 +57,7 @@ const ROLE_PROFILES: Record<string, { label: string; summary: string; roles: Rec
       executor: ["norail", "high"],
       subagent: ["norail", "xhigh"],
       reviewer: ["OpenMed", "high"],
-      vision: ["OpenMed", "medium"],
+      vision: ["OpenMed", "high"],
       commit: ["SubAgent", "low"],
       tiny: ["OpenSmall", "off"],
       default: ["norail", "medium"],
@@ -71,7 +73,7 @@ function profileRoles(key: string): Record<string, RoleConfig> {
 let sessionOverride: Config | undefined;
 // True while RedPi itself switches models, so model_select can tell user picks apart.
 let redpiSwitching = false;
-const DEFAULT_CONFIG: Required<Omit<Config, "routing" | "folder">> & Config = {
+const DEFAULT_CONFIG: Required<Omit<Config, "routing" | "folder" | "subagents">> & Config = {
   planner: { tier: "high", thinking: "high" },
   executor: { tier: "low", thinking: "low" },
   roles: {
@@ -97,6 +99,7 @@ const DEFAULT_CONFIG: Required<Omit<Config, "routing" | "folder">> & Config = {
   advisor: { enabled: false, modelRole: "reviewer", autoReview: false, tools: ["read", "grep"] },
   memory: { enabled: true, injectionCharLimit: 5000 },
   autoUpdate: { enabled: true, intervalHours: 24, updateHarness: true, updateSkills: true },
+  subagents: { auto: true },
 };
 
 type LoadedConfig = Config & { __path?: string; __projectTrusted?: boolean };
@@ -200,6 +203,14 @@ function patchPiSettings(defaultModel?: string, thinking = "low") {
   writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
 }
 
+// obra/superpowers is MIT-licensed. Only its plan-and-subagent workflow is registered; the
+// full repo is cloned because these skills reference sibling files through ../ paths.
+const SUPERPOWERS_DIR = join(AGENT_DIR, "vendor", "superpowers");
+const SUPERPOWERS_SKILLS = [
+  "subagent-driven-development", "dispatching-parallel-agents", "writing-plans", "executing-plans",
+  "using-git-worktrees", "requesting-code-review", "finishing-a-development-branch", "verification-before-completion",
+];
+
 function repairSkillPaths(skills: string[]): string[] {
   // Matt Pocock moved skills from .agents/skills to skills/<bucket>; older installs
   // point at the removed folder and silently load nothing.
@@ -207,7 +218,8 @@ function repairSkillPaths(skills: string[]): string[] {
   const liquidDir = join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill");
   const mattSkills = ["engineering", "productivity"].map((bucket) => join(mattDir, "skills", bucket)).filter((p) => existsSync(p));
   const kept = skills.filter((p) => !String(p).startsWith(mattDir));
-  return [...new Set([...kept, ...mattSkills, ...(existsSync(join(liquidDir, "SKILL.md")) ? [liquidDir] : [])])];
+  const superpowers = SUPERPOWERS_SKILLS.map((name) => join(SUPERPOWERS_DIR, "skills", name)).filter((p) => existsSync(join(p, "SKILL.md")));
+  return [...new Set([...kept, ...mattSkills, ...(existsSync(join(liquidDir, "SKILL.md")) ? [liquidDir] : []), ...superpowers])];
 }
 
 function subagentSettings(existing: any, cfg: any): any {
@@ -490,6 +502,16 @@ function designText(cwd: string, projectTrusted = false): string {
     ...(projectTrusted ? [join(cwd, CONFIG_DIR_NAME, "yitec", "design.md")] : []),
   ], 5000);
 }
+function subagentPolicy(cfg: Config): string {
+  if (cfg.subagents?.auto === false) return "Automatic subagents are OFF (RedPi setting): use subagents only when the user asks for delegation or says orchestrate.";
+  return [
+    "Automatic subagents are ON (RedPi setting): the operator authorizes you to delegate to subagents without asking. Call subagents_enable, then subagent.",
+    "Delegate whenever it clearly pays off: independent research or exploration across several areas (parallel scouts/researchers); two or more independent tasks or problems (follow the dispatching-parallel-agents skill, one child per task); executing a written implementation plan with mostly independent tasks (follow the subagent-driven-development skill); an independent reviewer subagent after a non-trivial implementation, before you summarize.",
+    "Work directly instead for small, single-file, or tightly coupled changes, and when the work depends on conversation context you cannot hand over concisely.",
+    "Give each child a self-contained brief; children must not spawn further subagents unless you explicitly delegate fan-out.",
+  ].join(" ");
+}
+
 function looksFrontendTask(text: string): boolean {
   return /\b(ui|ux|frontend|front-end|css|tailwind|responsive|mobile|layout|component|landing|dashboard|pixel|screenshot|browser|a11y|accessibility|storybook|shadcn|react|nextjs|next\.js|vite)\b/i.test(text);
 }
@@ -756,7 +778,7 @@ async function run(cmd: string, args: string[], cwd?: string, timeoutMs = 2 * 60
 }
 
 function shouldAutoUpdate(cfg: Config): boolean {
-  if (cfg.autoUpdate?.enabled === false) return false;
+  if (cfg.autoUpdate?.enabled === false || process.env.REDPI_AUTO_UPDATE === "0") return false;
   const marker = join(USER_YITEC_DIR, "last-update-check.json");
   const last = readJson(marker, { at: 0 }).at || 0;
   const intervalMs = Math.max(1, cfg.autoUpdate?.intervalHours ?? 24) * 60 * 60 * 1000;
@@ -775,7 +797,11 @@ async function updateRedPi(cfg: Config, force = false): Promise<string> {
     else lines.push(`Harness package root is not a git checkout: ${root}. Run: pi update --extensions`);
   }
   if (cfg.autoUpdate?.updateSkills !== false) {
-    for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill")]) {
+    if (!existsSync(join(SUPERPOWERS_DIR, ".git"))) {
+      lines.push(await run("git", ["clone", "--depth", "1", "https://github.com/obra/superpowers", SUPERPOWERS_DIR]));
+      patchPiSettings();
+    }
+    for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill"), SUPERPOWERS_DIR]) {
       if (existsSync(join(dir, ".git"))) lines.push(await run("git", ["pull", "--ff-only"], dir));
       else lines.push(`Skill repo not found, skipping: ${dir}`);
     }
@@ -971,6 +997,7 @@ export default function (pi: ExtensionAPI) {
       `Mode: ${cfg.routing?.mode === "strict" ? "strict (only these models, no fallbacks)" : "auto (tiers and fallbacks allowed)"}`,
       ...((cfg as any).profile && ROLE_PROFILES[(cfg as any).profile] ? [`Profile: ${ROLE_PROFILES[(cfg as any).profile].label}`] : []),
       `Manual /model pin: ${pinnedModel || "none"}`,
+      `Automatic subagents: ${cfg.subagents?.auto === false ? "off" : "on"}`,
       "",
       ...rows,
     ].join("\n");
@@ -989,14 +1016,29 @@ export default function (pi: ExtensionAPI) {
     const folderPath = findFolderConfig(ctx.cwd);
     const { folder: FOLDER, session: SESSION, global: GLOBAL, project: PROJECT } = SCOPE;
     const PROFILE = "🛡 Apply a preset profile (e.g. Cybersecurity)";
+    const autoOn = loadConfig(ctx.cwd, trusted).subagents?.auto !== false;
+    const AUTO = `🤖 Automatic subagents: ${autoOn ? "ON — turn off" : "OFF — turn on"}`;
     const SHOW = "🔎 Show current routing";
     const UNPIN = `▶ Resume role routing (unpin ${pinnedModel})`;
     const REMOVE = "🗑 Remove this folder's config (back to global)";
     const choice = await ctx.ui.select(`RedPi role models${folderPath ? " (this folder has its own strict config)" : ""}`, [
-      FOLDER, SESSION, GLOBAL, PROFILE, ...(trusted ? [PROJECT] : []), SHOW, ...(pinnedModel ? [UNPIN] : []), ...(folderPath ? [REMOVE] : []), "Done",
+      FOLDER, SESSION, GLOBAL, PROFILE, AUTO, ...(trusted ? [PROJECT] : []), SHOW, ...(pinnedModel ? [UNPIN] : []), ...(folderPath ? [REMOVE] : []), "Done",
     ]);
     if (!choice || choice === "Done") return;
     if (choice === SHOW) return ctx.ui.notify(routingSummary(ctx), "info");
+    if (choice === AUTO) {
+      // Change it where the active config lives: session override, then folder, then global.
+      const next = { ...(sessionOverride?.subagents || {}), auto: !autoOn };
+      let where: string;
+      if (sessionOverride) { sessionOverride = { ...sessionOverride, subagents: next }; where = "this session"; }
+      else {
+        const path = folderPath || configWritePath(ctx.cwd, trusted, "global");
+        const raw = readJson(path, {});
+        writeJson(path, { ...raw, subagents: { ...(raw.subagents || {}), auto: !autoOn } });
+        where = folderPath ? `this folder (${path})` : `global config (${path})`;
+      }
+      return ctx.ui.notify(`Automatic subagents ${!autoOn ? "ON: the agent may spawn subagents on its own for parallel research, independent tasks, plan execution, and reviews" : "OFF: subagents run only when you ask or say orchestrate"}.\nSaved to ${where}. Applies from your next message.`, "info");
+    }
     if (choice === UNPIN) {
       pinnedModel = undefined;
       return ctx.ui.notify(`Manual pin cleared. ${await applyPlannerNow(ctx)}`, "info");
@@ -1209,7 +1251,7 @@ export default function (pi: ExtensionAPI) {
     const mem = cfg.memory?.enabled === false ? "" : readCapped(memoryPaths(ctx.cwd, ctx.isProjectTrusted()), cfg.memory?.injectionCharLimit ?? 5000);
     const watch = watchdogText(ctx.cwd, ctx.isProjectTrusted());
     const design = looksFrontendTask(currentUserPrompt) || turnMagic.pixelperfect || turnMagic.responsive || turnMagic.a11y || turnMagic.screenshot ? designText(ctx.cwd, ctx.isProjectTrusted()) : "";
-    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. Prefer installed subagents for cheap/parallel delegation. On image-only gaps use yitec_vision_task. For frontend/browser tasks, use redpi_browser or /redpi-frontend-check to inspect text, screenshots, console errors, and network failures when useful. Magic-keyword instructions, if present, apply only to this turn.${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${design ? `\n\nYitec Frontend Design Guidance (heuristic, verify against repo):\n${design}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
+    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. ${subagentPolicy(cfg)} On image-only gaps use yitec_vision_task. For frontend/browser tasks, use redpi_browser or /redpi-frontend-check to inspect text, screenshots, console errors, and network failures when useful. Magic-keyword instructions, if present, apply only to this turn.${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${design ? `\n\nYitec Frontend Design Guidance (heuristic, verify against repo):\n${design}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
   });
 
   pi.on("agent_end", async (event, ctx) => {

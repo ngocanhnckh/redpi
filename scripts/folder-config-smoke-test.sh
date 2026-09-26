@@ -7,7 +7,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 root = sys.argv[1]
 
+posts = []
+
 class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        # Capture chat requests so the test can read the system prompt the agent received.
+        posts.append(self.rfile.read(int(self.headers.get('content-length', 0))).decode('utf-8', 'ignore'))
+        self.send_response(404)
+        self.end_headers()
     def do_GET(self):
         if self.path.endswith('/models'):
             # Real 9Router marks combos with owned_by "combo"; raw provider routes must stay hidden.
@@ -44,7 +51,7 @@ write(os.path.join(agent_dir, 'settings.json'), {'defaultProvider': '9router', '
 
 env = os.environ.copy()
 env.update({'PI_NO_TITLE': '1', 'TERM': 'xterm-256color', 'COLUMNS': '140', 'LINES': '50',
-            'PI_CODING_AGENT_DIR': agent_dir, 'REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS': '1000'})
+            'PI_CODING_AGENT_DIR': agent_dir, 'REDPI_9ROUTER_DISCOVERY_TIMEOUT_MS': '1000', 'REDPI_AUTO_UPDATE': '0'})
 for k in ('NINE_ROUTER_API_KEY', 'ROUTER9_API_KEY', 'NINEROUTER_API_KEY', 'NINE_ROUTER_BASE_URL', 'ROUTER9_BASE_URL'):
     env.pop(k, None)
 
@@ -78,7 +85,13 @@ def session(cwd, keys):
                     return
                 out += chunk
     try:
-        drain(15, 'RedPi high:')
+        # Pi asks to trust a folder once it has .pi/settings.json (written for folder subagent models).
+        end = time.time() + 20
+        while time.time() < end and 'RedPi high:' not in clean() and 'Trust project folder?' not in clean():
+            drain(0.2)
+        if 'Trust project folder?' in clean():
+            os.write(master, b'\r')
+            drain(15, 'RedPi high:')
         for text, until in keys:
             os.write(master, text.encode())
             drain(15 if until else 4, until)
@@ -141,6 +154,9 @@ after_prompt = third.split('hello', 1)[-1]
 if 'planner on 9router/team/Other' in after_prompt:
     print(third[-4000:]); raise SystemExit('role routing overrode the pinned model')
 
+if not posts or 'Automatic subagents are ON' not in posts[-1] or 'subagent-driven-development' not in posts[-1]:
+    raise SystemExit('default system prompt does not authorize automatic subagents')
+
 # The Cybersecurity preset applies its exact combos, strictly, to a fresh folder in one pass.
 folder2 = tempfile.mkdtemp(prefix='redpi-folder-')
 fourth = session(folder2, [
@@ -156,7 +172,7 @@ if len(new_configs) != 1:
     print(fourth[-4000:]); raise SystemExit(f'profile did not create one folder config: {new_configs}')
 sec = json.load(open(new_configs.pop()))
 expected = {'planner': '9router/OpenMed:high', 'executor': '9router/norail:high', 'subagent': '9router/norail:xhigh',
-            'reviewer': '9router/OpenMed:high', 'vision': '9router/OpenMed:medium', 'commit': '9router/SubAgent:low',
+            'reviewer': '9router/OpenMed:high', 'vision': '9router/OpenMed:high', 'commit': '9router/SubAgent:low',
             'tiny': '9router/OpenSmall:off', 'default': '9router/norail:medium'}
 got = {r: v['models'][0] for r, v in sec['roles'].items()}
 if got != expected or sec.get('routing', {}).get('mode') != 'strict' or sec.get('profile') != 'cybersecurity':
@@ -164,5 +180,17 @@ if got != expected or sec.get('routing', {}).get('mode') != 'strict' or sec.get(
 if 'Current session now on 9router/OpenMed' not in fourth:
     print(fourth[-4000:]); raise SystemExit('cybersecurity profile was not applied to the live session')
 
-print('RedPi folder config smoke passed: strict per-folder roles saved, subagents scoped, global untouched, new sessions start on the folder planner, manual /model picks stay pinned, picker lists combos only, Cybersecurity profile applies.')
+# Turning automatic subagents off from the menu reaches the agent's next request.
+count = len(posts)
+fifth = session(folder2, [
+    ('/redpi-config\r', 'Automatic subagents: ON'),
+    (DOWN * 4 + '\r', 'Automatic subagents OFF'),
+    ('hello\r', None),
+])
+if len(posts) == count or 'Automatic subagents are OFF' not in posts[-1]:
+    print(fifth[-4000:]); raise SystemExit('turning automatic subagents off did not reach the system prompt')
+if json.load(open(os.path.join(agent_dir, 'yitec', 'model-tiers.json'))).get('subagents', {}).get('auto') is False:
+    raise SystemExit('folder toggle leaked into the global config')
+
+print('RedPi folder config smoke passed: strict per-folder roles saved, subagents scoped, global untouched, new sessions start on the folder planner, manual /model picks stay pinned, picker lists combos only, Cybersecurity profile applies, automatic subagents on by default and toggleable.')
 PY

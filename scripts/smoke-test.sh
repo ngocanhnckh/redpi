@@ -41,7 +41,7 @@ echo '{ "completed": true, "provider": "manual" }' > "$AGENT_DIR/yitec/onboardin
 python3 - "$ROOT" "$PROJECT" "$AGENT_DIR" <<'PY'
 import os, pty, subprocess, time, select, re, sys
 root, cwd, agent_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-env=os.environ.copy(); env.update({'PI_NO_TITLE':'1','TERM':'xterm-256color','COLUMNS':'120','LINES':'40','PI_CODING_AGENT_DIR':agent_dir})
+env=os.environ.copy(); env.update({'PI_NO_TITLE':'1','TERM':'xterm-256color','COLUMNS':'120','LINES':'40','PI_CODING_AGENT_DIR':agent_dir,'REDPI_AUTO_UPDATE':'0'})
 for k in ('NINE_ROUTER_API_KEY','ROUTER9_API_KEY','NINEROUTER_API_KEY','NINE_ROUTER_BASE_URL','ROUTER9_BASE_URL'): env.pop(k, None)
 master, slave = pty.openpty()
 p=subprocess.Popen(['pi','-ne','-e',f'{root}/extensions/yitec-model-router.ts'],cwd=cwd,env=env,stdin=slave,stdout=slave,stderr=slave,close_fds=True)

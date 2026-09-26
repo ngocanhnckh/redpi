@@ -121,6 +121,7 @@ The installer:
 - installs `pi-claude-bridge` for optional Claude Code subscription access
 - installs Matt Pocock skills
 - installs the liquid-glass frontend skill
+- installs the superpowers subagent workflow skills (`subagent-driven-development` and friends)
 - creates a default `MainAgent`/`SubAgent` routing config
 - configures Pi skill discovery
 - downloads Playwright Chromium for the `redpi_browser` tool and `redpi-browser` skill
@@ -351,7 +352,7 @@ The **Cybersecurity** profile is tuned for security research and pentest work:
 | `executor` | `norail` | `high` |
 | `subagent` | `norail` | `xhigh` |
 | `reviewer` | `OpenMed` | `high` |
-| `vision` | `OpenMed` | `medium` |
+| `vision` | `OpenMed` | `high` |
 | `commit` | `SubAgent` | `low` |
 | `tiny` | `OpenSmall` | `off` |
 | `default` | `norail` | `medium` |
@@ -377,13 +378,22 @@ worker   → cheap implementation/support
 
 This is inspired by the useful subagent ergonomics in advanced Pi harnesses, but RedPi keeps the default setup simple and public-safe.
 
-Use naturally:
+### Automatic subagents (on by default)
+
+On its own, pi-subagents only delegates when you ask for it. RedPi turns on **automatic subagents** by default: it tells the agent it is authorized to spawn subagents without asking, and when it pays off:
+
+- independent research or exploration across several areas → parallel scouts/researchers
+- two or more independent tasks or problems → `dispatching-parallel-agents`, one child per task
+- executing a written implementation plan with mostly independent tasks → `subagent-driven-development` (fresh implementer per task, review after each, final branch review)
+- a separate reviewer subagent after a non-trivial implementation, before summarizing
+
+For small, single-file, or tightly coupled changes the agent still works directly. Subagents run on the `subagent` role's model (for example `SubAgent`, or `norail` in the Cybersecurity profile), so automatic delegation means more model calls.
+
+Turn it off or on with `/redpi-config` → `🤖 Automatic subagents`. The switch changes the active config: this session's, else this folder's, else the global one. When off, subagents run only when you ask, or with the `orchestrate` keyword:
 
 ```text
 orchestrate review this PR. Send independent subagents to inspect auth, migrations, and frontend.
 ```
-
-RedPi tells the agent to prefer cheap/parallel delegation where it helps.
 
 ---
 
@@ -491,8 +501,11 @@ RedPi adds skills to Pi settings automatically:
 ~/.pi/agent/vendor/mattpocock-skills/skills/engineering
 ~/.pi/agent/vendor/mattpocock-skills/skills/productivity
 ~/.pi/agent/vendor/liquid-glass-frontend-skill
+~/.pi/agent/vendor/superpowers/skills/<name>   (subagent workflow, see below)
 <redpi package>/skills/redpi-browser   (Playwright browser skill)
 ```
+
+From [obra/superpowers](https://github.com/obra/superpowers) (MIT), RedPi registers only the plan-and-subagent workflow: `subagent-driven-development`, `dispatching-parallel-agents`, `writing-plans`, `executing-plans`, `using-git-worktrees`, `requesting-code-review`, `finishing-a-development-branch`, and `verification-before-completion`. The rest of superpowers (its TDD, debugging, and `using-superpowers` meta-skill) is not registered, to avoid overlapping Matt Pocock's skills.
 
 Examples:
 
@@ -757,6 +770,7 @@ Smoke coverage includes:
 - strict per-folder role config: saved, scoped subagents, global untouched, new sessions start on the folder planner
 - manual `/model` picks stay pinned across turns
 - Cybersecurity preset profile applies its exact combos strictly
+- automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 
 Browser CLI test:

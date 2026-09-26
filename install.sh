@@ -12,6 +12,7 @@ AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 YITEC_DIR="$AGENT_DIR/yitec"
 MATT_DIR="$AGENT_DIR/vendor/mattpocock-skills"
 LIQUID_DIR="$AGENT_DIR/vendor/liquid-glass-frontend-skill"
+SUPERPOWERS_DIR="$AGENT_DIR/vendor/superpowers"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1" >&2; exit 1; }; }
 need_cmd npm
@@ -72,6 +73,14 @@ else
   git clone --depth 1 https://github.com/ngocanhnckh/liquid-glass-frontend-skill "$LIQUID_DIR"
 fi
 
+echo "Installing superpowers subagent workflow skills (obra/superpowers, MIT)..."
+if [ -d "$SUPERPOWERS_DIR/.git" ]; then
+  git -C "$SUPERPOWERS_DIR" pull --ff-only
+else
+  rm -rf "$SUPERPOWERS_DIR"
+  git clone --depth 1 https://github.com/obra/superpowers "$SUPERPOWERS_DIR"
+fi
+
 if [ ! -f "$YITEC_DIR/model-tiers.json" ]; then
   # A fresh RedPi install starts with its stable named routes. The first-run
   # wizard will replace these with the exact live IDs returned by 9Router.
@@ -104,16 +113,20 @@ fi
 SETTINGS="$AGENT_DIR/settings.json"
 # Matt Pocock's promoted skills live under skills/engineering and skills/productivity;
 # Pi discovers SKILL.md directories recursively below each listed path.
-node - "$SETTINGS" "$MATT_DIR" "$LIQUID_DIR" <<'NODE'
+node - "$SETTINGS" "$MATT_DIR" "$LIQUID_DIR" "$SUPERPOWERS_DIR" <<'NODE'
 const fs = require('fs');
 const path = require('path');
-const [settingsPath, mattDir, liquidSkill] = process.argv.slice(2);
+const [settingsPath, mattDir, liquidSkill, superpowersDir] = process.argv.slice(2);
 let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
 const mattSkills = ['engineering', 'productivity'].map((bucket) => path.join(mattDir, 'skills', bucket));
 // Drop the old .agents/skills path: that folder no longer exists upstream.
 const kept = (s.skills || []).filter((p) => !String(p).startsWith(mattDir));
-s.skills = Array.from(new Set([...kept, ...mattSkills, liquidSkill]));
+// Only superpowers' plan-and-subagent workflow; keep in sync with SUPERPOWERS_SKILLS in the extension.
+const superpowersSkills = ['subagent-driven-development', 'dispatching-parallel-agents', 'writing-plans', 'executing-plans',
+  'using-git-worktrees', 'requesting-code-review', 'finishing-a-development-branch', 'verification-before-completion']
+  .map((name) => path.join(superpowersDir, 'skills', name));
+s.skills = Array.from(new Set([...kept, ...mattSkills, liquidSkill, ...superpowersSkills]));
 s.enableSkillCommands = true;
 if (process.env.REDPI_THEME !== '0') s.theme = process.env.REDPI_THEME || 'redpi-matrix';
 s.retry = {
