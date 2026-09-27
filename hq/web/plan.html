@@ -61,6 +61,10 @@
   .tech dt { color: var(--muted); } .tech dd { margin: 0; overflow-wrap: anywhere; }
   .warn-list { margin: 0; padding-left: 18px; color: var(--amber); font-size: 13px; }
   .decision { max-height: calc(100vh - 80px); overflow-y: auto; }
+  .harness-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 14px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); font-size: 13px; }
+  .harness-bar label { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .harness-select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px; max-width: 100%; }
+  .harness-select:focus { outline: 2px solid color-mix(in srgb, var(--green) 50%, transparent); }
   /* Review: highlights, badges, diagram pins, the comment editor, and the feedback list */
   mark.anno { background: color-mix(in srgb, var(--amber) 28%, transparent); color: inherit; border-bottom: 2px solid var(--amber); border-radius: 2px; cursor: pointer; }
   mark.anno.sent { background: color-mix(in srgb, var(--cyan) 18%, transparent); border-bottom-color: var(--cyan); }

@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v tmux >/dev/null || { echo "tmux not installed; skipping RedPlan smoke test"; exit 0; }
 python3 - "$ROOT" <<'PY'
-import json, os, pty, re, select, signal, subprocess, sys, tempfile, threading, time
+import json, os, pty, re, select, shutil, signal, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 
 root = sys.argv[1]
@@ -27,6 +27,8 @@ PLAN = {
      "tasks": [{"id": "T1", "title": "Todo endpoints", "description": "FastAPI CRUD endpoints for todos.", "estimateHours": 3}]},
     {"id": "S2", "title": "CLI", "userStory": "As a user, I want a CLI, so that I use it from a terminal.", "acceptance": ["add/list"],
      "tasks": [{"id": "T2", "title": "CLI client", "description": "A small CLI that calls the API.", "estimateHours": 2}]},
+    {"id": "S3", "title": "Docs", "userStory": "As a user, I want a README, so that I know how to run it.", "acceptance": ["README explains run"],
+     "tasks": [{"id": "T3", "title": "README", "description": "Usage docs for the API and CLI.", "estimateHours": 1}]},
   ],
 }
 
@@ -46,8 +48,9 @@ SCRIPTS = {
       ("redplan_spawn_worker", {"role": "backend developer", "name": "Alex", "taskIds": ["T1"], "workspace": "shared", "brief": "Build T1. Tell Peter the endpoint shape."}),
       ("redplan_spawn_worker", {"role": "full-stack developer", "name": "Peter", "taskIds": ["T2"], "workspace": "worktree", "brief": "Build T2. Wait for Alex's endpoint shape."}),
       ("redplan_spawn_worker", {"role": "independent reviewer", "name": "Rita", "taskIds": [], "workspace": "shared", "brief": "Review tasks the CEO sends you."}),
+      ("redplan_spawn_worker", {"role": "docs writer", "name": "Cora", "taskIds": ["T3"], "workspace": "shared", "brief": "Write the README. TASK=T3"}),
     ]),
-    ("ready for review", [("redplan_send", {"to": "Rita", "message": "Please review T1 (Alex, shared workspace)."})]),
+    ("T1 Todo endpoints is ready for review", [("redplan_send", {"to": "Rita", "message": "Please review T1 (Alex, shared workspace)."})]),
     ("RESUME-ALEX", [("redplan_resume_worker", {"name": "Alex"})]),
   ],
   "Alex": [
@@ -138,7 +141,12 @@ json.dump({"baseUrl": f"http://127.0.0.1:{llm.server_port}/v1", "apiKey": "k"}, 
 json.dump({"defaultProvider": "9router", "defaultModel": "MainAgent", "defaultThinkingLevel": "off"}, open(f"{agent}/settings.json", "w"))
 port = 30000 + os.getpid() % 20000
 sock = f"redplan-test-{os.getpid()}"
+# A fake Claude Code on PATH (scripts/fake-harness.mjs): the human puts T3 on Claude Code.
+fakebin = tempfile.mkdtemp(prefix="redplan-fakebin-")
+open(f"{fakebin}/claude", "w").write(f'#!/bin/sh\nexec "{shutil.which("node")}" "{root}/scripts/fake-harness.mjs" claude "$@"\n')
+os.chmod(f"{fakebin}/claude", 0o755)
 env = os.environ.copy()
+env["PATH"] = f"{fakebin}:{env['PATH']}"
 for k in ("NINE_ROUTER_API_KEY", "ROUTER9_API_KEY", "NINEROUTER_API_KEY", "NINE_ROUTER_BASE_URL", "ROUTER9_BASE_URL", "TMUX"): env.pop(k, None)
 env.update({"PI_NO_TITLE": "1", "TERM": "xterm-256color", "COLUMNS": "140", "LINES": "40", "PI_CODING_AGENT_DIR": agent, "REDPI_AUTO_UPDATE": "0",
             "REDPI_HQ_DIR": hqdir, "REDPI_HQ_PORT": str(port), "REDPI_TMUX_SOCKET": sock, "REDPI_HQ_PUBLIC_HOST": "127.0.0.1",
@@ -176,7 +184,8 @@ def drain(sec):
             try: out += os.read(master, 65536)
             except OSError: return
 try:
-    wait("CEO TUI ready", lambda: (drain(0.3), b"RedPi high:" in out)[1], 90)
+    # A fresh agent dir downloads fd and ripgrep first, which can be slow.
+    wait("CEO TUI ready", lambda: (drain(0.3), b"RedPi high:" in out)[1], 150)
     os.write(master, b"/redplan Build a tiny todo API with a CLI"); drain(0.5); os.write(master, b"\r")
     # First use: RedPi asks for an HQ username and password (typed masked) before the run starts.
     def seen_after(mark, text): return lambda: (drain(0.2), text in out[mark:])[1]
@@ -200,7 +209,7 @@ try:
     who = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/api/session", headers={"authorization": basic}), timeout=5).read())
     if not who.get("signedIn"): raise SystemExit(f"the password set in RedPi does not sign in to HQ: {who}")
     if b"?t=" in out[mark:]: raise SystemExit("dashboard links still carry the token after a password was set")
-    if plan["schedule"]["criticalPath"] != ["T1"] or plan["schedule"]["maxParallel"] != 2:
+    if plan["schedule"]["criticalPath"] != ["T1"] or plan["schedule"]["maxParallel"] != 3:
         raise SystemExit(f"schedule wrong: {plan['schedule']}")
     ceo_sys = next(s for i, u, s in requests if i == "CEO")
     if "RedPlan mode is ON" not in ceo_sys or "Automatic subagents are ON" not in ceo_sys:
@@ -219,11 +228,18 @@ try:
     if v2["plan"].get("changes") != ["#1 The CLI uses Typer", "#2 The API validates todo text length"]: raise SystemExit(f"v2 changes missing: {v2['plan'].get('changes')}")
     wait("terminal notice for the feedback", lambda: (drain(0.2), b"plan feedback received (2 comments)" in out[mark:])[1], 15)
     plan = v2
+    hq("PUT", f"/api/runs/{run['id']}/harness", {"task": "T3", "harness": "claude"})
     hq("POST", f"/api/plans/{plan['id']}/decision", {"decision": "approve", "comment": "ship it"})
-    workers = wait("three workers spawned", lambda: (lambda s: s["workers"] if len(s["workers"]) == 3 else None)(hq("GET", f"/api/runs/{run['id']}")))
+    workers = wait("four workers spawned", lambda: (lambda s: s["workers"] if len(s["workers"]) == 4 else None)(hq("GET", f"/api/runs/{run['id']}")))
     names = {w["name"]: w for w in workers}
     sessions = subprocess.run(["tmux", "-L", sock, "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True).stdout.split()
-    if len(sessions) != 3: raise SystemExit(f"expected 3 tmux worker sessions, got {sessions}")
+    if len(sessions) != 4: raise SystemExit(f"expected 4 tmux worker sessions, got {sessions}")
+    # Cora runs on Claude Code (the human's choice for T3): the runner drives it and it reports via redpi-hq.
+    if names["Cora"]["harness"] != "claude": raise SystemExit(f"Cora should run on Claude Code: {names['Cora']}")
+    approval = next((u for i, u, _ in requests if i == "CEO" and "APPROVED" in u), "")
+    if "Claude Code: T3" not in approval: raise SystemExit(f"approval did not tell the CEO about the harness: {approval[:500]}")
+    wait("Cora (Claude Code) moved T3 to review", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T3" and t["status"] == "review"), None), 60)
+    wait("CEO received Cora's message", lambda: any(i == "CEO" and "message from Cora" in u and "claude worker: started T3" in u for i, u, _ in requests), 60)
     peter = names["Peter"]
     if not peter["branch"] or ".redpi-worktrees" not in peter["cwd"] or not os.path.isdir(peter["cwd"]):
         raise SystemExit(f"Peter's worktree missing: {peter}")
@@ -302,7 +318,7 @@ try:
     msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)

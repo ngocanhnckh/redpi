@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { Input } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, networkInterfaces, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -24,6 +24,9 @@ const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
 const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run"];
 const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status"];
+const HARNESS_LIST = ["pi", "claude", "codex", "opencode"];
+const HARNESS_NAME: Record<string, string> = { pi: "Pi", claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+const RUNNER = join(PKG_ROOT, "hq", "runner.mjs");
 const NAMES = ["Alex", "Peter", "Mia", "Sam", "Nina", "Leo", "Ivy", "Omar", "Zoe", "Kai", "Ruby", "Theo", "Maya", "Finn", "Lena", "Ravi"];
 
 // ---------- HQ client ----------
@@ -36,6 +39,7 @@ function localVersion(): string {
   const h = createHash("sha1");
   h.update(readFileSync(SERVER));
   h.update(readFileSync(join(PKG_ROOT, "hq", "schedule.mjs")));
+  h.update(readFileSync(join(PKG_ROOT, "hq", "harnesses.mjs")));
   return h.digest("hex").slice(0, 12);
 }
 
@@ -177,6 +181,7 @@ const TaskSchema = Type.Object({
   estimateHours: Type.Number({ description: "Realistic effort in hours for one agent session" }),
   dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task ids that must finish first. Leave empty when the task can start in parallel." })),
   suggestedRole: Type.Optional(Type.String({ description: "Worker role best suited, e.g. backend developer" })),
+  harness: Type.Optional(Type.Union(HARNESS_LIST.map((h) => Type.Literal(h)), { description: "Coding agent that runs this task. Omit (Pi) unless the human asked for Claude Code (claude), Codex (codex), or OpenCode (opencode); the human can also change it on the plan page." })),
 });
 
 const PlanSchema = Type.Object({
@@ -225,7 +230,7 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
@@ -272,6 +277,30 @@ function launchWorker(w: { id: string; name: string; cwd: string; tmux: string }
   const r = spawnSync("tmux", tmuxArgs("new-session", "-d", "-s", w.tmux, "-x", "200", "-y", "50", "-c", w.cwd,
     ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]), process.execPath, process.argv[1], ...extra, ...sessionArgs), { encoding: "utf8" });
   return r.status === 0 ? { ok: true, launchId } : { ok: false, launchId, error: (r.stderr || r.stdout || "").trim() };
+}
+
+// Claude Code, Codex, and OpenCode workers: hq/runner.mjs drives the harness's headless mode in tmux.
+// The runner keeps the harness session id and inbox cursor in HQ_DIR/runners/<worker>.json, so a
+// relaunch continues the same session.
+const PASS_ENV = /^(ANTHROPIC_|CLAUDE_|OPENAI_|CODEX_|OPENCODE_|AZURE_OPENAI|GEMINI_|GOOGLE_|OPENROUTER_|XDG_|HOME$|LANG$|TERM$|REDPI_RUNNER_|REDPI_WORKER_AUTONOMY$)/;
+function launchRunner(w: { id: string; name: string; cwd: string; tmux: string; harness: string }, runId: string, opts: { launchId: string; session?: string; cursor?: number }): { ok: boolean; error?: string; launchId: string } {
+  const env: Record<string, string> = {
+    REDPI_HQ_WORKER: w.id, REDPI_HQ_RUN: runId, REDPI_HQ_NAME: w.name, REDPI_HQ_LAUNCH: opts.launchId, REDPI_HQ_PORT: String(HQ_PORT), REDPI_HQ_DIR: HQ_DIR,
+    REDPI_HARNESS: w.harness, PATH: process.env.PATH || "",
+    ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}),
+    ...(opts.session ? { REDPI_HARNESS_SESSION: opts.session } : {}),
+    ...(opts.cursor ? { REDPI_HQ_CURSOR: String(opts.cursor) } : {}),
+  };
+  for (const [k, v] of Object.entries(process.env)) if (v != null && PASS_ENV.test(k) && !(k in env)) env[k] = v;
+  // tmux keeps its own PATH even with -e PATH=…, so set it with env(1): the harness CLIs must be found.
+  const r = spawnSync("tmux", tmuxArgs("new-session", "-d", "-s", w.tmux, "-x", "200", "-y", "50", "-c", w.cwd,
+    ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]), "env", `PATH=${env.PATH}`, process.execPath, RUNNER), { encoding: "utf8" });
+  return r.status === 0 ? { ok: true, launchId: opts.launchId } : { ok: false, launchId: opts.launchId, error: (r.stderr || r.stdout || "").trim() };
+}
+
+async function installedHarnesses(): Promise<Record<string, boolean>> {
+  const list = await hq("GET", "/api/harnesses").catch(() => []);
+  return Object.fromEntries((list as any[]).map((h) => [h.id, !!h.installed]));
 }
 
 function tmuxAlive(session: string): boolean {
@@ -564,7 +593,9 @@ export default function (pi: ExtensionAPI) {
       const s = await hq("GET", `/api/runs/${runId}`);
       for (const w of s.workers) {
         const alive = w.tmux && tmuxAlive(w.tmux);
-        const saved = w.session_file && existsSync(w.session_file);
+        const runnerH = w.harness && w.harness !== "pi";
+        const saved = runnerH ? !!(w.session_file || existsSync(join(HQ_DIR, "runners", `${w.id}.json`))) : w.session_file && existsSync(w.session_file);
+        if (runnerH && !(await installedHarnesses())[w.harness]) add("red", `${w.name}: ${HARNESS_NAME[w.harness]} is not installed`, `Install ${HARNESS_NAME[w.harness]}, or hand ${w.name}'s tasks to a Pi worker`);
         if (!existsSync(w.cwd)) add("red", `${w.name}: workspace ${w.cwd} is missing`, "Recreate the worktree or reassign the tasks");
         else if (alive) add(w.parked ? "yellow" : "green", `${w.name}: running${w.parked ? " but parked (idle with open work)" : ""}`, w.parked ? `Message ${w.name} or reassign` : "");
         else add(saved ? "yellow" : "red", `${w.name}: tmux session gone`, saved ? `Resume with redplan_resume_worker (saved session ${w.session_file})` : "No saved session: resume with allowFresh=true");
@@ -642,6 +673,7 @@ export default function (pi: ExtensionAPI) {
       taskIds: Type.Array(Type.String(), { description: "Plan task ids this worker owns" }),
       workspace: Type.Union([Type.Literal("shared"), Type.Literal("worktree")], { description: "shared: work in this folder (tasks touch disjoint areas). worktree: own git worktree and branch (teammates would edit the same files)." }),
       brief: Type.String({ description: "Self-contained brief: goal, the worker's tasks with acceptance criteria, exact tech/APIs to use, interfaces shared with named teammates, how to verify." }),
+      harness: Type.Optional(Type.Union(HARNESS_LIST.map((h) => Type.Literal(h)), { description: "Coding agent this worker runs on; must match its tasks' harness. Defaults to its tasks' harness (Pi unless the human chose otherwise)." })),
     }),
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
@@ -650,6 +682,11 @@ export default function (pi: ExtensionAPI) {
       const known = new Set(state.tasks.map((t: any) => t.id));
       const unknown = params.taskIds.filter((t: string) => !known.has(t));
       if (unknown.length) throw new Error(`Unknown task ids: ${unknown.join(", ")}`);
+      const taskHarnesses = [...new Set(state.tasks.filter((t: any) => params.taskIds.includes(t.id)).map((t: any) => t.harness || "pi"))] as string[];
+      if (taskHarnesses.length > 1) throw new Error(`These tasks run on different harnesses (${state.tasks.filter((t: any) => params.taskIds.includes(t.id)).map((t: any) => `${t.id}: ${HARNESS_NAME[t.harness || "pi"]}`).join(", ")}). Spawn one worker per harness.`);
+      const harness: string = params.harness || taskHarnesses[0] || "pi";
+      if (taskHarnesses[0] && harness !== taskHarnesses[0]) throw new Error(`${params.taskIds.join(", ")} run on ${HARNESS_NAME[taskHarnesses[0]]}, not ${HARNESS_NAME[harness]}.`);
+      if (harness !== "pi" && !(await installedHarnesses())[harness]) throw new Error(`${HARNESS_NAME[harness]} is not installed on this machine. Ask the human to install it or to switch these tasks back to Pi.`);
       const taken = new Set(state.workers.map((w: any) => w.name.toLowerCase()));
       const name = (params.name || NAMES.find((n) => !taken.has(n.toLowerCase())) || `Worker${state.workers.length + 1}`).trim();
       const runShort = runId.replace(/^run_/, "").slice(0, 6);
@@ -682,14 +719,15 @@ export default function (pi: ExtensionAPI) {
 
       // The launch id is recorded before the process starts, so its first heartbeat is recognised.
       const launchId = randomUUID();
-      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief, launchId });
-      const launched = launchWorker({ id: worker.id, name, cwd, tmux: session }, runId, { launchId });
+      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief, launchId, harness });
+      const launched = harness === "pi" ? launchWorker({ id: worker.id, name, cwd, tmux: session }, runId, { launchId })
+        : launchRunner({ id: worker.id, name, cwd, tmux: session, harness }, runId, { launchId });
       if (!launched.ok) {
         await hq("PATCH", `/api/workers/${worker.id}`, { status: "failed" }).catch(() => {});
         throw new Error(`tmux failed to start ${name}: ${launched.error}`);
       }
       const attach = `tmux ${TMUX_SOCKET ? `-L ${TMUX_SOCKET} ` : ""}attach -t '=${session}'`;
-      return text(`${name} (${params.role}) started on ${params.taskIds.join(", ")} in ${cwd}${branch ? ` [branch ${branch}]` : ""}.\nWatch or join: ${attach}\nDashboard: ${hqUrl(`/runs/${runId}`)}\n${name} receives the brief automatically and will message you with questions and reports.`, { workerId: worker.id, name, session });
+      return text(`${name} (${params.role}, ${HARNESS_NAME[harness]}) started on ${params.taskIds.join(", ")} in ${cwd}${branch ? ` [branch ${branch}]` : ""}.\nWatch or join: ${attach}\nDashboard: ${hqUrl(`/runs/${runId}`)}\n${name} receives the brief automatically and will message you with questions and reports.`, { workerId: worker.id, name, session });
     },
   } as any);
 
@@ -704,21 +742,25 @@ export default function (pi: ExtensionAPI) {
       if (!w) throw new Error(`No worker named ${params.name}. Team: ${s.workers.map((x: any) => x.name).join(", ")}`);
       if (w.tmux && tmuxAlive(w.tmux)) return text(`outcome: failed — ${w.name} is still running (tmux ${w.tmux}). Message them instead.`, { outcome: "failed" });
       const detail = await hq("GET", `/api/workers/${w.id}`);
-      const hasSession = !!(w.session_file && existsSync(w.session_file));
+      const runnerHarness = w.harness && w.harness !== "pi" ? w.harness : "";
+      const hasSession = runnerHarness ? !!(w.session_file || existsSync(join(HQ_DIR, "runners", `${w.id}.json`))) : !!(w.session_file && existsSync(w.session_file));
       if (!hasSession && !params.allowFresh) {
         return text(`outcome: failed — no saved session for ${w.name}${w.session_file ? ` (${w.session_file} is missing)` : ""}. Call again with allowFresh=true to start them fresh with their original brief.`, { outcome: "failed" });
       }
       if (!existsSync(w.cwd)) return text(`outcome: failed — ${w.name}'s workspace ${w.cwd} no longer exists.`, { outcome: "failed" });
       const launchId = randomUUID();
       await hq("PATCH", `/api/workers/${w.id}`, { launchId, status: "starting", tmux: w.tmux });
-      const launched = launchWorker({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux }, runId, hasSession ? { launchId, sessionFile: w.session_file } : { launchId, cursor: detail.lastMessageId });
+      if (runnerHarness && !hasSession) { try { unlinkSync(join(HQ_DIR, "runners", `${w.id}.json`)); } catch {} }
+      const launched = runnerHarness
+        ? launchRunner({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux, harness: runnerHarness }, runId, hasSession ? { launchId, session: w.session_file || undefined } : { launchId, cursor: detail.lastMessageId })
+        : launchWorker({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux }, runId, hasSession ? { launchId, sessionFile: w.session_file } : { launchId, cursor: detail.lastMessageId });
       if (!launched.ok) return text(`outcome: failed — tmux: ${launched.error}`, { outcome: "failed" });
       if (!hasSession) {
         await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: w.id, kind: "chat",
           body: `You are replacing ${w.name}'s previous session, which ended. Check the workspace (git status/log) and the board to see what is already done before continuing.\n\nOriginal brief:\n${detail.brief || "(not found; ask the CEO)"}` });
       }
       const outcome = hasSession ? "resumed" : "fresh";
-      return text(`outcome: ${outcome} — ${w.name} is back in tmux ${w.tmux}${hasSession ? ` continuing ${w.session_file}` : " with a fresh session and the original brief"}.`, { outcome });
+      return text(`outcome: ${outcome} — ${w.name} is back in tmux ${w.tmux}${hasSession ? ` continuing ${runnerHarness ? `${HARNESS_NAME[runnerHarness]} session ${w.session_file || "(saved)"}` : w.session_file}` : " with a fresh session and the original brief"}.`, { outcome });
     },
   } as any);
 

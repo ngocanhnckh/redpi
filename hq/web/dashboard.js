@@ -205,7 +205,7 @@ function renderRun() {
         <div class="panel"><div class="panel-head"><h2>Team</h2><span class="muted" style="font-size:12px">click to open</span></div>
           <div class="panel-body team">
             <button class="member" data-to="ceo">${avatar("CEO", "ceo")}<span><span class="name">CEO</span> <span class="role">lead Pi session</span><div class="doing">${esc(run.status === "awaiting_approval" ? "waiting for your approval" : run.status === "planning" ? "planning" : "coordinating the team")}</div></span><span></span></button>
-            ${workers.map((w) => `<button class="member" data-worker="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>
+            ${workers.map((w) => `<button class="member" data-worker="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
               <div class="doing">${w.current_task ? `${esc(w.current_task)} · ` : ""}${esc(w.activity?.text || w.last_message || w.status)}</div></span><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}" title="${workerState(w)}"></span></button>`).join("")}
           </div></div>
         <div class="panel"><div class="panel-head"><h2>Team chat</h2><span class="muted" style="font-size:12px">${messages.length} messages</span></div>
@@ -305,11 +305,12 @@ async function renderPanel() {
   const attach = w.attach || "";
   const ctx = w.context;
   root.innerHTML = `<aside class="drawer" role="dialog" aria-label="${esc(w.name)}">
-    <div class="panel-head">${avatar(w.name, w.id, "lg")}<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">${esc(w.name)}</div><div class="muted">${esc(w.role)}</div></div><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}"></span><span class="muted">${workerState(w)}</span><button class="btn" id="close" aria-label="Close">✕</button></div>
+    <div class="panel-head">${avatar(w.name, w.id, "lg")}<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">${esc(w.name)}</div><div class="muted">${esc(w.role)}${w.harness && w.harness !== "pi" ? ` · ${esc(w.harnessName)}` : ""}</div></div><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}"></span><span class="muted">${workerState(w)}</span><button class="btn" id="close" aria-label="Close">✕</button></div>
     <div class="scroll">
       ${!w.alive ? `<div class="banner red">${esc(w.name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>` : ""}
       ${w.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>` : w.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : ""}
-      ${attach ? `<div><div class="section-title" style="margin-bottom:6px">Live session</div><div class="cmd"><code>${esc(attach)}</code><button class="btn" id="copy">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">Run this in a terminal on this machine to watch or type into ${esc(w.name)}'s Pi. Detach with Ctrl-b d.</div></div>` : ""}
+      ${attach ? `<div><div class="section-title" style="margin-bottom:6px">Live session</div><div class="cmd"><code>${esc(attach)}</code><button class="btn" id="copy">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">${w.harness && w.harness !== "pi" ? `Run this in a terminal on this machine to watch ${esc(w.name)}'s ${esc(w.harnessName)} turns; type a line there to message them.` : `Run this in a terminal on this machine to watch or type into ${esc(w.name)}'s Pi.`} Detach with Ctrl-b d.</div></div>` : ""}
+      ${w.open ? `<div><div class="section-title" style="margin-bottom:6px">Open in ${esc(w.harnessName)}</div><div class="cmd"><code>${esc(w.open)}</code><button class="btn" id="copyopen">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">Opens ${esc(w.name)}'s own ${esc(w.harnessName)} session interactively. Best while ${esc(w.name)} is idle.</div></div>` : ""}
       <div class="muted" style="font-size:13px">Working in <code>${esc(w.cwd)}</code>${w.branch ? ` on branch <code>${esc(w.branch)}</code>` : ""}</div>
       ${ctx && ctx.percent != null ? `<div><div class="section-title" style="margin-bottom:6px">Context</div><div class="bar"><i style="width:${Math.min(100, ctx.percent)}%;background:${ctx.percent > 80 ? "var(--red)" : ctx.percent > 50 ? "var(--amber)" : "var(--green)"}"></i></div><div class="faint" style="font-size:12px;margin-top:4px">${Math.round(ctx.percent)}% of ${Math.round((ctx.window || 0) / 1000)}k tokens</div></div>` : ""}
       <div><div class="section-title" style="margin-bottom:6px">Tasks</div>${d.tasks.length ? d.tasks.map((t) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><span class="mono muted">${esc(t.id)}</span><span style="flex:1">${esc(t.title)}</span><span class="pill ${t.status === "done" ? "green" : t.status === "blocked" ? "red" : t.status === "in_progress" ? "cyan" : ""}">${esc(t.status.replace("_", " "))}</span></div>`).join("") : `<span class="muted">No tasks assigned.</span>`}</div>
@@ -329,6 +330,8 @@ async function renderPanel() {
   document.getElementById("resume")?.addEventListener("click", () => resume(w.id));
   const copy = document.getElementById("copy");
   if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(attach); toast("Copied"); } catch { toast("Select the command and copy it"); } };
+  const copyOpen = document.getElementById("copyopen");
+  if (copyOpen) copyOpen.onclick = async () => { try { await navigator.clipboard.writeText(w.open); toast("Copied"); } catch { toast("Select the command and copy it"); } };
   const send = async (kind) => {
     const body = document.getElementById("wmsg").value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
     if (!body) return;

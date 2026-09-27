@@ -8,6 +8,7 @@ const TAB_NAME = { ...Object.fromEntries(TABS), overview: "Overview" };
 const DIAGRAM_NAME = { gantt: "Gantt chart", arch: "Architecture diagram" };
 const store = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, v); } catch {} } };
 let tab = store.get("redplan-tab") || "stories";
+let harnessList = null;
 let data, pinMode = null, selection = null, reloadLater = false, overall = store.get(`redplan-overall-${planId}`) || "";
 const openStories = new Set();
 
@@ -17,8 +18,9 @@ async function load() {
   try {
     const next = await api("GET", `/api/plans/${planId}`);
     next.runState = await api("GET", `/api/runs/${next.runId}`);
+    harnessList ||= await api("GET", "/api/harnesses").catch(() => [{ id: "pi", name: "Pi (RedPi)", short: "Pi", installed: true }]);
     // Most live events are about workers or chat: only redraw when this page would change.
-    const key = (d) => JSON.stringify([d.status, d.comment, d.comments, d.latestVersion, d.previous, d.runState.plans, d.runState.run.status]);
+    const key = (d) => JSON.stringify([d.status, d.comment, d.comments, d.harness, d.latestVersion, d.previous, d.runState.plans, d.runState.run.status]);
     const same = data && key(data) === key(next);
     data = next;
     if (!same) render();
@@ -63,7 +65,7 @@ function render() {
   app.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
   wireDecision(pending);
   const body = document.getElementById("tab-body");
-  if (tab === "stories") body.innerHTML = storiesView(plan, schedule);
+  if (tab === "stories") { body.innerHTML = harnessBar(plan, pending) + storiesView(plan, schedule, pending); wireHarness(); }
   if (tab === "timeline") { body.innerHTML = timelineView(plan, schedule, pending); drawGantt(plan, schedule); }
   if (tab === "architecture") { body.innerHTML = `<div class="panel"><div class="panel-head"><h2>Architecture</h2>${pending ? pinButton("arch") : ""}</div><div class="panel-body" id="arch"></div></div>`; drawArchitecture(plan.architecture); }
   if (tab === "tech") body.innerHTML = techView(plan.techStack || []);
@@ -281,7 +283,34 @@ function wirePins() {
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinMode && !composerOpen()) { pinMode = null; render(); } });
 
-function storiesView(plan, schedule) {
+// ---------- which coding agent runs each task ----------
+const harnessOf = (t) => data.harness?.[t.id] || data.harness?.["*"] || t.harness || "pi";
+const harnessName = (id) => harnessList?.find((h) => h.id === id)?.name || id;
+function harnessSelect(value, attrs, label) {
+  return `<select class="harness-select" ${attrs} aria-label="${esc(label)}">${value ? "" : `<option value="" selected disabled>Mixed</option>`}${(harnessList || []).map((h) => `<option value="${esc(h.id)}" ${h.id === value ? "selected" : ""} ${h.installed ? "" : "disabled"}>${esc(h.name)}${h.installed ? "" : " (not installed)"}</option>`).join("")}</select>`;
+}
+function harnessBar(plan, pending) {
+  const tasks = plan.stories.flatMap((s) => s.tasks);
+  const counts = {};
+  for (const t of tasks) counts[harnessOf(t)] = (counts[harnessOf(t)] || 0) + 1;
+  const summary = Object.entries(counts).map(([h, n]) => `${esc(harnessName(h))} ${n}`).join(" · ");
+  if (!pending) return `<div class="harness-bar no-annotate"><span class="muted">Coding agents: ${summary}</span></div>`;
+  const all = Object.keys(counts).length === 1 ? Object.keys(counts)[0] : "";
+  return `<div class="harness-bar no-annotate">
+    <label>Run every task with ${harnessSelect(all, `data-harness-all`, "Coding agent for every task")}</label>
+    <span class="muted">${summary}. Pi is the default; you can pick per task below. Only agents installed on this machine can be chosen.</span>
+  </div>`;
+}
+function wireHarness() {
+  const put = async (task, harness) => {
+    try { data.harness = await api("PUT", `/api/runs/${data.runId}/harness`, { task, harness }); render(); toast(`${task === "*" ? "Every task" : task} → ${harnessName(harness)}`); }
+    catch (e) { toast(e.message); render(); }
+  };
+  app.querySelectorAll("[data-harness-all]").forEach((el) => el.onchange = () => put("*", el.value));
+  app.querySelectorAll("[data-harness-task]").forEach((el) => el.onchange = () => put(el.dataset.harnessTask, el.value));
+}
+
+function storiesView(plan, schedule, pending) {
   const crit = new Set(schedule.criticalPath);
   return plan.stories.map((s, i) => {
     const hrs = s.tasks.reduce((n, t) => n + Number(t.estimateHours), 0);
@@ -299,7 +328,8 @@ function storiesView(plan, schedule) {
             <div class="tid">${esc(t.id)}</div>
             <div><div class="tt">${esc(t.title)}</div><div class="td">${esc(t.description)}</div>
               <div class="meta">${t.tech ? `<span class="pill cyan">${esc(t.tech)}</span>` : ""}${t.suggestedRole ? `<span class="pill">${esc(t.suggestedRole)}</span>` : ""}${st.deps.length ? `<span class="pill">needs ${esc(st.deps.join(", "))}</span>` : `<span class="pill green">can start now</span>`}${st.critical ? `<span class="pill red">critical</span>` : `<span class="pill">slack ${hours(st.slack)}</span>`}</div></div>
-            <div class="est">${hours(st.hours)}<br><span class="faint">h${st.es}–${st.ef}</span></div>
+            <div class="est">${hours(st.hours)}<br><span class="faint">h${st.es}–${st.ef}</span>
+              <div class="no-annotate" style="margin-top:6px">${pending ? harnessSelect(harnessOf(t), `data-harness-task="${esc(t.id)}"`, `Coding agent for ${t.id}`) : harnessOf(t) !== "pi" ? `<span class="pill violet">${esc(harnessName(harnessOf(t)))}</span>` : ""}</div></div>
           </div>`; }).join("")}
       </div></details>`;
   }).join("");

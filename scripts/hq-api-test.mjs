@@ -2,7 +2,7 @@
 // RedPi HQ API test: runs a private hub (temp dir, random port) and exercises the plan,
 // approval, worker, task, message, and auth flows. Never touches ~/.pi/agent.
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -49,7 +49,12 @@ const badDep = structuredClone(plan);
 badDep.stories[1].tasks[0].dependsOn = ["T99"];
 if (!validatePlan(badDep).errors.some((e) => e.includes("T99"))) fail("unknown dependency not detected");
 
-proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600" }, stdio: "ignore" });
+// A fake `claude` on the hub's PATH: installed harnesses are detected with `<bin> --version`.
+const fakeBin = join(dir, "fakebin");
+mkdirSync(fakeBin);
+writeFileSync(join(fakeBin, "claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n", { mode: 0o755 });
+const PATH_NO_CODEX = [fakeBin, ...(process.env.PATH || "").split(":").filter((d) => !existsSync(join(d, "codex")) && !existsSync(join(d, "opencode")))].join(":");
+proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600" }, stdio: "ignore" });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
@@ -104,16 +109,34 @@ const v2view = (await api("GET", `/api/plans/${v2.body.id}`)).body;
 if (v2view.previous?.version !== 1 || v2view.previous.comments.map((c) => c.n).join() !== "1,2" || v2view.plan.changes.length !== 2) fail("new version does not show the previous comments and changes", v2view.previous);
 if ((await api("GET", `/api/plans/${v1.body.id}`)).body.latestId !== v2.body.id) fail("old version does not link to the latest");
 await api("POST", `/api/plans/${v2.body.id}/comments`, { anchor: { kind: "text", tab: "tech", target: "tech:deepagents", label: "Tech stack › Deep Agents" }, quote: "deepagents", body: "Pin the version" });
+// Harness per task: Pi by default, Claude Code for T3 (installed), Codex refused (not installed).
+const hs = (await api("GET", "/api/harnesses?refresh=1")).body;
+if (!hs.find((h) => h.id === "claude")?.installed || hs.find((h) => h.id === "codex")?.installed || hs.find((h) => h.id === "claude").version !== "9.9.9 (Claude Code)") fail("harness detection wrong", hs);
+if ((await api("PUT", `/api/runs/${runId}/harness`, { task: "T3", harness: "codex" })).status !== 400) fail("a harness that is not installed was accepted");
+if ((await api("PUT", `/api/runs/${runId}/harness`, { task: "T9", harness: "claude" })).status !== 400) fail("unknown task accepted");
+await api("PUT", `/api/runs/${runId}/harness`, { harness: "claude" });
+await api("PUT", `/api/runs/${runId}/harness`, { task: "T1", harness: "pi" });
+let choices = (await api("PUT", `/api/runs/${runId}/harness`, { task: "T2", harness: "pi" })).body;
+if (choices["*"] !== "claude" || choices.T1 !== "pi") fail("harness choices wrong", choices);
+choices = (await api("PUT", `/api/runs/${runId}/harness`, { harness: "pi" })).body;
+if (Object.keys(choices).join() !== "*") fail("choosing for every task should clear per-task choices", choices);
+for (const [task, harness] of [["T1", "pi"], ["T3", "claude"]]) await api("PUT", `/api/runs/${runId}/harness`, { task, harness });
+if ((await api("GET", `/api/plans/${v2.body.id}`)).body.harness.T3 !== "claude") fail("plan view lacks harness choices");
 const approved = await api("POST", `/api/plans/${v2.body.id}/decision`, { decision: "approve" });
 if (approved.body.status !== "approved") fail("approve not recorded");
 inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
 if (!inbox.some((m) => m.kind === "decision" && m.body.includes("APPROVED") && m.body.includes("#1 [Tech stack › Deep Agents]") && m.body.includes("Keep these notes in mind"))) fail("approval did not carry the notes");
+if (!inbox.some((m) => m.kind === "decision" && m.body.includes("Pi (RedPi): T1, T2, T4; Claude Code: T3") && m.body.includes("pass that harness to redplan_spawn_worker"))) fail("approval did not list the harness per task", inbox.at(-1)?.body);
+if ((await api("GET", `/api/runs/${runId}`)).body.tasks.find((t) => t.id === "T3").harness !== "claude") fail("task harness not stored at approval");
 if ((await api("POST", `/api/plans/${v2.body.id}/decision`, { decision: "approve" })).status !== 409) fail("double decision allowed");
 let state = (await api("GET", `/api/runs/${runId}`)).body;
 if (state.tasks.length !== 4 || state.run.status !== "approved") fail("approval did not create tasks", state.run);
 
 const alex = (await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "backend developer", cwd: "/tmp/demo-project", taskIds: ["T1", "T2"], brief: "Build the API", launchId: "L1" })).body;
-const peter = (await api("POST", `/api/runs/${runId}/workers`, { name: "Peter", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"] })).body;
+if ((await api("POST", `/api/runs/${runId}/workers`, { name: "Pat", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"] })).status !== 400) fail("a Pi worker was given a Claude Code task");
+const peter = (await api("POST", `/api/runs/${runId}/workers`, { name: "Peter", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"], harness: "claude" })).body;
+if (peter.harness !== "claude" || peter.harnessName !== "Claude Code") fail("worker harness not stored", peter);
+if ((await api("PUT", `/api/runs/${runId}/harness`, { task: "T3", harness: "pi" })).status !== 409) fail("harness changed after approval");
 if ((await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "x", cwd: "/tmp" })).status !== 409) fail("duplicate worker name allowed");
 inbox = (await api("GET", `/api/runs/${runId}/inbox?for=${alex.id}&after=0`)).body;
 if (inbox.length !== 1 || inbox[0].kind !== "brief") fail("worker brief not delivered", inbox);
@@ -228,5 +251,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in, plan review comments.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

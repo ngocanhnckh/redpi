@@ -392,6 +392,16 @@ RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows expa
 - The new version opens with **What changed since v1**, one line per comment (`#1 …`), and your earlier comments beside it.
 - **Approve** (optionally "with N notes", which go to the CEO as guidance for the workers) starts execution.
 
+### Coding agent per task: Pi, Claude Code, Codex, OpenCode
+
+Every task runs on **Pi** by default. On the plan page (Stories & tasks), pick a different coding agent for any task, or use **Run every task with** for all of them. Only agents installed on this machine can be chosen (HQ checks `claude --version`, `codex --version`, `opencode --version`); the others show as "not installed". The approval tells the CEO which task runs where, and the CEO gives each worker tasks of one agent.
+
+- **Pi workers** are full Pi sessions with RedPi, as before.
+- **Claude Code, Codex, and OpenCode workers** run in tmux too, driven by a small RedPi runner through each tool's own headless, resumable mode: `claude -p --resume <session>`, `codex exec resume <thread>`, `opencode run --session <id>`. Each message from HQ becomes one turn of the same session, so HQ always knows whether the worker is busy, and a crashed worker resumes its session. Nothing is written to your Claude, Codex, or OpenCode config.
+- They work with the team through a `redpi-hq` command in their shell (`redpi-hq task T2 in_progress`, `redpi-hq send ceo "…"`, `redpi-hq team`), with the same rules as Pi workers: blocked needs a reason, done needs how it was verified.
+- Everything else is the same: board, team chat, **Ask (btw)** (answered on a fork of the session: `--fork-session`, `codex exec fork`, `opencode run --fork`), **Interrupt + send**, "needs you" on provider trouble, and **Resume**. `tmux attach` shows each turn as it happens, and typing a line there messages the worker. The worker panel also shows the command to open the worker's own session interactively (for example `claude --resume <id>`).
+- They use each tool's own login and default model. Permissions: `REDPI_WORKER_AUTONOMY=full` (default) matches Pi workers (Claude `bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, OpenCode `--auto`); `sandboxed` keeps each tool's rails (Claude `acceptEdits`, Codex `workspace-write`, OpenCode's own rules). Headless runs never stop to ask: anything not allowed fails and the agent adapts.
+
 ### RedPi HQ dashboard
 
 `/hq` prints the dashboard link. One hub serves every project on the machine.
@@ -870,6 +880,7 @@ Smoke coverage includes:
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
+- Harness workers: fake `claude` / `codex` / `opencode` binaries speaking each tool's JSON events; the runner takes the brief, the agent moves its card and messages the CEO via `redpi-hq`, every turn continues the same session, side questions run on a fork (instructions relayed), interrupt stops a stuck turn, provider trouble raises "needs you", and a killed worker resumes its session. The RedPlan end-to-end test also has the CEO spawn a Claude Code worker for a task the human switched to Claude Code.
 - Plan review (headless Chromium): text highlights, pins on the architecture and Gantt diagrams, edit, send feedback → one numbered, anchored message to the CEO; the next version shows what changed and the earlier comments; phone layout
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report

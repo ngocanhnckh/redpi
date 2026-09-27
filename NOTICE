@@ -41,6 +41,11 @@ Designs adapted (no source code copied) in extensions/redplan.ts and hq/server.m
   escalating wake ladder (agent-state-taxonomy.md, parked-query.ts,
   queue-wake-ladder.ts); the read-only restore check (restore-check-service.ts);
   team norms and the independent reviewer (specs/rigs/launch/*/CULTURE.md).
+Also in hq/harnesses.mjs, hq/runner.mjs, hq/cli.mjs (designs, no code): detecting installed
+  runtimes with `<bin> --version`, a runner hosting a headless agent inside the worker's tmux
+  pane instead of scraping its TUI (pi-runner), a pre-chosen Claude session id for exact
+  resume, a CLI the agent calls to report and message peers (rig send / rig queue), and
+  passing PATH explicitly to tmux-launched agents.
 
 -------------------------------------------------------------------------------
 MIT License (munder-difflin)

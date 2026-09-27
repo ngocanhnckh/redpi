@@ -3,7 +3,7 @@
 // pins comments on the architecture and Gantt diagrams, edits one, sends the feedback, and checks the
 // CEO gets one numbered, anchored message; then the next version shows what changed. Never touches ~/.pi/agent.
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,7 +14,11 @@ let chromium;
 try { ({ chromium } = await import("playwright")); } catch { console.log("Plan review UI test skipped: playwright is not installed (npm install)."); process.exit(0); }
 const dir = mkdtempSync(join(tmpdir(), "redpi-review-test-"));
 const port = 20000 + Math.floor(Math.random() * 20000);
-const proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1" }, stdio: "ignore" });
+// Only a (fake) Claude Code is installed besides Pi, so Codex and OpenCode show as not installed.
+mkdirSync(join(dir, "bin"));
+writeFileSync(join(dir, "bin", "claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n", { mode: 0o755 });
+const PATH = [join(dir, "bin"), ...(process.env.PATH || "").split(":").filter((d) => !existsSync(join(d, "codex")) && !existsSync(join(d, "opencode")))].join(":");
+const proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1" }, stdio: "ignore" });
 process.on("exit", () => { proc.kill(); rmSync(dir, { recursive: true, force: true }); });
 const fail = (msg) => { console.error(`FAIL: ${msg}`); process.exit(1); };
 process.on("unhandledRejection", (e) => fail(e?.message || e));
@@ -129,8 +133,28 @@ await selectText(phone, ".summary", "support chat");
 await phone.click(".sel-btn"); await phone.waitForSelector(".composer-pop textarea");
 const overflow = await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth);
 if (overflow) fail("plan page overflows horizontally on a phone");
+// Coding agent per task: everything on Pi by default; put T3 on Claude Code; Codex is not installed.
+await page.click("[data-tab=stories]");
+await page.waitForSelector("[data-harness-all]");
+if (await page.$eval("[data-harness-task=T1]", (el) => el.value) !== "pi") fail("tasks should default to Pi");
+if (!(await page.$eval('[data-harness-task=T1] option[value=codex]', (o) => o.disabled && o.textContent.includes("not installed")))) fail("Codex should be listed as not installed");
+await page.evaluate(() => { document.querySelector('details[data-story="S2"]').open = true; });
+await page.selectOption("[data-harness-task=T3]", "claude");
+await page.waitForFunction(() => document.querySelector(".harness-bar")?.textContent.includes("Claude Code 1"));
+if (await page.$eval("[data-harness-all]", (el) => el.value) !== "") fail("mixed agents should show as Mixed");
+if ((await api("GET", `/api/plans/${v2.id}`)).harness.T3 !== "claude") fail("per-task harness not saved");
+await page.selectOption("[data-harness-all]", "claude");
+await page.waitForFunction(() => document.querySelector(".harness-bar")?.textContent.includes("Claude Code 3"));
+await page.selectOption("[data-harness-all]", "pi");
+await page.selectOption("[data-harness-task=T3]", "claude");
+await page.waitForFunction(() => document.querySelector(".harness-bar")?.textContent.includes("Pi (RedPi) 2"));
+await page.click("#approve");
+await page.waitForSelector("text=Watch execution");
+const approvedMsg = (await api("GET", `/api/runs/${r}/inbox?for=ceo&after=0`)).filter((m) => m.kind === "decision").pop()?.body || "";
+if (!approvedMsg.includes("Pi (RedPi): T1, T2; Claude Code: T3")) fail(`approval message lacks the harness per task: ${approvedMsg}`);
+if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi) 2 · Claude Code 1")) fail("approved plan should show the agents read-only");
 await browser.close();
 const real = errors.filter((e) => !/status of 401/.test(e));
 if (real.length) fail(`console errors:\n${real.join("\n")}`);
-console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, phone layout.");
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), phone layout.");
 process.exit(0);

@@ -11,6 +11,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { schedulePlan, validatePlan } from "./schedule.mjs";
+import { DEFAULT_HARNESS, HARNESS_IDS, HARNESSES, detectHarnesses, interactiveCommand } from "./harnesses.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -21,7 +22,7 @@ const HOST = process.env.REDPI_HQ_HOST || "0.0.0.0";
 // Tests run workers on a private tmux server; real runs use the default one.
 const TMUX = process.env.REDPI_TMUX_SOCKET ? ["-L", process.env.REDPI_TMUX_SOCKET] : [];
 // Changes whenever the server code changes, so clients can restart a stale hub.
-export const VERSION = createHash("sha1").update(readFileSync(join(HERE, "server.mjs"))).update(readFileSync(join(HERE, "schedule.mjs"))).digest("hex").slice(0, 12);
+export const VERSION = createHash("sha1").update(readFileSync(join(HERE, "server.mjs"))).update(readFileSync(join(HERE, "schedule.mjs"))).update(readFileSync(join(HERE, "harnesses.mjs"))).digest("hex").slice(0, 12);
 
 mkdirSync(HQ_DIR, { recursive: true });
 const TOKEN_PATH = join(HQ_DIR, "token");
@@ -122,6 +123,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS plan_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT NOT NULL, run_id TEXT NOT NULL, anchor TEXT NOT NULL,
     quote TEXT, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', n INTEGER, created INTEGER NOT NULL, updated INTEGER NOT NULL, sent INTEGER);
   CREATE INDEX IF NOT EXISTS plan_comments_plan ON plan_comments (plan_id, id);
+  CREATE TABLE IF NOT EXISTS task_harness (run_id TEXT NOT NULL, task_id TEXT NOT NULL, harness TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (run_id, task_id));
   CREATE INDEX IF NOT EXISTS messages_run ON messages (run_id, id);
   CREATE INDEX IF NOT EXISTS transitions_task ON task_transitions (run_id, task_id, id);
   CREATE INDEX IF NOT EXISTS events_worker ON events (worker_id, id);
@@ -132,6 +134,7 @@ for (const [table, col, type] of [
   ["workers", "session_file", "TEXT"], ["workers", "launch_id", "TEXT"], ["workers", "needs_input", "TEXT"], ["workers", "context", "TEXT"],
   ["workers", "parked_level", "INTEGER NOT NULL DEFAULT 0"], ["workers", "parked_at", "INTEGER"], ["workers", "needs_human", "TEXT"],
   ["events", "ms", "INTEGER"], ["events", "ok", "INTEGER"],
+  ["workers", "harness", "TEXT NOT NULL DEFAULT 'pi'"], ["tasks", "harness", "TEXT NOT NULL DEFAULT 'pi'"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -205,7 +208,9 @@ function runView(runId) {
 function workerView(w) {
   const attach = w.tmux ? `tmux ${TMUX.length ? `-L ${TMUX[1]} ` : ""}attach -t '=${w.tmux}'` : null;
   const json = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
-  return { ...w, activity: json(w.activity), needs_input: json(w.needs_input), context: json(w.context), alive: !!w.alive, attach, parked: w.parked_level > 0 };
+  const harness = w.harness || DEFAULT_HARNESS;
+  return { ...w, harness, harnessName: HARNESSES[harness]?.name || harness, activity: json(w.activity), needs_input: json(w.needs_input), context: json(w.context), alive: !!w.alive, attach,
+    parked: w.parked_level > 0, open: harness === "pi" ? null : interactiveCommand(harness, w.session_file, w.cwd) };
 }
 
 function planReview(runId) {
@@ -379,6 +384,40 @@ route("POST", "/api/runs/:id/plans", (b, p) => {
   return planView(one("SELECT * FROM plans WHERE id = ?", id));
 });
 
+// ---------- harnesses: which coding agent runs each task ----------
+// Detected on this machine (the hub runs where the workers run), refreshed every 10 minutes.
+let harnessCache = { at: 0, list: HARNESS_IDS.map((id) => ({ id, name: HARNESSES[id].name, short: HARNESSES[id].short, installed: id === DEFAULT_HARNESS, version: null })) };
+async function harnesses(refresh = false) {
+  if (refresh || now() - harnessCache.at > 10 * 60000) harnessCache = { at: now(), list: await detectHarnesses() };
+  return harnessCache.list;
+}
+harnesses().catch(() => {});
+
+// The human's choices for a run: "*" is the default for every task; a task id overrides it.
+function harnessChoices(runId) {
+  return Object.fromEntries(all("SELECT task_id, harness FROM task_harness WHERE run_id = ?", runId).map((r) => [r.task_id, r.harness]));
+}
+function taskHarness(choices, task) { return choices[task.id] || choices["*"] || (HARNESS_IDS.includes(task.harness) ? task.harness : DEFAULT_HARNESS); }
+
+route("GET", "/api/harnesses", async (_b, _p, _res, url) => harnesses(url.searchParams.get("refresh") === "1"));
+
+route("PUT", "/api/runs/:id/harness", async (b, p) => {
+  const latest = one("SELECT * FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1", p.id);
+  if (!latest) return notFound();
+  if (latest.status !== "pending") throw httpError(409, "harnesses are chosen while the plan awaits approval");
+  const harness = String(b.harness || "");
+  if (!HARNESS_IDS.includes(harness)) throw httpError(400, `harness must be one of ${HARNESS_IDS.join(", ")}`);
+  if (!(await harnesses()).find((h) => h.id === harness)?.installed) throw httpError(400, `${HARNESSES[harness].name} is not installed on this machine`);
+  const task = b.task ? String(b.task) : "*";
+  const ids = JSON.parse(latest.json).stories?.flatMap((s) => (s.tasks || []).map((t) => t.id)) || [];
+  if (task !== "*" && !ids.includes(task)) throw httpError(400, `unknown task ${task}`);
+  // Choosing for every task replaces the per-task choices.
+  if (task === "*") run("DELETE FROM task_harness WHERE run_id = ?", p.id);
+  run("INSERT OR REPLACE INTO task_harness (run_id, task_id, harness, updated) VALUES (?, ?, ?, ?)", p.id, task, harness, now());
+  notify(p.id, "harness");
+  return harnessChoices(p.id);
+});
+
 // ---------- plan review: comments anchored to text or diagram spots ----------
 // anchor: { kind: "text" | "pin", tab, target (e.g. "task:T2"), label (where, in words), diagram?, x?, y? (0–1 of the diagram) }
 function commentView(c) { let anchor = {}; try { anchor = JSON.parse(c.anchor); } catch {} return { ...c, anchor }; }
@@ -417,6 +456,7 @@ route("GET", "/api/plans/:id", (_b, p) => {
     latestVersion: one("SELECT MAX(version) AS v FROM plans WHERE run_id = ?", plan.runId).v,
     latestId: one("SELECT id FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1", plan.runId).id,
     comments: planComments(p.id),
+    harness: harnessChoices(plan.runId),
     previous: prev ? { id: prev.id, version: prev.version, comments: planComments(prev.id).filter((c) => c.status === "sent") } : null };
 });
 
@@ -463,16 +503,24 @@ route("POST", "/api/plans/:id/decision", (b, p) => {
   if (!approve && !comment && !drafts.length) throw httpError(400, "say what should change: add comments on the plan or an overall comment");
   run("UPDATE plans SET status = ?, comment = ?, decided = ? WHERE id = ?", approve ? "approved" : "changes_requested", comment, now(), p.id);
   drafts.forEach((c, i) => run("UPDATE plan_comments SET status = 'sent', n = ?, sent = ? WHERE id = ?", i + 1, now(), c.id));
+  let harnessNote = "";
   if (approve) {
     const plan = JSON.parse(row.json);
+    const choices = harnessChoices(row.run_id);
+    const byHarness = {};
     for (const story of plan.stories || []) for (const t of story.tasks || []) {
-      run("INSERT OR REPLACE INTO tasks (run_id, id, story_id, title, status, worker_id, note, updated) VALUES (?, ?, ?, ?, 'todo', NULL, NULL, ?)", row.run_id, t.id, story.id, t.title, now());
+      const h = taskHarness(choices, t);
+      (byHarness[h] ||= []).push(t.id);
+      run("INSERT OR REPLACE INTO tasks (run_id, id, story_id, title, status, worker_id, note, updated, harness) VALUES (?, ?, ?, ?, 'todo', NULL, NULL, ?, ?)", row.run_id, t.id, story.id, t.title, now(), h);
+    }
+    if (Object.keys(byHarness).some((h) => h !== DEFAULT_HARNESS)) {
+      harnessNote = `\n\nHarness per task (the coding agent each task must run on): ${Object.entries(byHarness).map(([h, ids]) => `${HARNESSES[h].name}: ${ids.join(", ")}`).join("; ")}. A worker runs on one harness: give each worker only tasks of one harness and pass that harness to redplan_spawn_worker.`;
     }
   }
   touchRun(row.run_id, approve ? "approved" : "planning");
   const notes = drafts.length ? `\n\nComments from the plan page (${drafts.length}), each pointing at a place in plan v${row.version}:\n${feedbackText(drafts)}` : "";
   addMessage(row.run_id, "human", "ceo", "decision", approve
-    ? `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""}${drafts.length ? `${notes}\n\nKeep these notes in mind while executing (put them in the relevant workers' briefs).` : ""} Start execution: form the team and spawn workers.`
+    ? `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""}${drafts.length ? `${notes}\n\nKeep these notes in mind while executing (put them in the relevant workers' briefs).` : ""}${harnessNote} Start execution: form the team and spawn workers.`
     : `Plan v${row.version}: CHANGES REQUESTED.${comment ? `\nOverall: ${comment}` : ""}${notes}\n\nRevise the plan and submit a new version with redplan_submit_plan. Address every numbered comment and say how in the plan's "changes" list (one line per comment, starting with its number, e.g. "#1 …"). If a comment is a question, answer it there too; if a comment is unclear, ask the human here before resubmitting.`);
   notify(row.run_id, "plan");
   return planView(one("SELECT * FROM plans WHERE id = ?", p.id));
@@ -482,9 +530,13 @@ route("POST", "/api/runs/:id/workers", (b, p) => {
   if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
   if (!b.name || !b.role || !b.cwd) throw httpError(400, "name, role, and cwd are required");
   if (one("SELECT id FROM workers WHERE run_id = ? AND name = ?", p.id, b.name)) throw httpError(409, `a worker named ${b.name} already exists in this run`);
+  const harness = b.harness ? String(b.harness) : DEFAULT_HARNESS;
+  if (!HARNESS_IDS.includes(harness)) throw httpError(400, `harness must be one of ${HARNESS_IDS.join(", ")}`);
+  const mismatched = all("SELECT id, harness FROM tasks WHERE run_id = ?", p.id).filter((t) => (b.taskIds || []).map(String).includes(t.id) && t.harness !== harness);
+  if (mismatched.length) throw httpError(400, `a worker runs on one harness: ${mismatched.map((t) => `${t.id} is set to ${HARNESSES[t.harness]?.name || t.harness}`).join(", ")}, not ${HARNESSES[harness].name}`);
   const id = shortId("wkr");
-  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?)`,
-    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now());
+  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated, harness) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)`,
+    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now(), harness);
   for (const t of b.taskIds || []) run("UPDATE tasks SET worker_id = ?, updated = ? WHERE run_id = ? AND id = ?", id, now(), p.id, String(t));
   if (b.brief) addMessage(p.id, "ceo", id, "brief", b.brief);
   touchRun(p.id, "executing");
