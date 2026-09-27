@@ -78,14 +78,36 @@ if (bad.status !== 400 || !bad.body.errors?.length) fail("invalid plan accepted"
 const v1 = await api("POST", `/api/runs/${runId}/plans`, { plan });
 if (v1.status !== 200 || v1.body.version !== 1 || v1.body.schedule.duration !== 12) fail("plan v1 not stored", v1.body);
 
+// Review comments: drafts anchored to text or a diagram spot, sent to the CEO as one numbered message.
+if ((await api("POST", `/api/plans/${v1.body.id}/decision`, { decision: "changes" })).status !== 400) fail("empty change request accepted");
+const c1 = await api("POST", `/api/plans/${v1.body.id}/comments`, { anchor: { kind: "text", tab: "stories", target: "task:T2", label: "Stories & tasks › Task T2 · Agent", prefix: "" }, quote: "Deep agent", body: "Use LangGraph instead" });
+const c2 = await api("POST", `/api/plans/${v1.body.id}/comments`, { anchor: { kind: "pin", tab: "architecture", diagram: "arch", x: 1.7, y: 0.25, target: "component:api", label: "Architecture diagram › API (service)" }, body: "Split this into two services" });
+const c3 = await api("POST", `/api/plans/${v1.body.id}/comments`, { anchor: { kind: "text", tab: "overview", target: "summary", label: "Summary" }, quote: "support chat", body: "typo" });
+if (c1.status !== 200 || c2.body.anchor.x !== 1 || c2.body.status !== "draft") fail("comment not stored or pin position not clamped", c2.body);
+if ((await api("POST", `/api/plans/${v1.body.id}/comments`, { body: " " })).status !== 400) fail("empty comment accepted");
+await api("PATCH", `/api/plans/${v1.body.id}/comments/${c1.body.id}`, { body: "Use LangGraph instead of a hand-rolled loop" });
+await api("DELETE", `/api/plans/${v1.body.id}/comments/${c3.body.id}`);
+const withComments = (await api("GET", `/api/plans/${v1.body.id}`)).body;
+if (withComments.comments.length !== 2 || withComments.comments[0].body !== "Use LangGraph instead of a hand-rolled loop") fail("comment edit/delete wrong", withComments.comments);
 const changes = await api("POST", `/api/plans/${v1.body.id}/decision`, { decision: "changes", comment: "use Postgres" });
 if (changes.body.status !== "changes_requested") fail("changes decision not recorded", changes.body);
 let inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
-if (!inbox.some((m) => m.kind === "decision" && m.body.includes("use Postgres"))) fail("CEO did not receive the change request", inbox);
+const req = inbox.find((m) => m.kind === "decision");
+if (!req || !req.body.includes("use Postgres") || !req.body.includes('#1 [Stories & tasks › Task T2 · Agent] on "Deep agent": Use LangGraph instead of a hand-rolled loop')
+  || !req.body.includes("#2 [Architecture diagram › API (service)]: Split this into two services") || !req.body.includes('"changes"')) fail("CEO did not receive the numbered, anchored comments", req?.body);
+if ((await api("POST", `/api/plans/${v1.body.id}/comments`, { body: "late" })).status !== 409) fail("comment accepted on a decided plan");
+if ((await api("DELETE", `/api/plans/${v1.body.id}/comments/${c1.body.id}`)).status !== 409) fail("sent comment deleted");
+if ((await api("POST", `/api/runs/${runId}/plans`, { plan: { ...plan, changes: "not a list" } })).status !== 400) fail("bad changes list accepted");
 
-const v2 = await api("POST", `/api/runs/${runId}/plans`, { plan });
+const v2 = await api("POST", `/api/runs/${runId}/plans`, { plan: { ...plan, changes: ["#1 Agent now uses LangGraph", "#2 API split into auth and chat"] } });
+const v2view = (await api("GET", `/api/plans/${v2.body.id}`)).body;
+if (v2view.previous?.version !== 1 || v2view.previous.comments.map((c) => c.n).join() !== "1,2" || v2view.plan.changes.length !== 2) fail("new version does not show the previous comments and changes", v2view.previous);
+if ((await api("GET", `/api/plans/${v1.body.id}`)).body.latestId !== v2.body.id) fail("old version does not link to the latest");
+await api("POST", `/api/plans/${v2.body.id}/comments`, { anchor: { kind: "text", tab: "tech", target: "tech:deepagents", label: "Tech stack › Deep Agents" }, quote: "deepagents", body: "Pin the version" });
 const approved = await api("POST", `/api/plans/${v2.body.id}/decision`, { decision: "approve" });
 if (approved.body.status !== "approved") fail("approve not recorded");
+inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
+if (!inbox.some((m) => m.kind === "decision" && m.body.includes("APPROVED") && m.body.includes("#1 [Tech stack › Deep Agents]") && m.body.includes("Keep these notes in mind"))) fail("approval did not carry the notes");
 if ((await api("POST", `/api/plans/${v2.body.id}/decision`, { decision: "approve" })).status !== 409) fail("double decision allowed");
 let state = (await api("GET", `/api/runs/${runId}`)).body;
 if (state.tasks.length !== 4 || state.run.status !== "approved") fail("approval did not create tasks", state.run);
@@ -206,5 +228,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in, plan review comments.");
 cleanup();

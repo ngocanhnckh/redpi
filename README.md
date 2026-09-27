@@ -381,7 +381,16 @@ The Pi session you type this into becomes the **CEO**. It works in four phases:
 
 ### The plan page
 
-RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status. **Approve** or **Request changes** there; your comment goes straight back to the CEO, which revises and submits a new version.
+RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status.
+
+**Review it like a document.**
+
+- **Highlight** any text (a task, an acceptance criterion, the summary, a tech choice) and click **💬 Comment**.
+- On the timeline and architecture tabs, press **💬 Comment on diagram** and click anywhere on the Gantt chart or the architecture to drop a numbered comment bubble. RedPi records what you clicked on (for example "Architecture diagram › Support agent" or "Gantt chart › T3 · React widget").
+- Comments are saved as drafts as you go, listed in the side panel (click one to jump to it, ✎ to edit or delete), and counted on each tab.
+- When you are done, click **Send feedback**: the CEO session in your terminal receives one message with every comment numbered and anchored to its place, revises the plan, and submits a new version. The terminal shows "HQ: plan feedback received", and you can keep chatting with the CEO there as usual.
+- The new version opens with **What changed since v1**, one line per comment (`#1 …`), and your earlier comments beside it.
+- **Approve** (optionally "with N notes", which go to the CEO as guidance for the workers) starts execution.
 
 ### RedPi HQ dashboard
 
@@ -861,6 +870,7 @@ Smoke coverage includes:
 - automatic subagents: on by default in the agent's system prompt, and the `/redpi-config` switch reaches the next request
 - smoke tests run in a temporary Pi agent directory and never touch `~/.pi/agent`
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
+- Plan review (headless Chromium): text highlights, pins on the architecture and Gantt diagrams, edit, send feedback → one numbered, anchored message to the CEO; the next version shows what changed and the earlier comments; phone layout
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder

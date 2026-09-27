@@ -1,94 +1,301 @@
 import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
+import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
-let tab = sessionStorage.getItem("redplan-tab") || "stories";
-let data;
+const TABS = [["stories", "Stories & tasks"], ["timeline", "Timeline & critical path"], ["architecture", "Architecture"], ["tech", "Tech stack"], ["risks", "Risks & notes"]];
+const TAB_NAME = { ...Object.fromEntries(TABS), overview: "Overview" };
+const DIAGRAM_NAME = { gantt: "Gantt chart", arch: "Architecture diagram" };
+const store = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, v); } catch {} } };
+let tab = store.get("redplan-tab") || "stories";
+let data, pinMode = null, selection = null, reloadLater = false, overall = store.get(`redplan-overall-${planId}`) || "";
+const openStories = new Set();
 
+// Live updates never yank the page out from under a comment being written or a selection.
 async function load() {
+  if (composerOpen() || selection) { reloadLater = true; return; }
   try {
-    data = await api("GET", `/api/plans/${planId}`);
-    data.runState = await api("GET", `/api/runs/${data.runId}`);
-    render();
+    const next = await api("GET", `/api/plans/${planId}`);
+    next.runState = await api("GET", `/api/runs/${next.runId}`);
+    // Most live events are about workers or chat: only redraw when this page would change.
+    const key = (d) => JSON.stringify([d.status, d.comment, d.comments, d.latestVersion, d.previous, d.runState.plans, d.runState.run.status]);
+    const same = data && key(data) === key(next);
+    data = next;
+    if (!same) render();
   } catch (e) {
     app.innerHTML = `<div class="error-box">Could not load plan: ${esc(e.message)}</div>`;
   }
 }
+onComposerClose(() => { if (reloadLater && !selection) { reloadLater = false; setTimeout(load, 0); } });
+
+const reviewing = () => data.status === "pending" && data.version === data.latestVersion;
+const numbered = () => data.comments.map((c, i) => ({ ...c, num: c.n || i + 1 }));
 
 function render() {
   const { plan, schedule, warnings, project, run, runState } = data;
   document.title = `${plan.title} · RedPlan`;
   document.getElementById("crumbs").innerHTML = `<a href="/runs/${esc(run.id)}">${esc(project.name)} · ${esc(run.title)}</a>`;
   const tasks = plan.stories.flatMap((s) => s.tasks);
-  const pending = data.status === "pending" && data.version === data.latestVersion;
+  const pending = reviewing();
+  if (!document.querySelector("details.story")) { if (!openStories.size && plan.stories[0]) openStories.add(plan.stories[0].id); }
   app.innerHTML = `
     <section class="hero">
-      <div>
+      <div data-anchor="overview" data-label="Overview">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${pill(data.status)}<span class="muted mono">v${data.version}</span><span class="muted mono" title="${esc(project.path)}">${esc(project.path)}</span></div>
-        <h1>${esc(plan.title)}</h1>
-        <p class="summary">${esc(plan.summary)}</p>
-        ${plan.goal ? `<p class="muted"><b>Goal:</b> ${esc(plan.goal)}</p>` : ""}
-        <div class="stats" style="margin-top:16px">
+        <h1 data-anchor="title" data-label="Title">${esc(plan.title)}</h1>
+        <p class="summary" data-anchor="summary" data-label="Summary">${esc(plan.summary)}</p>
+        ${plan.goal ? `<p class="muted" data-anchor="goal" data-label="Goal"><b>Goal:</b> ${esc(plan.goal)}</p>` : ""}
+        ${(plan.changes || []).length && data.previous ? `<div class="panel changes" style="margin-top:14px" data-anchor="changes" data-label="What changed"><div class="panel-head"><h2>What changed since v${data.previous.version}</h2><span class="pill cyan">${plan.changes.length}</span></div><div class="panel-body"><ul class="changes-list">${plan.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></div></div>` : ""}
+        <div class="stats no-annotate" style="margin-top:16px">
           <div class="panel stat"><div class="v">${hours(schedule.duration)}</div><div class="k">Critical path (wall clock)</div></div>
           <div class="panel stat"><div class="v">${hours(schedule.totalHours)}</div><div class="k">Total effort</div></div>
           <div class="panel stat"><div class="v">${schedule.maxParallel}×</div><div class="k">Max parallel tasks</div></div>
           <div class="panel stat"><div class="v">${plan.stories.length} / ${tasks.length}</div><div class="k">Stories / tasks</div></div>
         </div>
-        ${warnings.length ? `<div class="panel" style="margin-top:14px"><div class="panel-head"><h2>Needs attention</h2><span class="pill amber">${warnings.length}</span></div><div class="panel-body"><ul class="warn-list">${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div></div>` : ""}
+        ${warnings.length ? `<div class="panel" style="margin-top:14px" data-anchor="warnings" data-label="Needs attention"><div class="panel-head"><h2>Needs attention</h2><span class="pill amber">${warnings.length}</span></div><div class="panel-body"><ul class="warn-list">${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div></div>` : ""}
       </div>
-      <aside class="panel decision">
-        <div class="panel-head"><h2>Your decision</h2>${pill(data.status)}</div>
-        <div class="panel-body">
-          ${pending ? `
-            <p class="muted" style="margin:0">Approve to let the CEO session form the team and start the workers. Or ask for changes: the plan comes back as a new version.</p>
-            <textarea id="comment" placeholder="Comment (required for changes, optional for approval)"></textarea>
-            <div class="row"><button class="btn primary" id="approve">Approve plan</button><button class="btn danger" id="changes">Request changes</button></div>`
-          : data.status === "approved" ? `<p style="margin:0">Approved${data.comment ? `: <i>${esc(data.comment)}</i>` : "."} <a href="/runs/${esc(run.id)}">Watch execution →</a></p>`
-          : data.status === "changes_requested" ? `<p style="margin:0">You asked for changes: <i>${esc(data.comment || "")}</i></p>`
-          : `<p class="muted" style="margin:0">A newer version of this plan exists.</p>`}
-          <div class="versions">${runState.plans.map((p) => `<a class="${p.id === data.id ? "cur" : ""}" href="/plans/${esc(p.id)}">v${p.version}</a>`).join("")}</div>
-        </div>
-      </aside>
+      <aside class="panel decision no-annotate">${decisionPanel(pending, run, runState)}</aside>
     </section>
     <nav class="tabs" role="tablist">
-      ${[["stories", "Stories & tasks"], ["timeline", "Timeline & critical path"], ["architecture", "Architecture"], ["tech", "Tech stack"], ["risks", "Risks & notes"]]
-        .map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${tab === k}">${l}</button>`).join("")}
+      ${TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${tab === k}">${l}${tabCount(k)}</button>`).join("")}
     </nav>
-    <section id="tab-body"></section>`;
-  app.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { tab = b.dataset.tab; sessionStorage.setItem("redplan-tab", tab); render(); });
-  if (pending) {
-    const decide = async (decision) => {
-      const comment = document.getElementById("comment").value.trim();
-      if (decision === "changes" && !comment) return toast("Say what should change");
-      try { await api("POST", `/api/plans/${planId}/decision`, { decision, comment }); toast(decision === "approve" ? "Approved: the CEO is starting the team" : "Sent back for changes"); load(); }
-      catch (e) { toast(e.message); }
-    };
-    document.getElementById("approve").onclick = () => decide("approve");
-    document.getElementById("changes").onclick = () => decide("changes");
-  }
+    <section id="tab-body" data-anchor="tab:${tab}" data-label="${esc(TAB_NAME[tab])}"></section>`;
+  app.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
+  wireDecision(pending);
   const body = document.getElementById("tab-body");
   if (tab === "stories") body.innerHTML = storiesView(plan, schedule);
-  if (tab === "timeline") { body.innerHTML = timelineView(plan, schedule); drawGantt(plan, schedule); }
-  if (tab === "architecture") { body.innerHTML = `<div class="panel"><div class="panel-head"><h2>Architecture</h2></div><div class="panel-body" id="arch"></div></div>`; drawArchitecture(plan.architecture); }
+  if (tab === "timeline") { body.innerHTML = timelineView(plan, schedule, pending); drawGantt(plan, schedule); }
+  if (tab === "architecture") { body.innerHTML = `<div class="panel"><div class="panel-head"><h2>Architecture</h2>${pending ? pinButton("arch") : ""}</div><div class="panel-body" id="arch"></div></div>`; drawArchitecture(plan.architecture); }
   if (tab === "tech") body.innerHTML = techView(plan.techStack || []);
   if (tab === "risks") body.innerHTML = risksView(plan);
+  body.querySelectorAll("details.story").forEach((d) => {
+    d.open = openStories.has(d.dataset.story);
+    d.addEventListener("toggle", () => { if (d.open) openStories.add(d.dataset.story); else openStories.delete(d.dataset.story); });
+  });
+  wirePins();
+  applyAnnotations();
 }
+
+function switchTab(k) { tab = k; store.set("redplan-tab", tab); pinMode = null; render(); }
+
+function tabCount(k) {
+  const n = data.comments.filter((c) => c.anchor.tab === k).length;
+  return n ? ` <span class="tab-count" aria-label="${n} comments">${n}</span>` : "";
+}
+
+const pinButton = (diagram) => `<button class="btn pin-toggle" type="button" data-pin="${diagram}" aria-pressed="${pinMode === diagram}">${pinMode === diagram ? "Done commenting" : "💬 Comment on diagram"}</button>`;
+
+// ---------- the review panel ----------
+function commentItem(c, editable) {
+  return `<li class="fb-item ${c.status}" data-cid="${c.id}">
+    <button class="fb-jump" type="button" data-jump="${c.id}" aria-label="Show comment ${c.num} in the plan"><span class="num">${c.num}</span>
+      <span class="fb-text"><span class="fb-where">${esc(c.anchor.label || "Plan")}</span>
+      ${c.quote ? `<span class="fb-quote">“${esc(c.quote.replace(/\s+/g, " ").slice(0, 120))}”</span>` : ""}
+      <span class="fb-body">${esc(c.body)}</span></span></button>
+    ${editable ? `<button class="icon-btn" type="button" data-edit="${c.id}" aria-label="Edit comment ${c.num}">✎</button>` : ""}
+  </li>`;
+}
+
+function decisionPanel(pending, run, runState) {
+  const list = numbered();
+  const drafts = list.filter((c) => c.status === "draft");
+  const prev = data.previous;
+  const versions = `<div class="versions">${runState.plans.map((p) => `<a class="${p.id === data.id ? "cur" : ""}" href="/plans/${esc(p.id)}">v${p.version}</a>`).join("")}</div>`;
+  const prevBlock = prev?.comments.length ? `<details class="prev-fb"><summary>Your ${prev.comments.length} comment${prev.comments.length === 1 ? "" : "s"} on v${prev.version}</summary>
+    <a href="/plans/${esc(prev.id)}" style="font-size:12px">Open v${prev.version} with its highlights →</a>
+    <ol class="fb-list" style="margin-top:8px">${prev.comments.map((c) => `<li class="fb-item sent"><span class="num">${c.n}</span><span class="fb-text"><span class="fb-where">${esc(c.anchor.label || "Plan")}</span><span class="fb-body">${esc(c.body)}</span></span></li>`).join("")}</ol></details>` : "";
+  if (pending) return `
+    <div class="panel-head"><h2>Review</h2>${pill(data.status)}</div>
+    <div class="panel-body">
+      <p class="muted" style="margin:0 0 10px">Highlight any text, or use <b>💬 Comment on diagram</b> on the timeline and architecture, to leave comments. Then send them to the CEO in one go: it revises the plan and a new version appears here. You can keep chatting with it in the terminal too.</p>
+      ${list.length ? `<ol class="fb-list">${list.map((c) => commentItem(c, true)).join("")}</ol>` : `<div class="fb-empty">No comments yet. Select some text in the plan to start.</div>`}
+      <label class="fb-overall">Overall comment <span class="faint">(optional)</span>
+        <textarea id="comment" placeholder="Anything that is not about one spot">${esc(overall)}</textarea></label>
+      <div class="row">
+        <button class="btn primary" id="send" ${drafts.length || overall.trim() ? "" : "disabled"}>Send feedback${drafts.length ? ` (${drafts.length})` : ""}</button>
+        <button class="btn" id="approve">${drafts.length ? `Approve with ${drafts.length} note${drafts.length === 1 ? "" : "s"}` : "Approve plan"}</button>
+      </div>
+      ${prevBlock}${versions}
+    </div>`;
+  const sent = list.filter((c) => c.status === "sent");
+  const latest = data.version !== data.latestVersion ? `<p style="margin:0 0 8px">A newer version exists: <a href="/plans/${esc(data.latestId)}">open v${data.latestVersion} →</a></p>` : "";
+  const status = data.status === "approved" ? `<p style="margin:0">Approved${data.comment ? `: <i>${esc(data.comment)}</i>` : "."} <a href="/runs/${esc(run.id)}">Watch execution →</a></p>`
+    : data.status === "changes_requested" ? `<p style="margin:0">You asked for changes${data.comment ? `: <i>${esc(data.comment)}</i>` : "."}${data.version === data.latestVersion ? ` <span class="muted">The CEO is revising the plan; the new version appears here.</span>` : ""}</p>`
+    : `<p class="muted" style="margin:0">A newer version of this plan exists.</p>`;
+  return `<div class="panel-head"><h2>Your decision</h2>${pill(data.status)}</div>
+    <div class="panel-body">${latest}${status}
+      ${sent.length ? `<div class="section-title" style="margin-top:12px">Comments sent</div><ol class="fb-list">${sent.map((c) => commentItem(c, false)).join("")}</ol>` : ""}
+      ${prevBlock}${versions}</div>`;
+}
+
+function wireDecision(pending) {
+  document.querySelectorAll("[data-jump]").forEach((b) => b.onclick = () => jumpTo(Number(b.dataset.jump)));
+  document.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => editComment(Number(b.dataset.edit), b.getBoundingClientRect()));
+  if (!pending) return;
+  const text = document.getElementById("comment"), send = document.getElementById("send");
+  const drafts = () => data.comments.filter((c) => c.status === "draft").length;
+  text.oninput = () => { overall = text.value; store.set(`redplan-overall-${planId}`, overall); send.disabled = !drafts() && !overall.trim(); };
+  const decide = async (decision) => {
+    closeComposer();
+    const n = drafts();
+    if (decision === "changes" && !n && !overall.trim()) return toast("Add a comment first");
+    try {
+      await api("POST", `/api/plans/${planId}/decision`, { decision, comment: overall.trim() });
+      overall = ""; store.set(`redplan-overall-${planId}`, "");
+      toast(decision === "approve" ? "Approved: the CEO is starting the team" : `Sent ${n ? `${n} comment${n === 1 ? "" : "s"}` : "your feedback"} to the CEO. It is revising the plan.`);
+      load();
+    } catch (e) { toast(e.message); }
+  };
+  send.onclick = () => decide("changes");
+  document.getElementById("approve").onclick = () => decide("approve");
+}
+
+// ---------- annotations in the page ----------
+function applyAnnotations() {
+  const list = numbered();
+  const tabBody = document.getElementById("tab-body"), hero = app.querySelector(".hero > div");
+  for (const c of list) {
+    const a = c.anchor;
+    if (a.kind === "pin") {
+      if (a.tab !== tab) continue;
+      const host = app.querySelector(`.diagram[data-diagram="${CSS.escape(a.diagram || "")}"]`);
+      if (!host) continue;
+      const pin = document.createElement("button");
+      pin.type = "button";
+      pin.className = `pin ${c.status}`;
+      pin.dataset.cid = c.id;
+      pin.style.left = `${(a.x ?? 0.5) * 100}%`;
+      pin.style.top = `${(a.y ?? 0.5) * 100}%`;
+      pin.textContent = c.num;
+      pin.title = c.body;
+      pin.setAttribute("aria-label", `Comment ${c.num}: ${c.body}`);
+      host.appendChild(pin);
+      continue;
+    }
+    const scope = a.tab === "overview" ? hero : a.tab === tab ? tabBody : null;
+    if (!scope) continue;
+    const el = [...(scope.matches(`[data-anchor="${CSS.escape(a.target || "")}"]`) ? [scope] : []), ...scope.querySelectorAll(`[data-anchor="${CSS.escape(a.target || "")}"]`)].find((e) => !e.closest("svg"));
+    const marks = el ? highlight(el, c.quote, a.prefix, { class: `anno ${c.status}`, "data-cid": String(c.id) }) : [];
+    if (!marks.length) { document.querySelector(`.fb-item[data-cid="${c.id}"]`)?.classList.add("orphan"); continue; }
+    const badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = `anno-badge ${c.status}`;
+    badge.dataset.cid = c.id;
+    badge.textContent = c.num;
+    badge.setAttribute("aria-label", `Comment ${c.num}: ${c.body}`);
+    marks.at(-1).after(badge);
+  }
+}
+
+app.addEventListener("click", (e) => {
+  const hit = e.target.closest("mark.anno, .anno-badge, .pin");
+  if (hit && !pinMode && getSelection()?.isCollapsed !== false) { e.preventDefault(); e.stopPropagation(); editComment(Number(hit.dataset.cid), hit.getBoundingClientRect()); }
+}, true);
+
+async function editComment(id, rect) {
+  const c = numbered().find((x) => x.id === id);
+  if (!c) return;
+  const draft = c.status === "draft" && reviewing();
+  const v = await compose({ rect, where: `#${c.num} · ${c.anchor.label || "Plan"}`, quote: c.quote, value: c.body, readOnly: !draft,
+    onDelete: draft ? async () => { try { await api("DELETE", `/api/plans/${planId}/comments/${id}`); data.comments = data.comments.filter((x) => x.id !== id); render(); } catch (e) { toast(e.message); } } : undefined });
+  if (!v || !draft || v === c.body) return;
+  try { const u = await api("PATCH", `/api/plans/${planId}/comments/${id}`, { body: v }); data.comments = data.comments.map((x) => (x.id === id ? u : x)); render(); } catch (e) { toast(e.message); }
+}
+
+async function addComment(anchor, quote, rect) {
+  const body = await compose({ rect, where: anchor.label, quote });
+  if (!body) return;
+  try { data.comments.push(await api("POST", `/api/plans/${planId}/comments`, { anchor, quote, body })); render(); toast("Comment added. Send feedback when you are done."); }
+  catch (e) { toast(e.message); }
+}
+
+function jumpTo(id) {
+  const c = data.comments.find((x) => x.id === id);
+  if (!c) return;
+  if (c.anchor.tab && c.anchor.tab !== "overview" && c.anchor.tab !== tab) switchTab(c.anchor.tab);
+  const el = app.querySelector(`.anno-badge[data-cid="${id}"], .pin[data-cid="${id}"]`);
+  if (!el) return toast(c.anchor.kind === "text" ? "That text is not in this version any more" : "Pin not found");
+  const story = el.closest("details.story");
+  if (story && !story.open) story.open = true;
+  el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  app.querySelectorAll(`[data-cid="${id}"]`).forEach((m) => { m.classList.remove("flash"); void m.offsetWidth; m.classList.add("flash"); });
+}
+
+// Selecting text in the plan offers a "Comment" button next to the selection.
+const selBtn = document.createElement("button");
+selBtn.type = "button";
+selBtn.className = "sel-btn btn primary";
+selBtn.textContent = "💬 Comment";
+selBtn.hidden = true;
+document.body.appendChild(selBtn);
+selBtn.addEventListener("mousedown", (e) => e.preventDefault()); // keep the selection
+selBtn.addEventListener("click", () => {
+  const s = selection;
+  hideSel();
+  getSelection()?.removeAllRanges();
+  if (!s) return;
+  const inHero = !!s.el.closest(".hero");
+  const t = inHero ? "overview" : tab;
+  const label = s.el.id === "tab-body" || s.el.dataset.anchor === "overview" ? TAB_NAME[t] : `${TAB_NAME[t]} › ${s.el.dataset.label || s.el.dataset.anchor}`;
+  addComment({ kind: "text", tab: t, target: s.el.dataset.anchor, label, prefix: s.prefix }, s.quote, s.rect);
+});
+function hideSel() {
+  selBtn.hidden = true;
+  selection = null;
+  if (reloadLater && !composerOpen()) { reloadLater = false; setTimeout(load, 0); }
+}
+let selTimer;
+function checkSelection() {
+  clearTimeout(selTimer);
+  selTimer = setTimeout(() => {
+    if (!data || !reviewing() || composerOpen()) return;
+    const s = readSelection(app);
+    if (!s) return hideSel();
+    selection = s;
+    selBtn.hidden = false;
+    const w = selBtn.offsetWidth, h = selBtn.offsetHeight;
+    selBtn.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, s.rect.right - w / 2))}px`;
+    selBtn.style.top = `${s.rect.bottom + 8 + h < innerHeight ? s.rect.bottom + 8 : Math.max(8, s.rect.top - h - 8)}px`;
+  }, 120);
+}
+document.addEventListener("selectionchange", checkSelection);
+addEventListener("scroll", () => { if (selection) checkSelection(); }, { passive: true });
+
+// Diagram pins: in comment mode a click drops a numbered bubble where you clicked.
+function wirePins() {
+  app.querySelectorAll("[data-pin]").forEach((b) => b.onclick = () => { pinMode = pinMode === b.dataset.pin ? null : b.dataset.pin; render(); if (pinMode) toast("Click anywhere on the diagram to pin a comment"); });
+  app.querySelectorAll(".diagram").forEach((host) => {
+    const on = pinMode === host.dataset.diagram;
+    host.classList.toggle("pinning", on);
+    if (!on) return;
+    host.onclick = (e) => {
+      if (e.target.closest(".pin")) return;
+      const svg = host.querySelector("svg");
+      const r = host.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+      const t = pinTarget(svg, e);
+      const label = `${DIAGRAM_NAME[host.dataset.diagram]}${t.label ? ` › ${t.near ? "near " : ""}${t.label}` : ""}`;
+      addComment({ kind: "pin", tab, diagram: host.dataset.diagram, x, y, target: t.target, label }, null, { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY });
+    };
+  });
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinMode && !composerOpen()) { pinMode = null; render(); } });
 
 function storiesView(plan, schedule) {
   const crit = new Set(schedule.criticalPath);
   return plan.stories.map((s, i) => {
     const hrs = s.tasks.reduce((n, t) => n + Number(t.estimateHours), 0);
     const onCrit = s.tasks.some((t) => crit.has(t.id));
-    return `<details class="panel story" ${i === 0 ? "open" : ""}>
+    return `<details class="panel story" data-story="${esc(s.id)}" data-anchor="story:${esc(s.id)}" data-label="${esc(`Story ${s.id} · ${s.title}`)}">
       <summary><span class="chev">›</span>
         <span><span class="sid">${esc(s.id)}</span> <span class="story-title">${esc(s.title)}</span><div class="user-story">${esc(s.userStory)}</div></span>
         <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${onCrit ? `<span class="pill red">critical path</span>` : ""}${(s.dependsOn || []).length ? `<span class="pill">after ${esc(s.dependsOn.join(", "))}</span>` : ""}<span class="pill">${s.tasks.length} tasks · ${hours(hrs)}</span></span>
       </summary>
       <div class="story-body">
         ${s.description ? `<p style="margin:0 0 8px">${esc(s.description)}</p>` : ""}
-        ${(s.acceptance || []).length ? `<div class="section-title">Acceptance</div><ul class="acc">${s.acceptance.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}
+        ${(s.acceptance || []).length ? `<div class="section-title">Acceptance</div><ul class="acc">${s.acceptance.map((a, ai) => `<li data-anchor="acc:${esc(s.id)}:${ai}" data-label="${esc(`Story ${s.id} · acceptance ${ai + 1}`)}">${esc(a)}</li>`).join("")}</ul>` : ""}
         ${s.tasks.map((t) => { const st = schedule.tasks[t.id]; return `
-          <div class="task ${st.critical ? "crit" : ""}">
+          <div class="task ${st.critical ? "crit" : ""}" data-anchor="task:${esc(t.id)}" data-label="${esc(`Task ${t.id} · ${t.title}`)}">
             <div class="tid">${esc(t.id)}</div>
             <div><div class="tt">${esc(t.title)}</div><div class="td">${esc(t.description)}</div>
               <div class="meta">${t.tech ? `<span class="pill cyan">${esc(t.tech)}</span>` : ""}${t.suggestedRole ? `<span class="pill">${esc(t.suggestedRole)}</span>` : ""}${st.deps.length ? `<span class="pill">needs ${esc(st.deps.join(", "))}</span>` : `<span class="pill green">can start now</span>`}${st.critical ? `<span class="pill red">critical</span>` : `<span class="pill">slack ${hours(st.slack)}</span>`}</div></div>
@@ -98,18 +305,18 @@ function storiesView(plan, schedule) {
   }).join("");
 }
 
-function timelineView(plan, schedule) {
+function timelineView(plan, schedule, pending) {
   const names = Object.fromEntries(plan.stories.flatMap((s) => s.tasks.map((t) => [t.id, t.title])));
   return `
-    <div class="panel"><div class="panel-head"><h2>Gantt</h2><span class="muted mono">${hours(schedule.duration)} wall clock · ${hours(schedule.totalHours)} effort</span></div>
+    <div class="panel"><div class="panel-head"><h2>Gantt</h2><span class="muted mono" style="margin-right:auto">${hours(schedule.duration)} wall clock · ${hours(schedule.totalHours)} effort</span>${pending ? pinButton("gantt") : ""}</div>
       <div class="panel-body"><div class="legend"><span><i style="background:var(--red)"></i>critical path</span><span><i style="background:var(--green-dim)"></i>has slack</span><span><i style="border-top:1px dashed var(--faint);height:0"></i>slack (can slip without delaying the project)</span></div>
-      <div class="gantt-wrap" id="gantt"></div></div></div>
+      <div class="gantt-wrap"><div class="diagram" data-diagram="gantt" id="gantt"></div></div></div></div>
     <div class="stats" style="margin-top:14px">
-      <div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Critical path</h2><span class="pill red">${schedule.criticalPath.length} tasks</span></div>
+      <div class="panel" style="grid-column:1/-1" data-anchor="critical-path" data-label="Critical path"><div class="panel-head"><h2>Critical path</h2><span class="pill red">${schedule.criticalPath.length} tasks</span></div>
         <div class="panel-body mono">${schedule.criticalPath.map((id) => `<span class="pill red" title="${esc(names[id])}">${esc(id)}</span>`).join(" → ")}</div></div>
-      <div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>What can run in parallel</h2><span class="muted">tasks that can start at the same time</span></div>
+      <div class="panel" style="grid-column:1/-1" data-anchor="parallel" data-label="What can run in parallel"><div class="panel-head"><h2>What can run in parallel</h2><span class="muted">tasks that can start at the same time</span></div>
         <div class="panel-body waves">${schedule.waves.map((w) => `<div class="wave"><span class="mono muted">from h${w.start}</span><div class="chips">${w.tasks.map((id) => `<span class="pill ${schedule.tasks[id].critical ? "red" : "green"}">${esc(id)} · ${esc(names[id])}</span>`).join("")}</div></div>`).join("")}</div></div>
-      ${(plan.team || []).length ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Proposed team</h2></div><div class="panel-body waves">${plan.team.map((m) => `<div class="wave"><b>${esc(m.name)}</b><div><span class="muted">${esc(m.role)}</span><div class="chips" style="margin-top:4px">${(m.taskIds || []).map((id) => `<span class="pill">${esc(id)}</span>`).join("")}</div></div></div>`).join("")}</div></div>` : ""}
+      ${(plan.team || []).length ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Proposed team</h2></div><div class="panel-body waves">${plan.team.map((m) => `<div class="wave" data-anchor="team:${esc(m.name)}" data-label="${esc(`Proposed team · ${m.name}`)}"><b>${esc(m.name)}</b><div><span class="muted">${esc(m.role)}</span><div class="chips" style="margin-top:4px">${(m.taskIds || []).map((id) => `<span class="pill">${esc(id)}</span>`).join("")}</div></div></div>`).join("")}</div></div>` : ""}
     </div>`;
 }
 
@@ -125,12 +332,12 @@ function drawGantt(plan, schedule) {
   for (let x = 0; x <= schedule.duration; x += step) svg += `<line class="grid" x1="${labelW + x * scale}" x2="${labelW + x * scale}" y1="${top - 6}" y2="${h}"/>${(schedule.duration - x) * scale > 30 ? `<text x="${labelW + x * scale + 3}" y="14">h${x}</text>` : ""}`;
   rows.forEach((r, i) => {
     const y = top + i * rowH;
-    if (r.story) { svg += `<rect class="story-row" x="0" y="${y}" width="${labelW + chartW + 10}" height="${rowH}"/><text class="label" x="8" y="${y + 17}" style="font-weight:600">${esc(r.story.id)} · ${esc(trim(r.story.title, 34))}</text>`; return; }
+    if (r.story) { svg += `<g data-anchor="story:${esc(r.story.id)}" data-label="${esc(`Story ${r.story.id} · ${r.story.title}`)}"><rect class="story-row" x="0" y="${y}" width="${labelW + chartW + 10}" height="${rowH}"/><text class="label" x="8" y="${y + 17}" style="font-weight:600">${esc(r.story.id)} · ${esc(trim(r.story.title, 34))}</text></g>`; return; }
     const t = schedule.tasks[r.task.id];
     const x = labelW + t.es * scale, w = Math.max(3, t.hours * scale);
-    svg += `<text class="label" x="20" y="${y + 17}">${esc(r.task.id)} ${esc(trim(r.task.title, 32))}</text>`;
+    svg += `<g data-anchor="task:${esc(r.task.id)}" data-label="${esc(`${r.task.id} · ${r.task.title} (h${t.es}–h${t.ef})`)}"><rect class="row-hit" x="0" y="${y}" width="${labelW + chartW + 10}" height="${rowH}"/><text class="label" x="20" y="${y + 17}">${esc(r.task.id)} ${esc(trim(r.task.title, 32))}</text>`;
     if (!t.critical && t.slack > 0) svg += `<line class="slack" x1="${x + w}" x2="${x + w + t.slack * scale}" y1="${y + rowH / 2}" y2="${y + rowH / 2}"/>`;
-    svg += `<rect class="bar ${t.critical ? "crit" : ""}" x="${x}" y="${y + 6}" width="${w}" height="${rowH - 12}" rx="3"><title>${esc(r.task.id)} ${esc(r.task.title)}: h${t.es}–h${t.ef} (${hours(t.hours)})${t.critical ? ", critical" : `, slack ${hours(t.slack)}`}</title></rect>`;
+    svg += `<rect class="bar ${t.critical ? "crit" : ""}" x="${x}" y="${y + 6}" width="${w}" height="${rowH - 12}" rx="3"><title>${esc(r.task.id)} ${esc(r.task.title)}: h${t.es}–h${t.ef} (${hours(t.hours)})${t.critical ? ", critical" : `, slack ${hours(t.slack)}`}</title></rect></g>`;
   });
   el.innerHTML = svg + "</svg>";
 }
@@ -151,31 +358,33 @@ function drawArchitecture(arch) {
   cols.forEach((col, ci) => col.forEach((c, ri) => { pos[c.id] = { x: pad + ci * (W + gx), y: pad + ri * (H + gy) }; }));
   const width = pad * 2 + cols.length * W + (cols.length - 1) * gx;
   const height = pad * 2 + Math.max(...cols.map((c) => c.length)) * (H + gy) - gy;
-  let svg = `<div style="overflow-x:auto"><svg class="arch" width="${width}" height="${height}" role="img" aria-label="Architecture diagram"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
+  let svg = `<div style="overflow-x:auto"><div class="diagram" data-diagram="arch"><svg class="arch" width="${width}" height="${height}" role="img" aria-label="Architecture diagram"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
   for (const l of links) {
     const a = pos[l.from], b = pos[l.to];
     const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
     const d = x2 > x1 ? `M${x1},${y1} C${x1 + gx / 2},${y1} ${x2 - gx / 2},${y2} ${x2},${y2}` : `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${a.y + H + 40} ${b.x + W / 2},${b.y + H + 40} ${b.x + W / 2},${b.y + H}`;
-    svg += `<path class="edge" d="${d}" marker-end="url(#arr)"/>`;
+    const names = Object.fromEntries(comps.map((c) => [c.id, c.name]));
+    svg += `<g data-anchor="link:${esc(l.from)}>${esc(l.to)}" data-label="${esc(`${names[l.from]} → ${names[l.to]}${l.label ? ` (${l.label})` : ""}`)}"><path class="edge" d="${d}" marker-end="url(#arr)"/><path class="edge-hit" d="${d}"/>`;
     if (l.label) svg += `<text class="elabel" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 5}" text-anchor="middle">${esc(trim(l.label, 22))}</text>`;
+    svg += `</g>`;
   }
   for (const c of comps) {
     const p = pos[c.id], color = KIND_COLOR[String(c.kind || "").toLowerCase()] || "var(--green)";
-    svg += `<g><title>${esc(c.name)}${c.tech ? ` (${esc(c.tech)})` : ""}${c.description ? `: ${esc(c.description)}` : ""}</title>
+    svg += `<g data-anchor="component:${esc(c.id)}" data-label="${esc(`${c.name} (${c.kind || "component"})`)}"><title>${esc(c.name)}${c.tech ? ` (${esc(c.tech)})` : ""}${c.description ? `: ${esc(c.description)}` : ""}</title>
       <rect x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="8" fill="var(--panel-2)" stroke="${color}" stroke-width="1.5"/>
       <rect x="${p.x}" y="${p.y}" width="4" height="${H}" rx="2" fill="${color}"/>
       <text class="kind" x="${p.x + 14}" y="${p.y + 18}">${esc(String(c.kind || "").toUpperCase())}</text>
       <text x="${p.x + 14}" y="${p.y + 36}" style="font-weight:600">${esc(trim(c.name, 24))}</text>
       ${c.tech ? `<text class="kind" x="${p.x + 14}" y="${p.y + 53}">${esc(trim(c.tech, 28))}</text>` : ""}</g>`;
   }
-  el.innerHTML = svg + `</svg></div>${comps.some((c) => c.description) ? `<div class="tech" style="margin-top:14px">${comps.filter((c) => c.description).map((c) => `<div class="panel card"><b>${esc(c.name)}</b> <span class="muted mono">${esc(c.kind || "")}</span><div class="muted" style="font-size:13px;margin-top:4px">${esc(c.description)}</div></div>`).join("")}</div>` : ""}`;
+  el.innerHTML = svg + `</svg></div></div>${comps.some((c) => c.description) ? `<div class="tech" style="margin-top:14px">${comps.filter((c) => c.description).map((c) => `<div class="panel card" data-anchor="component:${esc(c.id)}" data-label="${esc(`${c.name} (${c.kind || "component"})`)}"><b>${esc(c.name)}</b> <span class="muted mono">${esc(c.kind || "")}</span><div class="muted" style="font-size:13px;margin-top:4px">${esc(c.description)}</div></div>`).join("")}</div>` : ""}`;
 }
 
 function techView(stack) {
   if (!stack.length) return `<div class="empty">No technologies listed.</div>`;
   return `<div class="tech">${stack.map((t) => {
     const ok = t.verified === true && /^https?:\/\//.test(t.source || "");
-    return `<div class="panel card">
+    return `<div class="panel card" data-anchor="tech:${esc(t.package)}" data-label="${esc(`${t.name} (${t.package})`)}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><div style="font-weight:600">${esc(t.name)}</div><div class="pkg">${esc(t.package)}${t.version ? `<span class="muted">@${esc(t.version)}</span>` : ""}</div></div>
         ${ok ? `<span class="pill green">verified</span>` : `<span class="pill amber">unverified</span>`}</div>
       <dl>
@@ -193,9 +402,9 @@ function risksView(plan) {
   const risks = plan.risks || [];
   const intake = plan.intake;
   return `<div class="stats">
-    ${intake ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>How this plan was made</h2><span class="pill">${intake.mode === "grilled" ? "questions asked first" : "request was already clear"}</span></div><div class="panel-body">${esc(intake.notes || "")}</div></div>` : ""}
-    <div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Risks</h2></div><div class="panel-body">${risks.length ? `<ul style="margin:0;padding-left:18px">${risks.map((r) => `<li>${esc(typeof r === "string" ? r : `${r.risk}${r.mitigation ? ` → ${r.mitigation}` : ""}`)}</li>`).join("")}</ul>` : `<span class="muted">None listed.</span>`}</div></div>
-    ${(plan.outOfScope || []).length ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Out of scope</h2></div><div class="panel-body"><ul style="margin:0;padding-left:18px">${plan.outOfScope.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div></div>` : ""}
+    ${intake ? `<div class="panel" style="grid-column:1/-1" data-anchor="intake" data-label="How this plan was made"><div class="panel-head"><h2>How this plan was made</h2><span class="pill">${intake.mode === "grilled" ? "questions asked first" : "request was already clear"}</span></div><div class="panel-body">${esc(intake.notes || "")}</div></div>` : ""}
+    <div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Risks</h2></div><div class="panel-body">${risks.length ? `<ul style="margin:0;padding-left:18px">${risks.map((r, ri) => `<li data-anchor="risk:${ri}" data-label="Risk ${ri + 1}">${esc(typeof r === "string" ? r : `${r.risk}${r.mitigation ? ` → ${r.mitigation}` : ""}`)}</li>`).join("")}</ul>` : `<span class="muted">None listed.</span>`}</div></div>
+    ${(plan.outOfScope || []).length ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Out of scope</h2></div><div class="panel-body"><ul style="margin:0;padding-left:18px">${plan.outOfScope.map((r, ri) => `<li data-anchor="oos:${ri}" data-label="Out of scope ${ri + 1}">${esc(r)}</li>`).join("")}</ul></div></div>` : ""}
   </div>`;
 }
 

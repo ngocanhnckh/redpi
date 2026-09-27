@@ -31,6 +31,7 @@ export function validatePlan(plan) {
   if (!text(plan.title)) errors.push("title is required");
   if (!text(plan.summary)) errors.push("summary is required: one paragraph a non-engineer can follow");
   if (plan.review !== undefined && !["independent", "self"].includes(plan.review)) errors.push('review must be "independent" (default: a separate reviewer marks tasks done) or "self"');
+  if (plan.changes !== undefined && (!Array.isArray(plan.changes) || plan.changes.some((c) => typeof c !== "string"))) errors.push('changes must be a list of strings, one per numbered comment ("#1 …")');
   const stories = list(plan.stories);
   if (!stories.length) errors.push("at least one story is required");
 

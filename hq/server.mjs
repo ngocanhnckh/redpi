@@ -119,6 +119,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, worker_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, created INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS task_transitions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, task_id TEXT NOT NULL, from_status TEXT,
     to_status TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT, target TEXT, created INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS plan_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT NOT NULL, run_id TEXT NOT NULL, anchor TEXT NOT NULL,
+    quote TEXT, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', n INTEGER, created INTEGER NOT NULL, updated INTEGER NOT NULL, sent INTEGER);
+  CREATE INDEX IF NOT EXISTS plan_comments_plan ON plan_comments (plan_id, id);
   CREATE INDEX IF NOT EXISTS messages_run ON messages (run_id, id);
   CREATE INDEX IF NOT EXISTS transitions_task ON task_transitions (run_id, task_id, id);
   CREATE INDEX IF NOT EXISTS events_worker ON events (worker_id, id);
@@ -376,12 +379,77 @@ route("POST", "/api/runs/:id/plans", (b, p) => {
   return planView(one("SELECT * FROM plans WHERE id = ?", id));
 });
 
+// ---------- plan review: comments anchored to text or diagram spots ----------
+// anchor: { kind: "text" | "pin", tab, target (e.g. "task:T2"), label (where, in words), diagram?, x?, y? (0–1 of the diagram) }
+function commentView(c) { let anchor = {}; try { anchor = JSON.parse(c.anchor); } catch {} return { ...c, anchor }; }
+const planComments = (planId) => all("SELECT * FROM plan_comments WHERE plan_id = ? ORDER BY id", planId).map(commentView);
+
+function cleanAnchor(a) {
+  a = a && typeof a === "object" ? a : {};
+  const str = (v, n) => (v == null ? undefined : String(v).slice(0, n));
+  const frac = (v) => (Number.isFinite(Number(v)) ? Math.min(1, Math.max(0, Number(v))) : undefined);
+  const kind = a.kind === "pin" ? "pin" : "text";
+  return { kind, tab: str(a.tab, 40), target: str(a.target, 200), label: str(a.label, 300), diagram: str(a.diagram, 40), x: frac(a.x), y: frac(a.y), prefix: str(a.prefix, 80) };
+}
+
+function draftablePlan(id) {
+  const row = one("SELECT * FROM plans WHERE id = ?", id);
+  if (!row) notFound();
+  if (row.status !== "pending") throw httpError(409, `plan v${row.version} is already ${row.status}; comments go on the pending version`);
+  return row;
+}
+
+// Numbered feedback for the CEO, one line per comment, each saying where it points.
+function feedbackText(comments) {
+  return comments.map((c, i) => {
+    const where = c.anchor.label || c.anchor.target || "the plan";
+    const quote = c.quote ? ` on "${c.quote.replace(/\s+/g, " ").slice(0, 300)}"` : "";
+    return `#${i + 1} [${where}]${quote}: ${c.body}`;
+  }).join("\n");
+}
+
 route("GET", "/api/plans/:id", (_b, p) => {
   const plan = planView(one("SELECT * FROM plans WHERE id = ?", p.id));
   if (!plan) return notFound();
   const r = one("SELECT * FROM runs WHERE id = ?", plan.runId);
+  const prev = one("SELECT id, version FROM plans WHERE run_id = ? AND version < ? ORDER BY version DESC LIMIT 1", plan.runId, plan.version);
   return { ...plan, run: r, project: one("SELECT * FROM projects WHERE id = ?", r.project_id),
-    latestVersion: one("SELECT MAX(version) AS v FROM plans WHERE run_id = ?", plan.runId).v };
+    latestVersion: one("SELECT MAX(version) AS v FROM plans WHERE run_id = ?", plan.runId).v,
+    latestId: one("SELECT id FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1", plan.runId).id,
+    comments: planComments(p.id),
+    previous: prev ? { id: prev.id, version: prev.version, comments: planComments(prev.id).filter((c) => c.status === "sent") } : null };
+});
+
+route("POST", "/api/plans/:id/comments", (b, p) => {
+  const row = draftablePlan(p.id);
+  const body = String(b.body || "").trim();
+  if (!body) throw httpError(400, "body is required");
+  const r = run("INSERT INTO plan_comments (plan_id, run_id, anchor, quote, body, status, created, updated) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)",
+    p.id, row.run_id, JSON.stringify(cleanAnchor(b.anchor)), b.quote ? String(b.quote).slice(0, 1000) : null, body.slice(0, 8000), now(), now());
+  notify(row.run_id, "comments");
+  return commentView(one("SELECT * FROM plan_comments WHERE id = ?", Number(r.lastInsertRowid)));
+});
+
+route("PATCH", "/api/plans/:id/comments/:cid", (b, p) => {
+  const row = draftablePlan(p.id);
+  const c = one("SELECT * FROM plan_comments WHERE id = ? AND plan_id = ?", Number(p.cid), p.id);
+  if (!c) return notFound();
+  if (c.status !== "draft") throw httpError(409, "this comment was already sent");
+  const body = String(b.body || "").trim();
+  if (!body) throw httpError(400, "body is required");
+  run("UPDATE plan_comments SET body = ?, updated = ? WHERE id = ?", body.slice(0, 8000), now(), c.id);
+  notify(row.run_id, "comments");
+  return commentView(one("SELECT * FROM plan_comments WHERE id = ?", c.id));
+});
+
+route("DELETE", "/api/plans/:id/comments/:cid", (_b, p) => {
+  const row = draftablePlan(p.id);
+  const c = one("SELECT * FROM plan_comments WHERE id = ? AND plan_id = ?", Number(p.cid), p.id);
+  if (!c) return notFound();
+  if (c.status !== "draft") throw httpError(409, "this comment was already sent");
+  run("DELETE FROM plan_comments WHERE id = ?", c.id);
+  notify(row.run_id, "comments");
+  return { ok: true };
 });
 
 route("POST", "/api/plans/:id/decision", (b, p) => {
@@ -390,8 +458,11 @@ route("POST", "/api/plans/:id/decision", (b, p) => {
   if (row.status !== "pending") throw httpError(409, `plan is already ${row.status}`);
   const approve = b.decision === "approve";
   if (!approve && b.decision !== "changes") throw httpError(400, "decision must be approve or changes");
-  const comment = b.comment ? String(b.comment).slice(0, 20000) : null;
+  const comment = b.comment ? String(b.comment).trim().slice(0, 20000) || null : null;
+  const drafts = planComments(p.id).filter((c) => c.status === "draft");
+  if (!approve && !comment && !drafts.length) throw httpError(400, "say what should change: add comments on the plan or an overall comment");
   run("UPDATE plans SET status = ?, comment = ?, decided = ? WHERE id = ?", approve ? "approved" : "changes_requested", comment, now(), p.id);
+  drafts.forEach((c, i) => run("UPDATE plan_comments SET status = 'sent', n = ?, sent = ? WHERE id = ?", i + 1, now(), c.id));
   if (approve) {
     const plan = JSON.parse(row.json);
     for (const story of plan.stories || []) for (const t of story.tasks || []) {
@@ -399,9 +470,10 @@ route("POST", "/api/plans/:id/decision", (b, p) => {
     }
   }
   touchRun(row.run_id, approve ? "approved" : "planning");
+  const notes = drafts.length ? `\n\nComments from the plan page (${drafts.length}), each pointing at a place in plan v${row.version}:\n${feedbackText(drafts)}` : "";
   addMessage(row.run_id, "human", "ceo", "decision", approve
-    ? `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""} Start execution: form the team and spawn workers.`
-    : `Plan v${row.version}: CHANGES REQUESTED. ${comment || "(no comment)"} Revise the plan and submit a new version.`);
+    ? `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""}${drafts.length ? `${notes}\n\nKeep these notes in mind while executing (put them in the relevant workers' briefs).` : ""} Start execution: form the team and spawn workers.`
+    : `Plan v${row.version}: CHANGES REQUESTED.${comment ? `\nOverall: ${comment}` : ""}${notes}\n\nRevise the plan and submit a new version with redplan_submit_plan. Address every numbered comment and say how in the plan's "changes" list (one line per comment, starting with its number, e.g. "#1 …"). If a comment is a question, answer it there too; if a comment is unclear, ask the human here before resubmitting.`);
   notify(row.run_id, "plan");
   return planView(one("SELECT * FROM plans WHERE id = ?", p.id));
 });

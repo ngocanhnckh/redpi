@@ -1,0 +1,136 @@
+#!/usr/bin/env node
+// Plan review UI test: a private hub (temp dir, random port) and headless Chromium. Highlights text,
+// pins comments on the architecture and Gantt diagrams, edits one, sends the feedback, and checks the
+// CEO gets one numbered, anchored message; then the next version shows what changed. Never touches ~/.pi/agent.
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes, scryptSync } from "node:crypto";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+let chromium;
+try { ({ chromium } = await import("playwright")); } catch { console.log("Plan review UI test skipped: playwright is not installed (npm install)."); process.exit(0); }
+const dir = mkdtempSync(join(tmpdir(), "redpi-review-test-"));
+const port = 20000 + Math.floor(Math.random() * 20000);
+const proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1" }, stdio: "ignore" });
+process.on("exit", () => { proc.kill(); rmSync(dir, { recursive: true, force: true }); });
+const fail = (msg) => { console.error(`FAIL: ${msg}`); process.exit(1); };
+process.on("unhandledRejection", (e) => fail(e?.message || e));
+const base = `http://127.0.0.1:${port}`;
+for (let i = 0; i < 50; i++) { try { if ((await fetch(base + "/api/health")).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+const token = readFileSync(join(dir, "token"), "utf8").trim();
+const api = async (m, p, b) => (await fetch(base + p, { method: m, headers: { authorization: `Bearer ${token}`, "x-redpi-hq": "1", "content-type": "application/json" }, body: b ? JSON.stringify(b) : undefined })).json();
+const plan = {
+  title: "Support chat with a deep agent", summary: "A support chat for customers, answered by a LangChain deep agent that can look up orders and hand off to a human.",
+  goal: "Answer 70% of support questions without a human.",
+  techStack: [{ name: "Deep Agents", package: "deepagents", ecosystem: "PyPI", usedFor: "the agent", uses: "create_deep_agent(tools, instructions)", source: "https://pypi.org/project/deepagents/", verified: true, verifiedFact: "create_deep_agent exists" },
+    { name: "FastAPI", package: "fastapi", ecosystem: "PyPI", usedFor: "HTTP API", uses: "FastAPI, APIRouter", source: "https://fastapi.tiangolo.com", verified: true }],
+  architecture: { components: [{ id: "ui", name: "Chat widget", kind: "ui", tech: "React" }, { id: "api", name: "Chat API", kind: "service", tech: "FastAPI", description: "Streams answers to the widget." }, { id: "agent", name: "Support agent", kind: "agent", tech: "deepagents" }, { id: "db", name: "Orders DB", kind: "db", tech: "Postgres" }],
+    links: [{ from: "ui", to: "api", label: "SSE" }, { from: "api", to: "agent", label: "invoke" }, { from: "agent", to: "db", label: "SQL" }] },
+  stories: [
+    { id: "S1", title: "Customers get answers", userStory: "As a customer, I want answers in the chat, so that I do not wait for email.", acceptance: ["Answers stream in under 2 s", "Order lookups are correct"], tasks: [
+      { id: "T1", title: "Chat API skeleton", description: "A FastAPI app with an SSE endpoint that streams tokens.", estimateHours: 4 },
+      { id: "T2", title: "Support agent", description: "A deep agent with an order lookup tool and a handoff tool.", estimateHours: 8, dependsOn: ["T1"] } ] },
+    { id: "S2", title: "Chat widget", userStory: "As a customer, I want a chat box on every page.", acceptance: ["Works on mobile"], tasks: [
+      { id: "T3", title: "React widget", description: "An embeddable React chat widget.", estimateHours: 6 } ] },
+  ],
+  risks: ["Order data may be stale"], outOfScope: ["Voice"],
+};
+const r = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Support chat" })).run.id;
+const pl = await api("POST", `/api/runs/${r}/plans`, { plan });
+const salt = randomBytes(16);
+writeFileSync(join(dir, "auth.json"), JSON.stringify({ version: 1, user: "yitec", salt: salt.toString("hex"), hash: scryptSync("password123", salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex"), N: 16384, r: 8, p: 1 }));
+const browser = await chromium.launch();
+const errors = [];
+async function login(ctx) {
+  const page = await ctx.newPage();
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto(`${base}/plans/${pl.id}`);
+  await page.waitForSelector("#form:not(.hide)");
+  await page.fill("#user", "yitec"); await page.fill("#password", "password123"); await page.click("#go");
+  await page.waitForSelector("details.story");
+  return page;
+}
+async function selectText(page, selector, text) {
+  await page.evaluate(([sel, t]) => {
+    const el = document.querySelector(sel);
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) { const i = n.data.indexOf(t); if (i >= 0) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + t.length); getSelection().removeAllRanges(); getSelection().addRange(r); return; } }
+    throw new Error("text not found: " + t);
+  }, [selector, text]);
+  await page.waitForSelector(".sel-btn:not([hidden])", { timeout: 10000 });
+}
+const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, colorScheme: "dark" });
+const page = await login(ctx);
+// 1. highlight text in a task
+await selectText(page, '[data-anchor="task:T2"] .td', "order lookup tool");
+await page.click(".sel-btn");
+await page.waitForSelector(".composer-pop textarea");
+await page.fill(".composer-pop textarea", "Also add a refund tool, read-only for now.");
+await page.keyboard.press("Control+Enter");
+await page.waitForSelector('mark.anno');
+// 2. highlight in the summary (overview)
+await selectText(page, ".summary", "hand off to a human");
+await page.click(".sel-btn"); await page.fill(".composer-pop textarea", "Handoff must go to Zendesk."); await page.click('[data-act=save]');
+await page.waitForFunction(() => document.querySelectorAll(".anno-badge").length === 2);
+// 3. pin on architecture
+await page.click('[data-tab=architecture]');
+await page.click('[data-pin=arch]');
+await page.locator('[data-anchor="component:agent"] rect').first().scrollIntoViewIfNeeded();
+const comp = await page.locator('[data-anchor="component:agent"] rect').first().boundingBox();
+await page.mouse.click(comp.x + comp.width / 2, comp.y + comp.height / 2);
+await page.waitForSelector(".composer-pop textarea");
+const where = await page.textContent(".cp-where");
+await page.fill(".composer-pop textarea", "Run the agent in its own worker process.");
+await page.keyboard.press("Control+Enter");
+await page.waitForSelector(".pin");
+// 4. pin on the gantt
+await page.keyboard.press("Escape");
+await page.click('[data-tab=timeline]');
+await page.click('[data-pin=gantt]');
+await page.locator('[data-anchor="task:T3"] rect.bar').first().scrollIntoViewIfNeeded();
+const bar = await page.locator('[data-anchor="task:T3"] rect.bar').first().boundingBox();
+await page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+await page.fill(".composer-pop textarea", "Widget can start later, no rush.");
+await page.keyboard.press("Control+Enter");
+await page.waitForSelector(".pin");
+// 5. jump back to comment 1 from the list, edit it
+await page.click('[data-jump]:first-of-type >> nth=0');
+await page.waitForSelector('[data-tab=stories][aria-selected=true]');
+await page.click('[data-edit] >> nth=0');
+await page.fill(".composer-pop textarea", "Also add a refund tool (read-only).");
+await page.click('[data-act=save]');
+await page.waitForFunction(() => document.querySelector(".fb-body")?.textContent.includes("(read-only)"));
+// 6. overall comment + send
+await page.fill("#comment", "Looks good otherwise.");
+await page.click("#send");
+await page.waitForSelector("text=You asked for changes");
+const inbox = await api("GET", `/api/runs/${r}/inbox?for=ceo&after=0`);
+const msg = inbox.find((m) => m.kind === "decision")?.body || "";
+if (where !== "Architecture diagram › Support agent (agent)") fail(`pin did not name the component under it: ${where}`);
+for (const line of ['Overall: Looks good otherwise.', '#1 [Stories & tasks › Task T2 · Support agent] on "order lookup tool": Also add a refund tool (read-only).',
+  '#2 [Overview › Summary] on "hand off to a human": Handoff must go to Zendesk.', '#3 [Architecture diagram › Support agent (agent)]: Run the agent in its own worker process.', '#4 [Gantt chart › T3 · React widget'])
+  if (!msg.includes(line)) fail(`CEO message is missing: ${line}\n${msg}`);
+// 7. v2 arrives: shows what changed and old comments
+const v2 = await api("POST", `/api/runs/${r}/plans`, { plan: { ...plan, changes: ["#1 Added a read-only refund tool to the agent", "#2 Handoff now creates a Zendesk ticket", "#3 The agent runs in its own worker", "#4 Widget moved after the API"] } });
+await page.goto(`${base}/plans/${v2.id}`);
+await page.waitForSelector(".changes");
+await page.click(".prev-fb summary");
+if ((await page.locator(".prev-fb .fb-item").count()) !== 4 || (await page.locator(".changes-list li").count()) !== 4) fail("v2 does not show the v1 comments and what changed");
+// light + phone
+const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light", hasTouch: true });
+const phone = await login(ctx2);
+await phone.goto(`${base}/plans/${pl.id}`); await phone.waitForSelector("details.story");
+await phone.goto(`${base}/plans/${v2.id}`); await phone.waitForSelector(".changes");
+await selectText(phone, ".summary", "support chat");
+await phone.click(".sel-btn"); await phone.waitForSelector(".composer-pop textarea");
+const overflow = await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+if (overflow) fail("plan page overflows horizontally on a phone");
+await browser.close();
+const real = errors.filter((e) => !/status of 401/.test(e));
+if (real.length) fail(`console errors:\n${real.join("\n")}`);
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, phone layout.");
+process.exit(0);

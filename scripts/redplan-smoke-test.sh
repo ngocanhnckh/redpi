@@ -41,6 +41,7 @@ def identity(system):
 SCRIPTS = {
   "CEO": [
     ("[RedPlan] New request", [("redplan_submit_plan", {"plan": PLAN})]),
+    ("CHANGES REQUESTED", [("redplan_submit_plan", {"plan": {**PLAN, "changes": ["#1 The CLI uses Typer", "#2 The API validates todo text length"]}})]),
     ("APPROVED", [
       ("redplan_spawn_worker", {"role": "backend developer", "name": "Alex", "taskIds": ["T1"], "workspace": "shared", "brief": "Build T1. Tell Peter the endpoint shape."}),
       ("redplan_spawn_worker", {"role": "full-stack developer", "name": "Peter", "taskIds": ["T2"], "workspace": "worktree", "brief": "Build T2. Wait for Alex's endpoint shape."}),
@@ -205,6 +206,19 @@ try:
     if "RedPlan mode is ON" not in ceo_sys or "Automatic subagents are ON" not in ceo_sys:
         raise SystemExit("CEO system prompt is missing the RedPlan protocol or the RedPi subagent policy (prompt chaining broken)")
 
+    # Review on the plan page: a text highlight and a diagram pin, sent as feedback. The CEO in the
+    # terminal picks it up by itself, says so, and submits v2 answering each numbered comment.
+    hq("POST", f"/api/plans/{plan['id']}/comments", {"anchor": {"kind": "text", "tab": "stories", "target": "task:T2", "label": "Stories & tasks › Task T2 · CLI client"}, "quote": "small CLI", "body": "Use Typer for the CLI"})
+    hq("POST", f"/api/plans/{plan['id']}/comments", {"anchor": {"kind": "pin", "tab": "architecture", "diagram": "arch", "x": 0.2, "y": 0.5, "target": "component:api", "label": "Architecture diagram › Todo API (service)"}, "body": "Validate text length"})
+    mark = len(out)
+    hq("POST", f"/api/plans/{plan['id']}/decision", {"decision": "changes", "comment": ""})
+    v2 = wait("CEO revised the plan from page feedback", lambda: (lambda s: s["plan"] if s["plan"]["version"] == 2 else None)(hq("GET", f"/api/runs/{run['id']}")), 60)
+    fb = next((u for i, u, _ in requests if i == "CEO" and "CHANGES REQUESTED" in u), "")
+    if "#1 [Stories & tasks › Task T2 · CLI client] on \"small CLI\": Use Typer for the CLI" not in fb or "#2 [Architecture diagram › Todo API (service)]" not in fb:
+        raise SystemExit(f"CEO did not get the numbered, anchored comments: {fb[:600]}")
+    if v2["plan"].get("changes") != ["#1 The CLI uses Typer", "#2 The API validates todo text length"]: raise SystemExit(f"v2 changes missing: {v2['plan'].get('changes')}")
+    wait("terminal notice for the feedback", lambda: (drain(0.2), b"plan feedback received (2 comments)" in out[mark:])[1], 15)
+    plan = v2
     hq("POST", f"/api/plans/{plan['id']}/decision", {"decision": "approve", "comment": "ship it"})
     workers = wait("three workers spawned", lambda: (lambda s: s["workers"] if len(s["workers"]) == 3 else None)(hq("GET", f"/api/runs/{run['id']}")))
     names = {w["name"]: w for w in workers}
@@ -288,7 +302,7 @@ try:
     msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → approval → 3 tmux workers (shared + worktree + reviewer) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)
