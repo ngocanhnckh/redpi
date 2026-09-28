@@ -7,6 +7,8 @@ import { TILE } from "./map.js";
 const PALETTES = {
   dark: {
     wood: ["#18281e", "#1b2d22", "#132019"], carpet: ["#10201a", "#142820"], cafe: ["#1c2a24", "#16221d"],
+    archive: ["#141c22", "#10171c"], meet: ["#1a1830", "#1f1c38"], sign: "#45e3ff",
+    shelf: "#3b2c20", shelfIn: "#1a130d", books: ["#b84a3e", "#3e7cb8", "#c9a13b", "#4c9a61", "#8e5bb0", "#d7d0bf"],
     wall: "#08110c", wallFace: "#0d1a13", trim: "#1f8f52", sill: "#1a3325",
     glassWin: "#041009", rain: "#3dff8f", rainDim: "#1b6b3e",
     desk: "#5a4330", deskTop: "#6b513a", deskEdge: "#3a2a1c", bezel: "#0f1713", screenOff: "#0a120e", screenOn: "#0b3a22", screenLine: "#3dff8f",
@@ -20,6 +22,8 @@ const PALETTES = {
   },
   light: {
     wood: ["#e7ddcb", "#e1d5c0", "#d6c8b0"], carpet: ["#dfe8e1", "#d6e1d9"], cafe: ["#eef1ec", "#e3e8e1"],
+    archive: ["#d9dfe4", "#cfd6dc"], meet: ["#e3e0f2", "#d9d5ec"], sign: "#0a7f9c",
+    shelf: "#8a6645", shelfIn: "#5b4330", books: ["#c0584c", "#4b87c0", "#d2a943", "#56a36b", "#9565b8", "#f4efe2"],
     wall: "#9fb3a6", wallFace: "#c7d6cc", trim: "#0f9d58", sill: "#aac1b3",
     glassWin: "#0d2a1b", rain: "#46ff99", rainDim: "#1f7a47",
     desk: "#a07a55", deskTop: "#b88e64", deskEdge: "#7a5a3c", bezel: "#2a332e", screenOff: "#1a221e", screenOn: "#0d4a2b", screenLine: "#5dffa1",
@@ -46,6 +50,13 @@ function floorTile(ctx, pal, kind, tx, ty) {
   } else if (kind === "carpet") {
     px(ctx, pal.carpet[0], x, y, TILE, TILE);
     for (let i = 0; i < TILE; i += 4) for (let j = (i / 4) % 2 ? 2 : 0; j < TILE; j += 4) px(ctx, pal.carpet[1], x + j, y + i, 1, 1);
+  } else if (kind === "archive") {
+    px(ctx, pal.archive[0], x, y, TILE, TILE);
+    px(ctx, pal.archive[1], x, y, TILE, 1); px(ctx, pal.archive[1], x, y, 1, TILE);
+    px(ctx, pal.archive[1], x + 8, y + 8, 1, 1);
+  } else if (kind === "meet") {
+    px(ctx, pal.meet[0], x, y, TILE, TILE);
+    for (let i = 0; i < TILE; i += 4) px(ctx, pal.meet[1], x + ((i / 4) % 2 ? 2 : 0), y + i, TILE - 2, 1);
   } else {
     px(ctx, pal.cafe[(tx + ty) % 2], x, y, TILE, TILE);
     px(ctx, pal.wood[2], x, y, TILE, 1); px(ctx, pal.wood[2], x, y, 1, TILE);
@@ -56,11 +67,14 @@ export function paintStatic(map, pal) {
   const c = document.createElement("canvas");
   c.width = map.W * TILE; c.height = map.H * TILE;
   const ctx = c.getContext("2d");
-  // Floors by zone: carpet in the work area, wood in the CEO office and lounge, tiles in the cafeteria.
+  // Floors by zone: carpet in the work area, wood in the CEO office and lounge, tiles in
+  // the cafeteria, plain tiles in the files room, patterned carpet in the meeting room.
+  const inside = (r, x, y) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
   for (let ty = 0; ty < map.H; ty++) for (let tx = 0; tx < map.W; tx++) {
     const cafe = ty >= map.lounge.y && tx >= map.W - 10;
     const work = ty < map.lounge.y && tx >= 11;
-    floorTile(ctx, pal, cafe ? "cafe" : work ? "carpet" : "wood", tx, ty);
+    const kind = inside(map.files, tx, ty) ? "archive" : inside(map.meeting, tx, ty) ? "meet" : cafe ? "cafe" : work ? "carpet" : "wood";
+    floorTile(ctx, pal, kind, tx, ty);
   }
   // "Needs you" mat by the entrance.
   const m = map.mat;
@@ -87,18 +101,28 @@ export function paintStatic(map, pal) {
     px(ctx, pal.glassWin, w.x, w.y, w.w, w.h);
     px(ctx, pal.sill, w.x + Math.floor(w.w / 2), w.y, 1, w.h);
   }
+  // Room signs: high on the wall above the files room (clear of the tall shelves), and
+  // on the meeting room's bottom glass wall.
+  ctx.font = "bold 6px monospace"; ctx.textAlign = "center"; ctx.fillStyle = pal.sign;
+  ctx.fillText("FILES · SERVERS", (map.files.x + map.files.w / 2) * TILE, 15);
+  ctx.fillText("MEETING", (map.meeting.x + map.meeting.w / 2) * TILE, (map.meeting.y + map.meeting.h) * TILE + 15);
 
   // Flat things characters never walk behind: chairs, glass walls, whiteboard frame.
   for (const it of map.items) {
     const x = it.x * TILE, y = it.y * TILE, w = it.w * TILE, h = it.h * TILE;
-    if (it.type === "chair") {
+    if (it.type === "chair" && it.back) {
+      // Seen from behind: the backrest faces the viewer.
+      px(ctx, pal.chairSeat, x + 4, y + 4, 8, 4);
+      px(ctx, pal.chair, x + 4, y + 8, 8, 6);
+      px(ctx, pal.chair, x + 5, y + 14, 1, 2); px(ctx, pal.chair, x + 10, y + 14, 1, 2);
+    } else if (it.type === "chair") {
       px(ctx, pal.chair, x + 4, y + 2, 8, 9);
       px(ctx, pal.chairSeat, x + 4, y + 9, 8, 4);
       px(ctx, pal.chair, x + 5, y + 13, 1, 2); px(ctx, pal.chair, x + 10, y + 13, 1, 2);
     } else if (it.type === "glassV" || it.type === "glassH") {
+      const v = it.type === "glassV";
       for (let i = 0; i < Math.max(it.w, it.h); i++) {
-        if (i === (it.type === "glassV" ? it.gap - it.y : it.gap - it.x)) continue;
-        const v = it.type === "glassV";
+        if ((it.gaps || []).includes(v ? it.y + i : it.x + i)) continue;
         const gx = v ? x + 6 : x + i * TILE, gy = v ? y + i * TILE : y + 6;
         ctx.fillStyle = pal.glass; ctx.fillRect(gx, gy, v ? 4 : TILE, v ? TILE : 4);
         px(ctx, pal.glassFrame, gx, gy, v ? 1 : TILE, v ? TILE : 1);
@@ -113,7 +137,7 @@ export function paintStatic(map, pal) {
 
 function windows(map) {
   const out = [];
-  for (let x = 12; x + 3 < map.W - 1; x += 5) out.push({ x: x * TILE, y: 4, w: 3 * TILE, h: 18 });
+  for (let x = 12; x + 3 < map.files.x - 1; x += 5) out.push({ x: x * TILE, y: 4, w: 3 * TILE, h: 18 });
   return out;
 }
 
@@ -154,7 +178,7 @@ export function drawDynamic(ctx, map, pal, t, s) {
 }
 
 /** Furniture characters can stand behind: drawn depth-sorted with the people. */
-export const SORTED = new Set(["desk", "table", "cafeTable", "plant", "rack", "terminal", "coffee", "counter"]);
+export const SORTED = new Set(["desk", "table", "cafeTable", "plant", "rack", "terminal", "coffee", "counter", "shelf", "screen"]);
 
 export function drawItem(ctx, pal, it, t, s) {
   const x = it.x * TILE, y = it.y * TILE, w = it.w * TILE, h = it.h * TILE;
@@ -197,6 +221,32 @@ export function drawItem(ctx, pal, it, t, s) {
     for (let i = 0; i < 6; i++) {
       px(ctx, pal.rackFace, x + 2, y + 3 + i * 5, w - 4, 3);
       for (let j = 0; j < 3; j++) if (Math.sin(t * (2 + i + j) + i * 7 + j) > 0.2) px(ctx, j === 2 && i === 3 ? pal.ledA : pal.ledG, x + 3 + j * 3, y + 4 + i * 5, 1, 1);
+    }
+  } else if (it.type === "shelf") {
+    // A tall bookcase of binders and files; it rises above its tile so people stand in front.
+    const top = y - 14, hh = h + 14;
+    px(ctx, pal.shadow, x + 1, y + h - 2, w, 3);
+    px(ctx, pal.shelf, x, top, w, hh);
+    for (let r = 0; r < 3; r++) {
+      const ry = top + 2 + r * 9;
+      px(ctx, pal.shelfIn, x + 2, ry, w - 4, 7);
+      for (let bx = x + 3, k = 0; bx < x + w - 4; k++) {
+        const bw = 2 + ((it.x * 7 + r * 5 + k * 3) % 2), bh = 5 + ((it.x + r + k) % 3 === 0 ? 0 : 1);
+        px(ctx, pal.books[(it.x * 3 + it.y + r * 2 + k) % pal.books.length], bx, ry + 7 - bh, bw, bh);
+        bx += bw + ((k % 5 === 4) ? 2 : 0);
+      }
+    }
+  } else if (it.type === "screen") {
+    px(ctx, pal.shadow, x + 3, y + 13, 10, 3);
+    px(ctx, pal.bezel, x + 7, y + 4, 2, 10);
+    px(ctx, pal.bezel, x + 2, y - 4, 12, 9);
+    px(ctx, pal.screenOff, x + 3, y - 3, 10, 7);
+    // Lit with the run's progress while a meeting is on.
+    if (s.meetingOn) {
+      const done = s.counts.done || 0, total = Object.values(s.counts).reduce((a, b) => a + b, 0) || 1;
+      px(ctx, pal.screenOn, x + 3, y - 3, 10, 7);
+      px(ctx, pal.screenLine, x + 4, y + 2, Math.max(1, Math.round(8 * done / total)), 1);
+      for (let i = 0; i < 2; i++) px(ctx, pal.screenLine, x + 4, y - 2 + i * 2, 3 + ((Math.floor(t * 2) + i * 3) % 5), 1);
     }
   } else if (it.type === "counter") {
     px(ctx, pal.counter, x, y + 2, w, h - 2); px(ctx, pal.counterTop, x, y + 1, w, 4);

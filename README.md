@@ -484,9 +484,15 @@ Every run has three views:
 
 - The CEO plans at the whiteboard, then leads from a glass office; each worker has a desk in a pod of four.
 - Working people sit and type, their monitor lit; a bubble shows what they are doing right now (`$ pytest -q`, `> Report.tsx`, `< README.md`) or `...` while the model thinks.
-- Idle people wander to the cafeteria and the meeting table.
+- Where they are follows the real tool calls:
+  - searching or reading the codebase (`grep`, `find`, `ls`, `read`, Jevgrep, `cd`/`rg`/`cat` in bash) sends them running to the **Files · Servers** room, where they stand at the shelves
+  - builds, tests, installs and deploys often take them to the server racks
+  - writing code (`edit`, `write`) brings them straight back to the desk to type
+- Nobody sits still for long: every 20–45 seconds at the desk they take a short trip to the servers, the coffee machine, the window, the files, or a teammate's desk, then go back to typing.
+- Teammates talking meet in the glass **meeting room**. They sit facing each other across the table, the speaker's bubble shows the real message, a reply keeps the meeting going, and the room's screen lights up with the run's progress.
+- Idle people wander the lounge and now and then chat over coffee in pairs. The chat is shown as a `...` bubble, never invented text.
 - Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`.
-- Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); messages to you land on the **YOU** terminal. A worker asking a teammate a question walks over to their desk.
+- Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); a worker writing to you walks to the **YOU** terminal to post it.
 - Finishing a task after real work (at least a minute busy) earns confetti.
 - Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
 - The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
@@ -501,7 +507,7 @@ Around the views:
 - the **team** with pixel portraits; each worker's panel shows its tasks, context usage, latest message, a **tool waterfall** (one bar per tool call, width by duration, red if it failed), the activity feed, the `tmux attach` command, **Send** / **Interrupt + send**, and **Resume** when its session is gone
 - the **team chat**, where workers ask each other directly, report to the CEO, and receive your messages
 
-The office is drawn on a canvas that pauses when the tab is hidden, respects reduced motion (people move without walking, no flying envelopes), and is decorative for screen readers: the roster, board, and a live announcement region carry the same information.
+The office is drawn on a canvas that pauses when the tab is hidden, respects reduced motion (people stay put: no errands, meetings, or flying envelopes), and is decorative for screen readers: the roster, board, and a live announcement region carry the same information.
 
 ### Reliability
 
@@ -953,6 +959,7 @@ Smoke coverage includes:
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
 - Harness workers: fake `claude` / `codex` / `opencode` binaries speaking each tool's JSON events; the runner takes the brief, the agent moves its card and messages the CEO via `redpi-hq`, every turn continues the same session, side questions run on a fork (instructions relayed), interrupt stops a stuck turn, provider trouble raises "needs you", and a killed worker resumes its session. The RedPlan end-to-end test also has the CEO spawn a Claude Code worker for a task the human switched to Claude Code.
 - Plan review (headless Chromium): text highlights, pins on the architecture and Gantt diagrams, edit, send feedback → one numbered, anchored message to the CEO; the next version shows what changed and the earlier comments; phone layout
+- Office (headless Chromium): real heartbeats and messages move the people. Searching sends a worker to the files room and writing code brings them back to type at the desk; teammates talking meet in the meeting room facing each other, with the real message and reply; messages to you go to the YOU terminal; restless trips from the desk and back; idle coffee chats with no invented text; nobody moves under reduced motion; board cards with long paths stay inside their columns
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
