@@ -202,7 +202,16 @@ function runView(runId) {
   const tasks = all("SELECT * FROM tasks WHERE run_id = ? ORDER BY rowid", runId);
   const messages = all("SELECT * FROM (SELECT * FROM messages WHERE run_id = ? ORDER BY id DESC LIMIT 300) ORDER BY id", runId)
     .map((m) => ({ ...m, senderName: participantName(runId, m.sender), recipientName: participantName(runId, m.recipient) }));
-  return { run: r, project, plans, plan: latest, workers, tasks, messages };
+  // For the event board and the project charts: every task move, the latest worker
+  // actions, and tool calls per worker in 5-minute buckets over the last two hours.
+  const transitions = all("SELECT id, task_id, from_status, to_status, actor, reason, target, created FROM task_transitions WHERE run_id = ? ORDER BY id", runId);
+  const events = all(`SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e JOIN workers w ON w.id = e.worker_id
+    WHERE w.run_id = ? ORDER BY e.id DESC LIMIT 250) ORDER BY id`, runId);
+  const since = now() - 2 * 3600_000, bucket = 5 * 60_000;
+  const activity = all(`SELECT e.worker_id, (e.created / ${bucket}) * ${bucket} AS at, COUNT(*) AS n FROM events e JOIN workers w ON w.id = e.worker_id
+    WHERE w.run_id = ? AND e.kind = 'tool' AND e.created >= ? GROUP BY e.worker_id, at ORDER BY at`, runId, since);
+  const approvedAt = one("SELECT decided FROM plans WHERE run_id = ? AND status = 'approved' ORDER BY version DESC LIMIT 1", runId)?.decided || null;
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, now: now() };
 }
 
 function workerView(w) {

@@ -18,7 +18,53 @@
   .bar > i { display: block; height: 100%; background: var(--green); }
   .run-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 16px; }
   .run-head h1 { margin: 0; font-size: 22px; }
-  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+  /* Run page: the view (office, board, graph) with the event board beside it, the team below, then charts. */
+  .run-main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+  /* The event board takes the view's height (size containment keeps its long list out of the row height). */
+  .feed-panel { display: flex; flex-direction: column; min-width: 0; contain: size; min-height: 560px; }
+  .feed-panel .chat-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .feed { flex: 1; min-height: 0; max-height: none; overflow-anchor: none; align-content: start; gap: 6px; }
+  .feed:empty::before { content: "No messages or actions yet."; color: var(--muted); font-size: 13px; }
+  .feed.only-chat .act, .feed.only-actions .msg { display: none; }
+  .feed-filter { display: flex; gap: 2px; }
+  .feed-filter button { background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .feed-filter button[aria-pressed="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
+  .act { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 6px; align-items: baseline; font-size: 12px; color: var(--muted); padding: 1px 0; }
+  .act .act-icon { font-family: var(--mono); font-weight: 700; color: var(--green); text-align: center; }
+  .act code { color: var(--text); font-size: 11.5px; overflow-wrap: anywhere; }
+  .act.bad .act-icon, .act.bad code, .bad-tag { color: var(--red); }
+  .act .when { color: var(--faint); font-size: 11px; }
+  .act-dot { width: 8px; height: 8px; border-radius: 50%; justify-self: center; align-self: center; }
+  .act-text { min-width: 0; overflow-wrap: anywhere; }
+  .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--text); font-weight: 700; cursor: pointer; }
+  .linkish:hover, .linkish:focus-visible { text-decoration: underline; }
+  .msg .to .linkish { color: var(--muted); font-weight: 400; }
+  .team-panel { margin-bottom: 16px; }
+  #team { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  .mini-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); } .mini-stats b { color: var(--text); font-family: var(--mono); }
+  .mini-msgs { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+  /* Charts */
+  .section-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 2px 10px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 16px; }
+  .chart .chart-body { padding: 10px 14px 12px; }
+  .chart-sub { font-size: 12px; color: var(--muted); margin-bottom: 6px; min-height: 16px; }
+  .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart .grid { stroke: var(--border); stroke-width: 1; }
+  .chart .axis { stroke: var(--faint); stroke-width: 1; }
+  .chart .tick { fill: var(--muted); font: 10px var(--mono); }
+  .chart .lbl { fill: var(--text); font: 12px var(--sans); } .chart .lbl.num { font-family: var(--mono); font-weight: 700; }
+  .chart .big { fill: var(--text); font: 700 22px var(--mono); }
+  .chart .line { fill: none; stroke-width: 2; }
+  .chart .area { fill-opacity: .12; }
+  .chart .band { fill-opacity: .8; }
+  .chart .forecast { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+  .chart .now { stroke: var(--faint); stroke-dasharray: 2 3; }
+  .chart .avg { stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .chart .cbar.open { fill-opacity: .5; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .chart-legend b { color: var(--text); font-family: var(--mono); }
+  .chart-empty { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
   .kanban { display: grid; grid-template-columns: repeat(5, minmax(170px, 1fr)); gap: 10px; overflow-x: auto; }
   .col { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; min-height: 160px; display: flex; flex-direction: column; min-width: 0; }
   .col h3 { margin: 0; padding: 10px 12px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); }
@@ -36,6 +82,7 @@
   .avatar.lg { width: 36px; height: 56px; }
   .avatar.you { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; border: 0; }
   .avatar.you.sm { width: 22px; height: 22px; font-size: 8px; }
+  .avatar.you.hq { background: var(--faint); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .needs { position: sticky; top: 56px; z-index: 15; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; margin-bottom: 16px; border-radius: 10px;
     background: color-mix(in srgb, var(--red) 10%, var(--panel)); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
@@ -103,11 +150,7 @@
   .events { font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
   .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
   .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
-  .side { display: grid; gap: 16px; align-content: start; }
-  /* Office view: the floor spans the page; team and chat sit side by side below it. */
-  .layout.wide { grid-template-columns: minmax(0, 1fr); }
-  .layout.wide .side { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
-  @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } .layout.wide .side { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 1100px) { .run-main { grid-template-columns: minmax(0, 1fr); } .feed-panel { contain: none; height: 70vh; min-height: 420px; } }
   @media (max-width: 640px) { .office-host { height: 360px; } .needs { top: 52px; } }
   @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
 </style>

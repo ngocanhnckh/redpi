@@ -156,7 +156,7 @@ await page.waitForFunction((n) => document.querySelectorAll(".chat .msg").length
 await page.waitForTimeout(400);
 c = await chatAt();
 if (Math.abs(c.top - 150) > 2) await fail("chat jumped while reading older messages", c);
-if (!c.newVisible || !/1 new message/.test(c.newText)) await fail("new-message button should show while reading", c);
+if (!c.newVisible || !/1 new/.test(c.newText)) await fail("new-message button should show while reading", c);
 await page.click(".chat-new");
 await page.waitForFunction(() => { const c = document.querySelector(".chat"); return c.scrollHeight - c.clientHeight - c.scrollTop < 30; });
 await page.waitForTimeout(500);
@@ -169,7 +169,7 @@ c = await chatAt();
 if (c.end - c.top > 30 || c.newVisible) await fail("chat should follow new messages at the bottom", c);
 // Worker drawer: scroll down, a live update arrives, the drawer stays put.
 for (let i = 0; i < 25; i++) await beat("Alex", { status: "working", events: [{ kind: "tool", text: `bash: step ${i}` }] });
-await page.click(`.member[data-worker="${ids.Alex}"]`);
+await page.click(`.member[data-person="${ids.Alex}"]`);
 await page.setViewportSize({ width: 1400, height: 480 });
 await page.waitForSelector(".drawer .scroll");
 await page.waitForTimeout(300);
@@ -181,6 +181,106 @@ const dTop = await page.evaluate(() => document.querySelector(".drawer .scroll")
 if (Math.abs(dTop - 120) > 2) await fail("worker drawer jumped on a live update", dTop);
 await page.keyboard.press("Escape");
 await page.setViewportSize({ width: 1400, height: 900 });
+
+// Layout: the event board sits beside the office at the same height; the team and the
+// project charts come below.
+const lay = await page.evaluate(() => {
+  const v = document.querySelector(".view-panel").getBoundingClientRect(), f = document.querySelector(".feed-panel").getBoundingClientRect();
+  const t = document.querySelector(".team-panel").getBoundingClientRect(), c = document.querySelector(".charts-section").getBoundingClientRect();
+  return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, chartsBelow: c.top >= t.bottom, overflow: document.documentElement.scrollWidth > innerWidth };
+});
+if (!lay.beside || !lay.sameHeight || !lay.teamBelow || !lay.chartsBelow || lay.overflow) await fail("run layout wrong", lay);
+
+// The page never jumps on live updates: scrolled down with a half-typed message, updates
+// arrive (heartbeats, a new message), and the scroll position, focus and text stay.
+await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+await page.click("#draft"); await page.keyboard.type("half typed");
+const y0 = await page.evaluate(() => scrollY);
+for (let i = 0; i < 3; i++) { await beat("Priya", { status: "working", events: [{ kind: "tool", text: `read: src/file${i}.ts`, ms: 40 }] }); await page.waitForTimeout(300); }
+await say("Update while you scroll");
+await page.waitForTimeout(800);
+const kept = await page.evaluate(() => ({ y: scrollY, focus: document.activeElement?.id, text: document.getElementById("draft").value }));
+if (Math.abs(kept.y - y0) > 2 || kept.focus !== "draft" || kept.text !== "half typed") await fail("the page jumped or lost your typing on a live update", { y0, ...kept });
+await page.fill("#draft", "");
+
+// The event board shows actions next to chat, and the filter narrows it.
+await page.waitForFunction(() => document.querySelectorAll("#feed .act.tool").length >= 3);
+if (!(await page.locator("#feed .act.tool", { hasText: "read: src/file2.ts" }).count())) await fail("tool action missing from the event board");
+await page.click('[data-filter="actions"]');
+if (await page.evaluate(() => [...document.querySelectorAll("#feed .msg")].some((m) => m.offsetParent))) await fail("Actions filter still shows chat");
+await page.click('[data-filter="chat"]');
+if (await page.evaluate(() => [...document.querySelectorAll("#feed .act")].some((m) => m.offsetParent))) await fail("Chat filter still shows actions");
+await page.click('[data-filter="all"]');
+
+// The CEO can be opened from the team list and from the office floor, and you can talk to them.
+await page.click('.member[data-person="ceo"]');
+await page.waitForSelector('.drawer[aria-label="CEO"] #wmsg');
+const winY = await page.evaluate(() => scrollY);
+await page.fill("#wmsg", "Please prioritise the login flow");
+await page.click("#wsend");
+await page.waitForFunction(() => /Please prioritise the login flow/.test(document.querySelector(".drawer .talk")?.textContent || ""));
+if (shots) await page.screenshot({ path: join(shots, "ceo-drawer.png") });
+const sent = (await api("GET", `/api/runs/${runId}`)).messages.filter((m) => m.sender === "human" && m.recipient === "ceo" && m.kind === "command" && /prioritise the login/.test(m.body));
+if (sent.length !== 1) await fail("message to the CEO not sent once as a command", sent);
+if (Math.abs((await page.evaluate(() => scrollY)) - winY) > 2) await fail("opening the CEO scrolled the page");
+await page.keyboard.press("Escape");
+await page.evaluate(() => window.scrollTo(0, 0));
+const ceoAt = await page.evaluate(() => {
+  const o = document.querySelector(".office-host").office, p = o.people.get("ceo"), f = p.feet(), { ox, oy } = o.camera.offset(), r = o.canvas.getBoundingClientRect();
+  return { x: r.left + ox + f.x * o.camera.zoom, y: r.top + oy + (f.y - 14) * o.camera.zoom };
+});
+await page.mouse.click(ceoAt.x, ceoAt.y);
+await page.waitForSelector('.drawer[aria-label="CEO"]', { timeout: 3000 }).catch(() => fail("clicking the CEO on the office floor did not open the CEO", ceoAt));
+await page.keyboard.press("Escape");
+
+// Charts: a second run with an approved plan and tasks moving through the board.
+const plan = {
+  title: "Shop checkout", summary: "Checkout for the shop.", goal: "Customers can pay.",
+  techStack: [{ name: "FastAPI", package: "fastapi", ecosystem: "PyPI", usedFor: "API", uses: "FastAPI", source: "https://fastapi.tiangolo.com", verified: true }],
+  architecture: { components: [{ id: "api", name: "API", kind: "service", tech: "FastAPI" }, { id: "db", name: "DB", kind: "db", tech: "Postgres" }], links: [{ from: "api", to: "db", label: "SQL" }] },
+  stories: [{ id: "S1", title: "Pay", userStory: "As a customer, I want to pay.", acceptance: ["Card payments work"], tasks: [
+    { id: "T1", title: "Cart API", description: "Cart endpoints.", estimateHours: 4 },
+    { id: "T2", title: "Payments", description: "Stripe charge.", estimateHours: 6 },
+    { id: "T3", title: "Receipts", description: "Email receipts.", estimateHours: 2 },
+    { id: "T4", title: "Refunds", description: "Refund endpoint.", estimateHours: 3 }] }],
+  risks: ["Card declines"], outOfScope: ["Crypto"],
+};
+const run2 = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Checkout" })).run.id;
+const pl2 = await api("POST", `/api/runs/${run2}/plans`, { plan });
+await api("POST", `/api/plans/${pl2.id}/decision`, { decision: "approve" });
+const kim = (await api("POST", `/api/runs/${run2}/workers`, { name: "Kim", role: "backend developer", cwd: "/tmp/checkout", taskIds: ["T1", "T2", "T3"] })).id;
+const lee = (await api("POST", `/api/runs/${run2}/workers`, { name: "Lee", role: "reviewer", cwd: "/tmp/checkout", taskIds: ["T4"] })).id;
+const move = (task, status, actor, note) => api("POST", `/api/runs/${run2}/tasks/${task}`, { status, actor, note });
+await move("T1", "in_progress", kim); await move("T1", "review", kim, "tests pass"); await move("T1", "done", lee, "reviewed the diff");
+await move("T2", "in_progress", kim); await move("T4", "blocked", lee, "needs the payments API");
+await api("POST", `/api/workers/${kim}/heartbeat`, { status: "working", events: [{ kind: "tool", text: "bash: pytest -q", ms: 1200, ok: true }, { kind: "tool", text: "bash: npm run build", ms: 900, ok: false }] });
+await page.goto(`${base}/runs/${run2}`);
+await page.waitForSelector(".chart");
+const charts = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".chart")].map((c) => [c.dataset.chart, { sub: c.querySelector(".chart-sub").textContent, svg: !!c.querySelector("svg"), legend: c.querySelector(".chart-legend")?.textContent || "" }])));
+const keys = ["burndown", "flow", "throughput", "cycle", "workload", "status", "activity"];
+if (keys.some((k) => !charts[k]?.svg)) await fail("charts missing", Object.keys(charts));
+if (!/11h of 15h left · 1\/4 done/.test(charts.burndown.sub)) await fail("burndown numbers wrong", charts.burndown.sub);
+if (!/1 done · 1 in flight · 1 blocked · 1 waiting/.test(charts.flow.sub)) await fail("cumulative flow numbers wrong", charts.flow.sub);
+if (!/^1 task done/.test(charts.throughput.sub)) await fail("throughput wrong", charts.throughput.sub);
+if (!/1 done/.test(charts.cycle.sub)) await fail("cycle time wrong", charts.cycle.sub);
+if (!/2 people · 4 tasks · most open: Kim \(2\)/.test(charts.workload.sub)) await fail("workload wrong", charts.workload.sub);
+if (!/1 of 4 tasks done · 1 blocked/.test(charts.status.sub)) await fail("status wrong", charts.status.sub);
+if (!/2 tool calls/.test(charts.activity.sub)) await fail("activity wrong", charts.activity.sub);
+// Moves show on the event board as actions, with the failed tool call in red; no duplicate task echoes.
+const feed2 = await page.evaluate(() => ({ moves: [...document.querySelectorAll("#feed .act.move")].map((e) => e.textContent.replace(/\s+/g, " ")), bad: document.querySelectorAll("#feed .act.tool.bad").length, echoes: document.querySelectorAll("#feed .msg.task").length }));
+if (feed2.moves.length !== 5 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked · needs the payments API/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
+// Live: finishing another task updates the charts without a reload.
+await move("T2", "review", kim, "done"); await move("T2", "done", lee, "checked");
+await page.waitForFunction(() => /5h of 15h left · 2\/4 done/.test(document.querySelector('[data-chart="burndown"] .chart-sub')?.textContent || ""), null, { timeout: 5000 }).catch(async () => fail("charts did not update live", await page.textContent('[data-chart="burndown"] .chart-sub')));
+if (shots) await page.locator(".charts-section").screenshot({ path: join(shots, "charts.png") });
+if (shots) await page.screenshot({ path: join(shots, "run-page.png"), fullPage: true });
+// Phone: one column, no sideways scroll.
+await page.setViewportSize({ width: 390, height: 800 });
+await page.waitForTimeout(300);
+if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)) await fail("run page scrolls sideways on a phone");
+await page.setViewportSize({ width: 1400, height: 900 });
+await page.goto(`${base}/runs/${runId}`);
+await page.waitForSelector(".office-host canvas");
 
 // Dark theme renders the same rooms.
 const dark = await open({ colorScheme: "dark" });
@@ -216,5 +316,5 @@ if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex
 if (errors.length) await fail("console errors", errors);
 
 await browser.close();
-console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place.");
+console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with filters, no page jumps, the CEO opens from the team and the floor and takes messages, live project charts.");
 process.exit(0);

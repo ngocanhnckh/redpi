@@ -478,6 +478,8 @@ Every task runs on **Pi** by default. On the plan page (Stories & tasks), pick a
 
 **Home: all projects.** The home page lists every project on the machine as a card: its latest run, progress, blocked tasks, the faces of the workers online, and a red "needs you" count (plans awaiting approval, workers that are stuck or waiting on you). Projects with active runs come first. Switch between **Active** and **All**, or search by name or path. Click a project to see its runs, active first, then open a run.
 
+The run page puts the live view (Office, Board or Graph) beside the **event board**, with the team and the project charts below. It updates in place: the page never jumps while you scroll, and whatever you are typing stays put.
+
 Every run has three views:
 
 **🏢 Office** (default once workers exist): an animated pixel office where the team works.
@@ -501,11 +503,26 @@ Every run has three views:
 
 **🕸 Graph**: who talks to whom. Edge width is message volume, recent conversations glow; drag to pin a node.
 
+**📣 Event board** (beside the view, same height): team chat and actions in one live feed. Actions are:
+- every task move (who moved it, from → to, and why)
+- every tool call, with its duration; failed calls show in red
+
+Filter with **All / Chat / Actions**, click a name to open that person, click a task id to see its history, and send a message to the CEO, everyone, or one worker from the box at the bottom.
+
+**📈 Project charts** (below the team, live from the task history):
+- **Burndown**: estimated hours left (or tasks, without estimates), with a forecast of the finish at the current pace
+- **Cumulative flow**: tasks in each column over time
+- **Throughput**: tasks done per time slot
+- **Cycle time**: from in progress to done per task, with the average; open tasks show how long they have run so far
+- **Workload**: each person's tasks by status
+- **Status**: the board as a donut with % done
+- **Team activity**: tool calls per person in 5-minute cells over the last two hours
+
 Around the views:
 
 - a sticky **Needs you** strip: blocked tasks, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered
-- the **team** with pixel portraits; each worker's panel shows its tasks, context usage, latest message, a **tool waterfall** (one bar per tool call, width by duration, red if it failed), the activity feed, the `tmux attach` command, **Send** / **Interrupt + send**, and **Resume** when its session is gone
-- the **team chat**, where workers ask each other directly, report to the CEO, and receive your messages. It opens on the newest message and follows new ones while you are at the bottom; scroll up to read and it stays put, with a **↓ N new messages** button to jump back (the worker and task panels keep their place on live updates too)
+- the **team** with pixel portraits, the CEO included. Click anyone (in the team list, on the office floor, or on the event board) for their details and a place to talk to them. The CEO's panel shows what they are doing, your conversation with them, what they last told the team, and **Send** / **Interrupt + send**. Each worker's panel shows its tasks, context usage, latest message, their messages, a **tool waterfall** (one bar per tool call, width by duration, red if it failed), the activity feed, the `tmux attach` command, **Send** / **Interrupt + send**, and **Resume** when its session is gone
+- the event board opens on the newest entry and follows new ones while you are at the bottom; scroll up to read and it stays put, with a **↓ N new** button to jump back (the worker, CEO and task panels keep their place on live updates too)
 
 The office is drawn on a canvas that pauses when the tab is hidden, respects reduced motion (people stay put: no errands, meetings, or flying envelopes), and is decorative for screen readers: the roster, board, and a live announcement region carry the same information.
 
@@ -959,7 +976,7 @@ Smoke coverage includes:
 - HQ API: plan validation, critical path and parallelism maths, token auth and CSRF header, approve / request-changes loop, workers, inbox, tasks
 - Harness workers: fake `claude` / `codex` / `opencode` binaries speaking each tool's JSON events; the runner takes the brief, the agent moves its card and messages the CEO via `redpi-hq`, every turn continues the same session, side questions run on a fork (instructions relayed), interrupt stops a stuck turn, provider trouble raises "needs you", and a killed worker resumes its session. The RedPlan end-to-end test also has the CEO spawn a Claude Code worker for a task the human switched to Claude Code.
 - Plan review (headless Chromium): text highlights, pins on the architecture and Gantt diagrams, edit, send feedback → one numbered, anchored message to the CEO; the next version shows what changed and the earlier comments; phone layout
-- Office (headless Chromium): real heartbeats and messages move the people. Searching sends a worker to the files room and writing code brings them back to type at the desk; teammates talking meet in the meeting room facing each other, with the real message and reply; messages to you go to the YOU terminal; restless trips from the desk and back; idle coffee chats with no invented text; nobody moves under reduced motion; board cards with long paths stay inside their columns; the team chat and worker panel keep your reading place through live updates, with a new-messages button
+- Office (headless Chromium): real heartbeats and messages move the people. Searching sends a worker to the files room and writing code brings them back to type at the desk; teammates talking meet in the meeting room facing each other, with the real message and reply; messages to you go to the YOU terminal; restless trips from the desk and back; idle coffee chats with no invented text; nobody moves under reduced motion; board cards with long paths stay inside their columns; the event board and worker panel keep your reading place through live updates, with a new-entries button; the event board sits beside the office at the same height with working filters; the page never jumps and keeps half-typed text on updates; the CEO opens from the team list and the office floor and takes messages; the seven project charts show exact numbers from the task history and update live; no sideways scroll on a phone
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
