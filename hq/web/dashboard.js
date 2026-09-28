@@ -147,7 +147,7 @@ function needsYou() {
   const { workers, tasks, messages } = state;
   const items = [];
   const name = (id) => workers.find((w) => w.id === id)?.name || id;
-  for (const t of tasks.filter((t) => t.status === "blocked")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}` });
+  for (const t of tasks.filter((t) => t.status === "blocked")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
   for (const w of workers) {
     if (!w.alive && w.status !== "stopped") items.push({ id: w.id, level: "red", text: `${w.name} is offline`, action: "resume" });
     else if (w.needs_input) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_input.reason}` });
@@ -273,7 +273,7 @@ function renderRun() {
       ${plan ? `<a class="btn" href="/plans/${esc(plan.id)}">Plan v${plan.version} ${plan.status === "pending" ? "· needs your approval" : ""}</a>` : `<span class="muted">The CEO is still planning…</span>`}
       <span class="muted" style="margin-left:auto">updated ${ago(run.updated)}</span>`;
   const needs = needsYou();
-  $("needs-slot").innerHTML = needs.length ? `<div class="needs" role="region" aria-label="Needs you"><span class="needs-title">Needs you</span>${needs.map((n) => `<button class="needs-item ${n.level}" data-open="${esc(n.id || "")}" ${n.action ? `data-action="${n.action}"` : ""}>${esc(n.text)}</button>`).join("")}</div>` : "";
+  $("needs-slot").innerHTML = needs.length ? `<div class="needs" role="region" aria-label="Needs you"><span class="needs-title">Needs you</span>${needs.map((n) => `<button class="needs-item ${n.level}" data-open="${esc(n.id || "")}" ${n.action ? `data-action="${n.action}"` : ""} title="${esc(n.text)}">${esc(n.text)}</button>`).join("")}</div>` : "";
   $("stats").innerHTML = `
       <div class="panel stat"><div class="v">${done}/${tasks.length || "–"}</div><div class="k">Tasks done</div></div>
       <div class="panel stat"><div class="v">${tasks.filter((t) => t.status === "in_progress").length}</div><div class="k">In progress</div></div>
@@ -515,6 +515,14 @@ async function renderPerson(root) {
       const c = e.target.closest("[data-copy]");
       if (c) { try { await navigator.clipboard.writeText(c.dataset.copy); toast("Copied"); } catch { toast("Select the command and copy it"); } }
       if (e.target.closest("#resume")) resume(id);
+      const rt = e.target.closest("[data-reply-task]");
+      if (rt) {
+        const input = root.querySelector("#wmsg");
+        const lead = `About ${rt.dataset.replyTask}: `;
+        if (!input.value.startsWith(lead)) input.value = lead + input.value;
+        input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+        return;
+      }
       const tk = e.target.closest("[data-task]"), who = e.target.closest("[data-person]");
       if (tk) { openPanel = { task: tk.dataset.task }; renderPanel(); }
       else if (who && who.dataset.person !== id) select(who.dataset.person);
@@ -541,11 +549,16 @@ async function renderPerson(root) {
   // Live parts: status, banners, then the tab's content.
   const st = w ? workerState(w) : state.run.status;
   $("p-status").innerHTML = w ? `<span class="pill ${st === "working" ? "green" : st === "needs" || st === "offline" ? "red" : ""}">${esc(st)}</span>` : pill(state.run.status);
+  // What this person is blocked on, in full, so you can answer it right here.
+  const blocked = w ? state.tasks.filter((t) => t.worker_id === id && t.status === "blocked") : [];
+  const blockers = blocked.map((t) => `<div class="block-card"><div class="block-head"><span class="pill red">blocked</span><button class="linkish" data-task="${esc(t.id)}">${esc(t.id)}</button> <b>${esc(t.title)}</b><span style="flex:1"></span>${tab === "chat" ? `<button class="btn" data-reply-task="${esc(t.id)}">Reply about ${esc(t.id)}</button>` : ""}</div><div class="block-note">${esc(t.note || "No reason given.")}</div></div>`).join("");
   const banner = w && !w.alive ? `<div class="banner red">${esc(name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>`
     : w?.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w?.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>`
       : w?.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : "";
   if (tab === "chat") {
-    $("p-banner").innerHTML = banner;
+    const top = banner + blockers;
+    const slot = $("p-banner");
+    if (slot.dataset.html !== top) { slot.innerHTML = top; slot.dataset.html = top; }   // keep your scroll in a long note
     const thread = $("thread");
     const msgs = conversation(id);
     const atEnd = thread.dataset.stick === "1" || !thread.children.length || thread.scrollTop + thread.clientHeight >= thread.scrollHeight - 40;
@@ -553,7 +566,7 @@ async function renderPerson(root) {
     const items = msgs.map((m) => ({ key: `m${m.id}`, html: bubble(m) }));
     const pending = pendingNote(id, name, msgs);
     if (pending) items.push({ key: `pending${msgs.at(-1)?.id}`, html: pending });
-    if (!items.length) items.push({ key: "empty", html: `<div class="thread-empty">No messages yet. Say hello, give an instruction, or ask a question: ${esc(name)} replies here.</div>` });
+    if (!items.length) items.push({ key: blocked.length ? "empty-blocked" : "empty", html: `<div class="thread-empty">${blocked.length ? `Answer the blocker above (or use Reply about ${esc(blocked[0].id)}); ${esc(name)}'s reply appears here.` : `No messages yet. Say hello, give an instruction, or ask a question: ${esc(name)} replies here.`}</div>` });
     const existing = new Map([...thread.children].map((el) => [el.dataset.key, el]));
     const tpl = document.createElement("template");
     let prev = null;
@@ -572,7 +585,7 @@ async function renderPerson(root) {
   }
   const body = $("p-body");
   const pos = { top: body.scrollTop };
-  body.innerHTML = tab === "activity" && !w ? updatesList("ceo") : w ? await workerDetails(w, tab, banner) : ceoDetails();
+  body.innerHTML = tab === "activity" && !w ? updatesList("ceo") : w ? await workerDetails(w, tab, tab === "details" ? banner + blockers : banner) : ceoDetails();
   body.scrollTop = pos.top;
 }
 

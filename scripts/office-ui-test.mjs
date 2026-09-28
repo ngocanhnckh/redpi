@@ -314,7 +314,8 @@ const kim = (await api("POST", `/api/runs/${run2}/workers`, { name: "Kim", role:
 const lee = (await api("POST", `/api/runs/${run2}/workers`, { name: "Lee", role: "reviewer", cwd: "/tmp/checkout", taskIds: ["T4"] })).id;
 const move = (task, status, actor, note) => api("POST", `/api/runs/${run2}/tasks/${task}`, { status, actor, note });
 await move("T1", "in_progress", kim); await move("T1", "review", kim, "tests pass"); await move("T1", "done", lee, "reviewed the diff");
-await move("T2", "in_progress", kim); await move("T4", "blocked", lee, "needs the payments API");
+await move("T2", "in_progress", kim); const blocker = "needs the payments API. " + "The refund endpoint calls the charge lookup, which is not merged yet; once Kim lands T2 I can finish in about an hour. Could you confirm refunds should be full-amount only for now? ".repeat(3) + "END-OF-BLOCKER";
+await move("T4", "blocked", lee, blocker);
 await api("POST", `/api/workers/${kim}/heartbeat`, { status: "working", events: [{ kind: "tool", text: "bash: pytest -q", ms: 1200, ok: true }, { kind: "tool", text: "bash: npm run build", ms: 900, ok: false }] });
 await page.goto(`${base}/runs/${run2}`);
 await page.waitForSelector(".chart");
@@ -331,6 +332,19 @@ if (!/2 tool calls/.test(charts.activity.sub)) await fail("activity wrong", char
 // Moves show on the event board as actions, with the failed tool call in red; no duplicate task echoes.
 const feed2 = await page.evaluate(() => ({ moves: [...document.querySelectorAll("#feed .act.move")].map((e) => e.textContent.replace(/\s+/g, " ")), bad: document.querySelectorAll("#feed .act.tool.bad").length, echoes: document.querySelectorAll("#feed .msg.task").length }));
 if (feed2.moves.length !== 5 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked · needs the payments API/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
+// A blocker is readable in full: the Needs you item opens the person with the whole reason at the
+// top of their chat, and "Reply about T4" starts your answer.
+const item = page.locator(".needs-item", { hasText: "T4 blocked" });
+if (!/END-OF-BLOCKER/.test(await item.getAttribute("title"))) await fail("the Needs you item should carry the full blocker as its tooltip");
+await item.click();
+await page.waitForSelector('.drawer[aria-label="Lee"] .block-card');
+const card = await page.evaluate(() => { const n = document.querySelector(".drawer .block-note"), r = n.getBoundingClientRect(); return { text: n.textContent, clipped: n.scrollHeight > n.clientHeight + 1 && getComputedStyle(n).overflowY !== "auto", visible: r.height > 40 && r.top >= 0 }; });
+if (!/END-OF-BLOCKER/.test(card.text) || card.clipped || !card.visible) await fail("the full blocker should be readable in Lee's chat", card);
+await page.click('[data-reply-task="T4"]');
+if (!(await page.evaluate(() => document.activeElement?.id === "wmsg" && document.getElementById("wmsg").value === "About T4: "))) await fail("Reply about T4 should start the answer in the box");
+if (shots) await page.screenshot({ path: join(shots, "blocker.png") });
+await page.keyboard.press("Escape");
+
 // Live: finishing another task updates the charts without a reload.
 await move("T2", "review", kim, "done"); await move("T2", "done", lee, "checked");
 await page.waitForFunction(() => /5h of 15h left · 2\/4 done/.test(document.querySelector('[data-chart="burndown"] .chart-sub')?.textContent || ""), null, { timeout: 5000 }).catch(async () => fail("charts did not update live", await page.textContent('[data-chart="burndown"] .chart-sub')));
