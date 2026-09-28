@@ -104,6 +104,23 @@
   .pz-expanded { position: fixed; inset: 12px; z-index: 45; display: flex; flex-direction: column; background: var(--bg); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
   .pz-expanded .pz-stage { flex: 1; height: auto !important; }
   body.pz-lock { overflow: hidden; }
+  /* Feature flows (flows.js) */
+  .flow { margin-bottom: 14px; }
+  .flow-title { text-transform: none; letter-spacing: 0; font-size: 15px; color: var(--text); }
+  .flow-stories { display: inline-flex; gap: 4px; }
+  .flow-trigger { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .flowchart text { font-family: var(--sans); font-size: 13px; fill: var(--text); }
+  .flowchart .fwhere { font-family: var(--mono); font-size: 11px; }
+  .flowchart .fmeta, .flowchart .fnum, .flowchart .fend { font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+  .flowchart .ftrigger { font-size: 12px; fill: var(--muted); }
+  .flowchart .edge { stroke: var(--faint); fill: none; stroke-width: 1.5; }
+  .flowchart .elabel { font-family: var(--mono); font-size: 11px; fill: var(--amber); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  .flow-steps { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 4px; font-size: 13.5px; }
+  .fs-where { font-family: var(--mono); font-size: 12px; }
+  .fs-meta { color: var(--muted); }
+  .fs-next { color: var(--amber); font-family: var(--mono); font-size: 12px; }
+  .story-flows { font-size: 13px; margin: 0 0 8px; color: var(--muted); }
+  .story-flows a { color: var(--cyan); }
   .arch .elabel { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
   .diagram.pinning, .diagram.pinning * { cursor: crosshair; }
   .pin { position: absolute; transform: translate(-50%, -100%); min-width: 24px; height: 24px; padding: 0 6px; border-radius: 12px 12px 12px 2px; border: 2px solid var(--bg); background: var(--amber); color: #1a1200;

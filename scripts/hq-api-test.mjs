@@ -48,6 +48,20 @@ if (!validatePlan(cyclic).errors.some((e) => e.includes("cycle"))) fail("cycle n
 const badDep = structuredClone(plan);
 badDep.stories[1].tasks[0].dependsOn = ["T99"];
 if (!validatePlan(badDep).errors.some((e) => e.includes("T99"))) fail("unknown dependency not detected");
+// Flows: broken references are errors, gaps are warnings.
+if (!validatePlan(plan).warnings.some((w) => w.startsWith("no flows"))) fail("a plan without flows should be warned");
+const sid = plan.stories[0].id;
+const flow = { id: "login", title: "Sign in", storyIds: [sid], steps: [
+  { id: "s1", where: "Browser · Next.js form", action: "User types username and password", kind: "user" },
+  { id: "s2", where: "NestJS AuthService", action: "Password matches the hash?", kind: "decision", next: [{ to: "s3", label: "yes" }, { to: "s4", label: "no" }] },
+  { id: "s3", where: "NestJS", action: "Issue a session", end: true },
+  { id: "s4", where: "Browser", action: "Show an error", next: [{ to: "s1", label: "try again" }] } ] };
+const withFlow = validatePlan({ ...plan, flows: [flow] });
+if (withFlow.errors.length) fail(`valid flow rejected: ${withFlow.errors.join("; ")}`);
+if (withFlow.warnings.some((w) => w.startsWith("no flows"))) fail("flows present but still warned as missing");
+const badFlow = validatePlan({ ...plan, flows: [{ ...flow, storyIds: ["NOPE"], steps: [...flow.steps.slice(0, 3), { id: "s4", action: "x", next: [{ to: "zz" }] }, { id: "s4", action: "dup" }] }] });
+for (const want of ["unknown story NOPE", "unknown step zz", "duplicate step id s4"]) if (!badFlow.errors.some((e) => e.includes(want))) fail(`flow check missing: ${want} (${badFlow.errors.join("; ")})`);
+if (!validatePlan({ ...plan, flows: [{ ...flow, steps: [flow.steps[0], { ...flow.steps[1], next: [{ to: "s1" }] }] }] }).warnings.some((w) => w.includes("a decision should list each branch"))) fail("one-branch decision not warned");
 
 // A fake `claude` on the hub's PATH: installed harnesses are detected with `<bin> --version`.
 const fakeBin = join(dir, "fakebin");

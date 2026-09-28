@@ -165,7 +165,16 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   const wideRun = (await api("POST", "/api/runs", { projectPath: "/home/yitec/arrowish", title: "Wide diagram" })).run.id;
   // Two cards for one package (as real plans do: the library and one of its parts).
   const techStack = [...plan.techStack, { name: "deepagents LocalShellBackend", package: "deepagents", ecosystem: "PyPI", usedFor: "the sandboxed shell", uses: "LocalShellBackend(root_dir, env)", source: "https://pypi.org/project/deepagents/", verified: true }];
-  const wide = await api("POST", `/api/runs/${wideRun}/plans`, { plan: { ...plan, techStack, architecture: { components: comps, links } } });
+  // A feature flow like a real sign-in: a decision with two branches and a "try again" loop.
+  const flows = [{ id: "login", title: "Sign in", storyIds: ["S1"], trigger: "User opens /login", steps: [
+    { id: "s1", kind: "user", where: "Browser · Next.js login form", action: "User types username and password and presses Sign in", data: "username + password" },
+    { id: "s2", kind: "service", where: "NestJS AuthController", action: "Receives the credentials over HTTPS", tech: "POST /auth/login" },
+    { id: "s3", kind: "db", where: "NestJS AuthService · Postgres", action: "Looks up the user and compares the password with the stored hash", tech: "bcrypt.compare", data: "users.password_hash" },
+    { id: "s4", kind: "decision", where: "NestJS AuthService", action: "Does the password match?", next: [{ to: "s5", label: "yes" }, { to: "s6", label: "no" }] },
+    { id: "s5", kind: "service", where: "NestJS AuthService", action: "Issues a session token", data: "JWT in an httpOnly cookie", next: [{ to: "s7" }] },
+    { id: "s6", kind: "ui", where: "Browser · login form", action: "Shows 'wrong username or password'", next: [{ to: "s1", label: "try again" }] },
+    { id: "s7", kind: "ui", where: "Browser", action: "Opens the dashboard", end: true } ] }];
+  const wide = await api("POST", `/api/runs/${wideRun}/plans`, { plan: { ...plan, techStack, flows, architecture: { components: comps, links } } });
   const w = await ctx.newPage();
   w.on("pageerror", (e) => errors.push(e.message));
   await w.goto(`${base}/plans/${wide.id}`);
@@ -234,6 +243,40 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   // The Gantt chart gets the same frame.
   await w.click("[data-tab=timeline]");
   await w.waitForSelector(".pz #gantt svg");
+  // Flows: the story links to its flow; the flow draws every step, labels the branches, lists the
+  // steps as text with a comment button each, and a pin on a step names the flow and the step.
+  await w.click("[data-tab=stories]");
+  await w.waitForSelector("details.story");
+  await w.evaluate(() => { document.querySelector('details[data-story="S1"]').open = true; });
+  await w.click('[data-goto-flow="login"]');
+  await w.waitForSelector('[data-tab=flows][aria-selected=true]');
+  await w.waitForSelector("#flow-login .flowchart");
+  const fc = await w.evaluate(() => ({
+    steps: document.querySelectorAll('#flow-login .flowchart [data-anchor^="flowstep:login:"]').length,
+    labels: [...document.querySelectorAll("#flow-login .flowchart .elabel")].map((t) => t.textContent).sort(),
+    list: document.querySelectorAll("#flow-login .flow-steps li").length,
+    buttons: document.querySelectorAll('#flow-login .flow-steps [data-card-comment^="flowstep:login:"]').length,
+    overlap: (() => { const r = [...document.querySelectorAll('#flow-login .flowchart [data-anchor^="flowstep:"] rect')].map((x) => x.getBoundingClientRect()); return r.some((a, i) => r.some((b, j) => j > i && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom)); })(),
+  }));
+  if (fc.steps !== 7 || fc.list !== 7 || fc.buttons !== 7) fail(`flow should show 7 steps, 7 list items, 7 comment buttons: ${JSON.stringify(fc)}`);
+  if (JSON.stringify(fc.labels) !== JSON.stringify(["no", "try again", "yes"])) fail(`flow branch labels wrong: ${fc.labels}`);
+  if (fc.overlap) fail("flow step boxes overlap");
+  if (process.env.REDPI_SHOTS) { await w.locator("#flow-login").scrollIntoViewIfNeeded(); await w.screenshot({ path: `${process.env.REDPI_SHOTS}/flow.png` }); }
+  await w.click('[data-pin="flow:login"]');
+  await w.locator('[data-anchor="flowstep:login:s3"] rect').scrollIntoViewIfNeeded();
+  const s3 = await w.locator('[data-anchor="flowstep:login:s3"] rect').boundingBox();
+  await w.mouse.click(s3.x + s3.width / 2, s3.y + s3.height / 2);
+  await w.waitForSelector(".composer-pop textarea");
+  const flowWhere = await w.textContent(".cp-where");
+  if (!flowWhere.startsWith("Flow “Sign in” › step 3 · Looks up the user")) fail(`flow pin named ${flowWhere}`);
+  await w.fill(".composer-pop textarea", "Lock the account after 5 failures.");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector('.diagram[data-diagram="flow:login"] .pin');
+  await w.click('[data-pin="flow:login"]');
+  await w.click('[data-card-comment="flowstep:login:s6"]');
+  await w.fill(".composer-pop textarea", "Do not say which one was wrong.");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector('[data-anchor="flowstep:login:s6"] .card-badge');
   // Every block has a 💬 button: stories, tasks, acceptance criteria, risks, overview.
   await w.click("[data-tab=stories]");
   await w.waitForSelector("details.story");
@@ -275,7 +318,7 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   await w.click("#send");
   await w.waitForSelector("text=You asked for changes");
   const wideMsg = (await api("GET", `/api/runs/${wideRun}/inbox?for=ceo&after=0`)).find((m) => m.kind === "decision")?.body || "";
-  for (const line of ["[Stories & tasks › Task T2 · Support agent]: Split this into two tasks.", "[Tech stack › deepagents LocalShellBackend (deepagents)]: Run it inside a container, not on the host.", '[Tech stack › deepagents LocalShellBackend (deepagents)] on "the sandboxed shell": Which commands may it run?'])
+  for (const line of ["[Flow “Sign in” › step 3 · Looks up the user and compares the password with …]: Lock the account after 5 failures.", "[Flows › Flow Sign in · step 6]: Do not say which one was wrong.", "[Stories & tasks › Task T2 · Support agent]: Split this into two tasks.", "[Tech stack › deepagents LocalShellBackend (deepagents)]: Run it inside a container, not on the host.", '[Tech stack › deepagents LocalShellBackend (deepagents)] on "the sandboxed shell": Which commands may it run?'])
     if (!wideMsg.includes(line)) fail(`CEO message is missing: ${line}\n${wideMsg}`);
   // Phone: one finger drags the diagram, and the page itself never scrolls sideways.
   const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light", hasTouch: true });
@@ -290,5 +333,5 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
 await browser.close();
 const real = errors.filter((e) => !/status of 401/.test(e));
 if (real.length) fail(`console errors:\n${real.join("\n")}`);
-console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), a comment button on every story, task, criterion, risk and card, phone layout.");
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), a comment button on every story, task, criterion, risk and card, feature flows (story link, steps, branches, pins, step comments), phone layout.");
 process.exit(0);

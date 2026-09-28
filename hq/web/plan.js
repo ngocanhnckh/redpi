@@ -1,12 +1,14 @@
 import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
 import { mountPanZoom, panZoomFrame } from "/static/panzoom.js";
+import { drawFlows, flowsView } from "/static/flows.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
-const TABS = [["stories", "Stories & tasks"], ["timeline", "Timeline & critical path"], ["architecture", "Architecture"], ["tech", "Tech stack"], ["risks", "Risks & notes"]];
+const TABS = [["stories", "Stories & tasks"], ["flows", "Flows"], ["timeline", "Timeline & critical path"], ["architecture", "Architecture"], ["tech", "Tech stack"], ["risks", "Risks & notes"]];
 const TAB_NAME = { ...Object.fromEntries(TABS), overview: "Overview" };
 const DIAGRAM_NAME = { gantt: "Gantt chart", arch: "Architecture diagram" };
+const diagramName = (d) => d?.startsWith("flow:") ? `Flow “${data?.plan?.flows?.find((f) => `flow:${f.id}` === d)?.title || d.slice(5)}”` : DIAGRAM_NAME[d];
 const store = { get(k) { try { return sessionStorage.getItem(k); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, v); } catch {} } };
 let tab = store.get("redplan-tab") || "stories";
 let harnessList = null;
@@ -67,6 +69,7 @@ function render() {
   wireDecision(pending);
   const body = document.getElementById("tab-body");
   if (tab === "stories") { body.innerHTML = harnessBar(plan, pending) + storiesView(plan, schedule, pending); wireHarness(); }
+  if (tab === "flows") { body.innerHTML = flowsView(plan, pending, pinButton); drawFlows(plan, planId); }
   if (tab === "timeline") { body.innerHTML = timelineView(plan, schedule, pending); drawGantt(plan, schedule); }
   if (tab === "architecture") { body.innerHTML = `<div class="panel"><div class="panel-head"><h2>Architecture</h2>${pending ? pinButton("arch") : ""}</div><div class="panel-body" id="arch"></div></div>`; drawArchitecture(plan.architecture); }
   if (tab === "tech") body.innerHTML = techView(plan.techStack || [], pending);
@@ -179,7 +182,7 @@ function applyAnnotations() {
     const scope = a.tab === "overview" ? hero : a.tab === tab ? tabBody : null;
     if (!scope) continue;
     if (a.kind === "card") {
-      const card = scope.querySelector(`[data-anchor="${CSS.escape(a.target || "")}"]`);
+      const card = [...scope.querySelectorAll(`[data-anchor="${CSS.escape(a.target || "")}"]`)].find((e) => !e.closest("svg"));
       const spot = card?.querySelector(`.cmt-slot[data-for="${CSS.escape(a.target || "")}"]`) || card;
       if (!spot) { document.querySelector(`.fb-item[data-cid="${c.id}"]`)?.classList.add("orphan"); continue; }
       const badge = document.createElement("button");
@@ -285,6 +288,11 @@ addEventListener("scroll", () => { if (selection) checkSelection(); }, { passive
 
 // Diagram pins: in comment mode a click drops a numbered bubble where you clicked.
 function wirePins() {
+  app.querySelectorAll("[data-goto-flow]").forEach((a) => a.onclick = (e) => {
+    e.preventDefault();
+    switchTab("flows");
+    document.getElementById(`flow-${a.dataset.gotoFlow}`)?.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  });
   app.querySelectorAll("[data-card-comment]").forEach((b) => b.onclick = (e) => {
     e.stopPropagation();
     e.preventDefault(); // a button in a story header must not open or close the story
@@ -302,7 +310,7 @@ function wirePins() {
       const r = host.getBoundingClientRect();
       const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
       const t = pinTarget(svg, e);
-      const label = `${DIAGRAM_NAME[host.dataset.diagram]}${t.label ? ` › ${t.near ? "near " : ""}${t.label}` : ""}`;
+      const label = `${diagramName(host.dataset.diagram)}${t.label ? ` › ${t.near ? "near " : ""}${t.label}` : ""}`;
       addComment({ kind: "pin", tab, diagram: host.dataset.diagram, x, y, target: t.target, label }, null, { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY });
     };
   });
@@ -347,6 +355,7 @@ function storiesView(plan, schedule, pending) {
         <span class="story-tools" style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center">${onCrit ? `<span class="pill red">critical path</span>` : ""}${(s.dependsOn || []).length ? `<span class="pill">after ${esc(s.dependsOn.join(", "))}</span>` : ""}<span class="pill">${s.tasks.length} tasks · ${hours(hrs)}</span></span>
       </summary>
       <div class="story-body">
+        ${(plan.flows || []).some((f) => (f.storyIds || []).includes(s.id)) ? `<div class="story-flows no-annotate">Flow: ${(plan.flows || []).filter((f) => (f.storyIds || []).includes(s.id)).map((f) => `<a href="#flow-${esc(f.id)}" data-goto-flow="${esc(f.id)}">${esc(f.title)}</a>`).join(" · ")}</div>` : ""}
         ${s.description ? `<p style="margin:0 0 8px">${esc(s.description)}</p>` : ""}
         ${(s.acceptance || []).length ? `<div class="section-title">Acceptance</div><ul class="acc">${s.acceptance.map((a, ai) => `<li data-anchor="acc:${esc(s.id)}:${ai}" data-label="${esc(`Story ${s.id} · acceptance ${ai + 1}`)}">${esc(a)}</li>`).join("")}</ul>` : ""}
         ${s.tasks.map((t) => { const st = schedule.tasks[t.id]; return `

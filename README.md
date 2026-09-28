@@ -435,12 +435,26 @@ The Pi session you type this into becomes the **CEO**. It works in four phases:
 
 ### The plan page
 
-RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows expandable stories and tasks, a Gantt chart with the critical path in red, the parallel waves, an architecture diagram, and the tech stack with verification status.
+RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows:
+- expandable stories and tasks
+- a **flowchart for each feature**
+- a Gantt chart with the critical path in red, and the parallel waves
+- an architecture diagram
+- the tech stack with verification status
+
+**Flows** show how each feature works, step by step, so you can confirm the business logic and the technology before anything is built. For example: "User types username and password (Browser · Next.js login form)" → "POST /auth/login (NestJS AuthController)" → "Compare with the bcrypt hash (NestJS AuthService · Postgres)" → **Match?** yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'" → try again.
+- Each step names where it runs and what data moves.
+- Decisions show every branch.
+- Each story links to its flow.
+- Below the chart, the same steps are listed as text, one comment button per step.
+
+**Big diagrams** (flows, Gantt, architecture) sit in a pan/zoom viewer: drag to move, Ctrl/⌘ + scroll or pinch to zoom, **Fit** to see everything, **Expand** for a full-window view.
 
 **Review it like a document.**
 
 - **Highlight** any text (a task, an acceptance criterion, the summary, a tech choice) and click **💬 Comment**.
-- On the timeline and architecture tabs, press **💬 Comment on diagram** and click anywhere on the Gantt chart or the architecture to drop a numbered comment bubble. RedPi records what you clicked on (for example "Architecture diagram › Support agent" or "Gantt chart › T3 · React widget").
+- Or press the **💬 Comment** button on any story, task, acceptance criterion, flow step, risk, tech card or panel to comment on the whole thing.
+- On the flows, timeline and architecture tabs, press **💬 Comment on diagram** and click anywhere on the chart to drop a numbered comment bubble. RedPi records what you clicked on (for example "Architecture diagram › Support agent" or "Gantt chart › T3 · React widget").
 - Comments are saved as drafts as you go, listed in the side panel (click one to jump to it, ✎ to edit or delete), and counted on each tab.
 - When you are done, click **Send feedback**: the CEO session in your terminal receives one message with every comment numbered and anchored to its place, revises the plan, and submits a new version. The terminal shows "HQ: plan feedback received", and you can keep chatting with the CEO there as usual.
 - The new version opens with **What changed since v1**, one line per comment (`#1 …`), and your earlier comments beside it.

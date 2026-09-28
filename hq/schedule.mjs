@@ -76,6 +76,39 @@ export function validatePlan(plan) {
     if (!comps.has(link?.from) || !comps.has(link?.to)) errors.push(`architecture link ${link?.from} → ${link?.to}: unknown component`);
   }
 
+  // Flows: one flowchart per feature. Broken references are errors; gaps are warnings.
+  if (plan.flows !== undefined && !Array.isArray(plan.flows)) errors.push("flows must be a list");
+  const flows = list(plan.flows);
+  const flowIds = new Set();
+  const explained = new Set();
+  for (const [fi, flow] of flows.entries()) {
+    const fw = `flows[${fi}]${flow?.id ? ` (${flow.id})` : ""}`;
+    if (!ID.test(flow?.id || "")) errors.push(`${fw}: id must be a short slug like login`);
+    else if (flowIds.has(flow.id)) errors.push(`${fw}: duplicate flow id ${flow.id}`);
+    flowIds.add(flow?.id);
+    if (!text(flow?.title)) errors.push(`${fw}: title is required (the feature in plain words)`);
+    for (const sid of list(flow?.storyIds)) { if (!storyIds.has(sid)) errors.push(`${fw}: storyIds has unknown story ${sid}`); else explained.add(sid); }
+    const steps = list(flow?.steps);
+    if (steps.length < 2) errors.push(`${fw}: needs at least two steps`);
+    const stepIds = new Set();
+    for (const [si, step] of steps.entries()) {
+      const sw = `${fw}.steps[${si}]${step?.id ? ` (${step.id})` : ""}`;
+      if (!text(step?.id)) errors.push(`${sw}: id is required`);
+      else if (stepIds.has(step.id)) errors.push(`${sw}: duplicate step id ${step.id}`);
+      stepIds.add(step?.id);
+      if (!text(step?.action)) errors.push(`${sw}: action is required (what happens, in plain words)`);
+      if (!text(step?.where)) warnings.push(`${sw}: say where it happens (component and technology)`);
+      if (step?.component && !comps.has(step.component)) warnings.push(`${sw}: component ${step.component} is not in the architecture`);
+    }
+    for (const [si, step] of steps.entries()) {
+      const next = list(step?.next);
+      for (const n of next) if (!stepIds.has(n?.to)) errors.push(`${fw}.steps[${si}] (${step?.id}): next goes to unknown step ${n?.to}`);
+      if (step?.kind === "decision" && next.length < 2) warnings.push(`${fw}.steps[${si}] (${step?.id}): a decision should list each branch in next, with a label`);
+    }
+  }
+  if (flows.length) for (const id of storyIds) if (!explained.has(id)) warnings.push(`story ${id}: no flow explains it (add storyIds to a flow)`);
+  if (!flows.length && stories.length) warnings.push("no flows: draw one flowchart per feature so the human can check the business logic and the tech at each step");
+
   if (!errors.length) {
     const cycle = findCycle(taskGraph(plan));
     if (cycle) errors.push(`dependency cycle: ${cycle.join(" → ")}`);
