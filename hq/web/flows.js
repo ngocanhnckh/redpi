@@ -33,7 +33,7 @@ export function flowEdges(flow) {
   return edges;
 }
 
-function wrap(text, width, maxLines) {
+export function wrapText(text, width, maxLines) {
   const words = String(text || "").split(/\s+/).filter(Boolean);
   const lines = [];
   let line = "";
@@ -97,8 +97,8 @@ export function drawFlows(plan, planId) {
     const L = layout(f);
     const W = 300, GX = 70, GY = 58, pad = 24, TOP = 16;
     const boxes = L.steps.map((s) => {
-      const action = wrap(s.action, 38, 4);
-      const meta = wrap([s.tech, s.data ? `data: ${s.data}` : ""].filter(Boolean).join(" · "), 46, 2);
+      const action = wrapText(s.action, 38, 4);
+      const meta = wrapText([s.tech, s.data ? `data: ${s.data}` : ""].filter(Boolean).join(" · "), 46, 2);
       return { s, action, meta, h: 34 + action.length * 17 + (meta.length ? 6 + meta.length * 13 : 0) + 10 };
     });
     const rows = Math.max(0, ...L.row) + 1, cols = Math.max(0, ...L.col) + 1;
@@ -113,7 +113,7 @@ export function drawFlows(plan, planId) {
     let svg = `<svg class="flowchart" width="${width}" height="${height}" role="img" aria-label="${esc(`Flow: ${f.title}`)}"><defs><marker id="farr-${esc(f.id)}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
     let labels = "";
     const taken = [];
-    const place = (x, y) => { while (taken.some((t) => Math.abs(t.x - x) < 90 && Math.abs(t.y - y) < 13)) y += 14; taken.push({ x, y }); return y; };
+    const place = (x, y, h = 12) => { while (taken.some((t) => Math.abs(t.x - x) < 90 && y - 10 < t.y - 10 + t.h && t.y - 10 < y - 10 + h)) y += 14; taken.push({ x, y, h }); return y; };
     for (const e of L.edges) {
       const a = pos[e.from], b = pos[e.to];
       let d, lx, ly;
@@ -127,7 +127,10 @@ export function drawFlows(plan, planId) {
         lx = (x1 + x2) / 2 + (x1 === x2 ? 6 : 0); ly = (y1 + y2) / 2 + 4;
       }
       svg += `<path class="edge" d="${d}" marker-end="url(#farr-${esc(f.id)})"/>`;
-      if (e.label) labels += `<text class="elabel" x="${lx}" y="${place(lx, ly)}" text-anchor="${L.back.has(e) ? "start" : x1Same(a, b) ? "start" : "middle"}">${esc(trim(e.label, 28))}</text>`;
+      if (e.label) {
+        const lines = wrapText(e.label, 22, 3), y0 = place(lx, ly - (lines.length - 1) * 6, lines.length * 12 + 2), anchor = L.back.has(e) || x1Same(a, b) ? "start" : "middle";
+        labels += `<text class="elabel" x="${lx}" y="${y0}" text-anchor="${anchor}"><title>${esc(e.label)}</title>${lines.map((ln, i) => `<tspan x="${lx}" dy="${i ? 12 : 0}">${esc(ln)}</tspan>`).join("")}</text>`;
+      }
     }
     if (f.trigger) svg += `<text class="ftrigger" x="${pos[0].x + W / 2}" y="${pos[0].y - 8}" text-anchor="middle">▶ ${esc(trim(f.trigger, 48))}</text>`;
     boxes.forEach((b, i) => {

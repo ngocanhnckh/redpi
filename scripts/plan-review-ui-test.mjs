@@ -160,7 +160,7 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
 {
   const comps = ["lib:library:Framework mapping data", "web:ui:ARROW Web", "api:service:ARROW API", "worker:agent:ARROW Worker", "sup:agent:Deep Agent supervisor", "sandbox:service:CLI sandbox", "pg:db:Postgres", "s3:external:Object store", "llm:model:Model gateway", "q:queue:Job queue"]
     .map((c) => { const [id, kind, name] = c.split(":"); return { id, kind, name, tech: `${kind} tech` }; });
-  const links = [["lib", "web", "matrix + coverage rows"], ["web", "api", "REST"], ["api", "worker", "run control, matrix, checklist"], ["worker", "sup", "drives assessment"], ["worker", "sup", "maps ingests"], ["sup", "sandbox", "shell"], ["sup", "worker", "progress"], ["api", "pg", "SQL"], ["api", "s3", "reports"], ["api", "llm", "summaries"], ["api", "q", "jobs"]]
+  const links = [["lib", "web", "matrix + coverage rows"], ["web", "api", "REST"], ["api", "worker", "run control, matrix, checklist"], ["worker", "sup", "drives assessment"], ["worker", "sup", "maps ingests"], ["sup", "sandbox", "composes CLI commands"], ["sup", "worker", "progress"], ["sup", "s3", "typed dead-end decisions and escalations to the operator"], ["sup", "llm", "planning prompts with long context windows"], ["api", "pg", "SQL"], ["api", "s3", "reports"], ["api", "llm", "summaries"], ["api", "q", "jobs"]]
     .map(([from, to, label]) => ({ from, to, label }));
   const wideRun = (await api("POST", "/api/runs", { projectPath: "/home/yitec/arrowish", title: "Wide diagram" })).run.id;
   // Two cards for one package (as real plans do: the library and one of its parts).
@@ -196,6 +196,13 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
     return rs.some((a, i) => rs.some((b, j) => j > i && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom));
   });
   if (overlaps) fail("architecture link labels overlap");
+  // Long labels wrap instead of being cut, and two links between one pair share one label.
+  const labelTexts = await w.$$eval(".arch .elabel", (ts) => ts.map((t) => [...t.querySelectorAll("tspan")].map((x) => x.textContent).join(" ")));
+  if (!labelTexts.includes("typed dead-end decisions and escalations to the operator")) fail(`long label was not wrapped whole: ${labelTexts.join(" | ")}`);
+  if (!labelTexts.includes("drives assessment · maps ingests")) fail(`two links between one pair should share a label: ${labelTexts.join(" | ")}`);
+  if (labelTexts.some((t) => t.includes("…"))) fail(`a label was cut: ${labelTexts.join(" | ")}`);
+  // Nothing to scroll when the whole diagram fits: no scrollbars.
+  if (!(await w.$eval(".pz-sb-x", (b) => b.hidden))) fail("scrollbar shown although the diagram fits");
   // Ctrl + scroll zooms in at the pointer; the zoom level shows.
   const cx = (f0.st.l + f0.st.r) / 2, cy = (f0.st.t + f0.st.b) / 2;
   await w.mouse.move(cx, cy);
@@ -203,10 +210,19 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   const f1 = await frame();
   if (parseInt(f1.zoom) <= parseInt(f0.zoom)) fail(`ctrl+scroll did not zoom in (${f0.zoom} → ${f1.zoom})`);
   if (f1.inside) fail("zoomed in, the diagram should overflow its frame");
+  // Zoomed in: scrollbars appear, and dragging the horizontal thumb moves the diagram.
+  if (await w.$eval(".pz-sb-x", (b) => b.hidden)) fail("no horizontal scrollbar when the diagram is wider than its frame");
+  const th = await w.locator(".pz-sb-x .pz-thumb").boundingBox();
+  const beforeThumb = (await frame()).first;
+  await w.mouse.move(th.x + th.width / 2, th.y + th.height / 2); await w.mouse.down(); await w.mouse.move(th.x + th.width / 2 + 80, th.y + th.height / 2, { steps: 5 }); await w.mouse.up();
+  const afterThumb = (await frame()).first;
+  if (!(afterThumb < beforeThumb - 40)) fail(`dragging the scrollbar did not move the diagram (${beforeThumb} → ${afterThumb})`);
+  if (process.env.REDPI_SHOTS) await w.screenshot({ path: `${process.env.REDPI_SHOTS}/arch-zoomed.png` });
   // Drag moves it.
+  const beforeDrag = await frame();
   await w.mouse.move(cx, cy); await w.mouse.down(); await w.mouse.move(cx - 200, cy - 20, { steps: 6 }); await w.mouse.up();
   const f2 = await frame();
-  if (Math.abs(f2.first - (f1.first - 200)) > 2) fail(`drag did not move the diagram by 200px (${f1.first} → ${f2.first})`);
+  if (Math.abs(f2.first - (beforeDrag.first - 200)) > 2) fail(`drag did not move the diagram by 200px (${beforeDrag.first} → ${f2.first})`);
   // Comment mode: a drag drops no pin; a click pins the component under the pointer, even zoomed and moved.
   await w.click("[data-pin=arch]");
   await w.mouse.move(cx, cy); await w.mouse.down(); await w.mouse.move(cx + 120, cy, { steps: 5 }); await w.mouse.up();
@@ -253,7 +269,7 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   await w.waitForSelector("#flow-login .flowchart");
   const fc = await w.evaluate(() => ({
     steps: document.querySelectorAll('#flow-login .flowchart [data-anchor^="flowstep:login:"]').length,
-    labels: [...document.querySelectorAll("#flow-login .flowchart .elabel")].map((t) => t.textContent).sort(),
+    labels: [...document.querySelectorAll("#flow-login .flowchart .elabel")].map((t) => [...t.querySelectorAll("tspan")].map((x) => x.textContent).join(" ")).sort(),
     list: document.querySelectorAll("#flow-login .flow-steps li").length,
     buttons: document.querySelectorAll('#flow-login .flow-steps [data-card-comment^="flowstep:login:"]').length,
     overlap: (() => { const r = [...document.querySelectorAll('#flow-login .flowchart [data-anchor^="flowstep:"] rect')].map((x) => x.getBoundingClientRect()); return r.some((a, i) => r.some((b, j) => j > i && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom)); })(),

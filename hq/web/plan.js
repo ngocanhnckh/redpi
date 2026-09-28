@@ -1,7 +1,7 @@
 import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
 import { mountPanZoom, panZoomFrame } from "/static/panzoom.js";
-import { drawFlows, flowsView } from "/static/flows.js";
+import { drawFlows, flowsView, wrapText } from "/static/flows.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
@@ -438,25 +438,40 @@ function drawArchitecture(arch) {
   const width = pad * 2 + cols.length * W + (cols.length - 1) * gx;
   const returns = links.some((l) => pos[l.to].x <= pos[l.from].x);
   const height = pad * 2 + Math.max(...cols.map((c) => c.length)) * (H + gy) - gy + (returns ? back + 24 : 0);
-  // Labels sit in the gap between columns (forward links) or under the return curve, trimmed to
-  // the space they have; links sharing a gap and height are stacked instead of printed on top of each other.
-  const maxChars = Math.floor((gx - 12) / 6.2);
+  // Link labels are wrapped (never cut; the full text is also on hover) and sit just before the
+  // arrowhead of the box they point to, so links fanning out to different boxes get separate
+  // spots. Labels that would still touch move to the next free spot above or below the line.
+  // Two links between the same pair of boxes share one path and one combined label.
+  const LINE = 12, CH = 6.2;
   const taken = [];
-  const place = (x, y) => { while (taken.some((t) => Math.abs(t.x - x) < gx * 0.8 && Math.abs(t.y - y) < 13)) y += 14; taken.push({ x, y }); return y; };
+  const free = (r) => r.top >= 2 && !taken.some((t) => r.x < t.x + t.w && t.x < r.x + r.w && r.top < t.top + t.h && t.top < r.top + r.h);
+  function labelBlock(cx, lineY, text, chars) {
+    const lines = wrapText(text, chars, 4);
+    const w = Math.max(...lines.map((l) => l.length)) * CH + 8, h = lines.length * LINE + 2;
+    const above = lineY - 5 - h, below = lineY + 5;
+    const tries = [above, below];
+    for (let k = 1; k < 12; k++) tries.push(above - k * (h + 2), below + k * (h + 2));
+    const top = tries.find((t) => free({ x: cx - w / 2, top: t, w, h })) ?? above;
+    taken.push({ x: cx - w / 2, top, w, h });
+    return `<text class="elabel" x="${cx}" y="${top + 10}" text-anchor="middle"><title>${esc(text)}</title>${lines.map((ln, i) => `<tspan x="${cx}" dy="${i ? LINE : 0}">${esc(ln)}</tspan>`).join("")}</text>`;
+  }
+  const pairs = new Map();
+  for (const l of links) {
+    const k = `${l.from}>${l.to}`;
+    if (!pairs.has(k)) pairs.set(k, { from: l.from, to: l.to, labels: [] });
+    if (l.label && !pairs.get(k).labels.includes(l.label)) pairs.get(k).labels.push(l.label);
+  }
   let svg = `<div class="diagram" data-diagram="arch"><svg class="arch" width="${width}" height="${height}" role="img" aria-label="Architecture diagram"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
   let labels = "";
-  for (const l of links) {
+  for (const l of pairs.values()) {
     const a = pos[l.from], b = pos[l.to];
     const forward = b.x > a.x;
     const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
     const low = Math.max(a.y, b.y) + H + back;
     const d = forward ? `M${x1},${y1} C${x1 + gx / 2},${y1} ${x2 - gx / 2},${y2} ${x2},${y2}` : `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${low} ${b.x + W / 2},${low} ${b.x + W / 2},${b.y + H}`;
-    svg += `<g data-anchor="link:${esc(l.from)}>${esc(l.to)}" data-label="${esc(`${names[l.from]} → ${names[l.to]}${l.label ? ` (${l.label})` : ""}`)}"><title>${esc(`${names[l.from]} → ${names[l.to]}${l.label ? `: ${l.label}` : ""}`)}</title><path class="edge" d="${d}" marker-end="url(#arr)"/><path class="edge-hit" d="${d}"/></g>`;
-    if (l.label) {
-      const lx = forward ? (x1 + x2) / 2 : (a.x + b.x) / 2 + W / 2;
-      const ly = place(lx, forward ? (y1 + y2) / 2 - 6 : a.y + H + back * 0.75 + 12);
-      labels += `<text class="elabel" x="${lx}" y="${ly}" text-anchor="middle"><title>${esc(l.label)}</title>${esc(trim(l.label, forward ? maxChars : 40))}</text>`;
-    }
+    const label = l.labels.join(" · ");
+    svg += `<g data-anchor="link:${esc(l.from)}>${esc(l.to)}" data-label="${esc(`${names[l.from]} → ${names[l.to]}${label ? ` (${label})` : ""}`)}"><title>${esc(`${names[l.from]} → ${names[l.to]}${label ? `: ${label}` : ""}`)}</title><path class="edge" d="${d}" marker-end="url(#arr)"/><path class="edge-hit" d="${d}"/></g>`;
+    if (label) labels += forward ? labelBlock(x2 - gx / 2, y2, label, Math.floor((gx - 14) / CH)) : labelBlock((a.x + b.x) / 2 + W / 2, low - back * 0.25, label, 30);
   }
   for (const c of comps) {
     const p = pos[c.id], color = KIND_COLOR[String(c.kind || "").toLowerCase()] || "var(--green)";

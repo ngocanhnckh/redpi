@@ -28,6 +28,25 @@ export function mountPanZoom(root, { key, fit = "contain", minFit = 0.4, maxHeig
     v.x = Math.min(Math.max(0, vw - cw) + m, Math.max(Math.min(0, vw - cw) - m, v.x));
     v.y = Math.min(Math.max(0, vh - ch) + m, Math.max(Math.min(0, vh - ch) - m, v.y));
   }
+  // Scrollbars show that there is more to see, where you are, and can be dragged.
+  const bars = { x: root.querySelector(".pz-sb-x"), y: root.querySelector(".pz-sb-y") };
+  function scrollbars() {
+    const { w, h } = size(), vw = stage.clientWidth, vh = stage.clientHeight, cw = w * v.s, ch = h * v.s;
+    for (const [axis, bar] of Object.entries(bars)) {
+      if (!bar) continue;
+      const view = axis === "x" ? vw : vh, full = axis === "x" ? cw : ch, off = axis === "x" ? v.x : v.y;
+      const show = full > view + 1;
+      bar.hidden = !show;
+      if (!show) continue;
+      const track = (axis === "x" ? bar.clientWidth : bar.clientHeight) || view - 16;
+      const size = Math.max(28, track * view / full);
+      const pos = Math.min(1, Math.max(0, -off / (full - view))) * (track - size);
+      const t = bar.firstElementChild;
+      if (axis === "x") { t.style.width = `${size}px`; t.style.transform = `translateX(${pos}px)`; }
+      else { t.style.height = `${size}px`; t.style.transform = `translateY(${pos}px)`; }
+      bar.dataset.ratio = String((full - view) / Math.max(1, track - size));
+    }
+  }
   function apply() {
     clamp();
     content.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.s})`;
@@ -35,6 +54,7 @@ export function mountPanZoom(root, { key, fit = "contain", minFit = 0.4, maxHeig
     if (label) label.textContent = `${Math.round(v.s * 100)}%`;
     const { w, h } = size();
     root.classList.toggle("pz-overflow", w * v.s > stage.clientWidth + 1 || h * v.s > stage.clientHeight + 1);
+    scrollbars();
   }
   // Size the frame to the diagram (up to maxHeight), then fit: whole diagram ("contain") or
   // its width ("width", for tall charts that are read by scrolling down).
@@ -68,6 +88,35 @@ export function mountPanZoom(root, { key, fit = "contain", minFit = 0.4, maxHeig
     apply();
   }
   const pan = (dx, dy) => { v.x += dx; v.y += dy; v.user = true; apply(); };
+
+  // Drag a scrollbar thumb, or click its track to jump there.
+  for (const [axis, bar] of Object.entries(bars)) {
+    if (!bar) continue;
+    bar.addEventListener("pointerdown", (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const thumb = bar.firstElementChild, tr = thumb.getBoundingClientRect();
+      const at = axis === "x" ? e.clientX : e.clientY;
+      if (e.target !== thumb) {
+        // Jump so the thumb centres on the click, then keep dragging from there.
+        const centre = axis === "x" ? (tr.left + tr.right) / 2 : (tr.top + tr.bottom) / 2;
+        const ratio = Number(bar.dataset.ratio) || 1;
+        if (axis === "x") v.x -= (at - centre) * ratio; else v.y -= (at - centre) * ratio;
+        v.user = true; apply();
+      }
+      const start = { at, x: v.x, y: v.y, ratio: Number(bar.dataset.ratio) || 1 };
+      bar.setPointerCapture(e.pointerId);
+      bar.classList.add("pz-sb-active");
+      const move = (m) => {
+        const d = (axis === "x" ? m.clientX : m.clientY) - start.at;
+        if (axis === "x") v.x = start.x - d * start.ratio; else v.y = start.y - d * start.ratio;
+        v.user = true; apply();
+      };
+      const up = () => { bar.classList.remove("pz-sb-active"); bar.removeEventListener("pointermove", move); bar.removeEventListener("pointerup", up); bar.removeEventListener("pointercancel", up); };
+      bar.addEventListener("pointermove", move);
+      bar.addEventListener("pointerup", up);
+      bar.addEventListener("pointercancel", up);
+    });
+  }
 
   // ---- pointers: one pointer drags, two pinch ----
   const pts = new Map();
@@ -185,6 +234,9 @@ export function panZoomFrame(name, inner) {
         <button class="btn" type="button" data-pz="expand" aria-pressed="false">Expand</button>
       </div>
     </div>
-    <div class="pz-stage">${inner}</div>
+    <div class="pz-stage">${inner}
+      <div class="pz-sb pz-sb-x" aria-hidden="true"><div class="pz-thumb"></div></div>
+      <div class="pz-sb pz-sb-y" aria-hidden="true"><div class="pz-thumb"></div></div>
+    </div>
   </div>`;
 }
