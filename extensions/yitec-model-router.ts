@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createPasteBurstGuard } from "../lib/paste-burst.ts";
 
 type TierName = "high" | "low" | "uncapable" | string;
 type ModelProfile = {
@@ -847,6 +848,7 @@ export default function (pi: ExtensionAPI) {
   let turnMagic: TurnMagic = {};
   // Model the user picked with /model; RedPi stops switching models until it is cleared.
   let pinnedModel: string | undefined;
+  let stopPasteGuard: (() => void) | undefined;
 
   pi.registerCommand("redpi-claude", { description: "Switch RedPi between Claude Code subscription and 9Router MainAgent/SubAgent profiles", handler: async (_args, ctx) => {
     const status = claudeAuthStatus();
@@ -1157,6 +1159,17 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("redpi", `RedPi high:${high.length} low:${low.length}`);
     ctx.ui.setStatus("redpi-ctx", "ctx waiting");
     if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget("redpi-banner", redpiBanner());
+    // Terminals that paste without bracketed-paste markers would submit every pasted line as
+    // its own prompt; keep such a paste together in the editor (see lib/paste-burst.ts).
+    if (ctx.hasUI && ctx.mode === "tui" && process.env.REDPI_PASTE_GUARD !== "0") {
+      stopPasteGuard?.();
+      const guard = createPasteBurstGuard({ inject: (data) => { process.stdin.emit("data", data); } });
+      // Runs before Pi's own stdin handler, so each whole read is seen before it is split into keys.
+      const onData = (data: any) => guard.onChunk(String(data));
+      process.stdin.prependListener("data", onData);
+      const stopInput = ctx.ui.onTerminalInput(guard.handle);
+      stopPasteGuard = () => { process.stdin.off("data", onData); stopInput(); };
+    }
     if (ctx.hasUI && ctx.mode === "tui" && !onboardingComplete()) {
       const provider = await ctx.ui.select("Welcome to RedPi — choose your provider", [
         "9Router (recommended): MainAgent + SubAgent",
