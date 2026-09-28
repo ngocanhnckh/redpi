@@ -202,7 +202,7 @@ function buildRun() {
         </div><span class="muted" id="view-hint" style="font-size:12px"></span></div>
         <div class="panel-body" id="view-body"></div>
       </div>
-      <div class="panel feed-panel">
+      <div class="panel feed-panel"><div class="feed-inner">
         <div class="panel-head"><h2>Event board</h2><div class="feed-filter" role="group" aria-label="Show">
           ${[["all", "All", "Everything"], ["updates", "Updates", "What the team says it is doing, and task moves"], ["chat", "Chat", "Messages"], ["tools", "Tools", "Every tool call"]].map(([k, l, t]) => `<button type="button" data-filter="${k}" aria-pressed="false" title="${t}">${l}</button>`).join("")}</div></div>
         <div class="chat-wrap"><div class="chat feed" id="feed" tabindex="0" aria-label="Team chat and actions"></div>
@@ -212,7 +212,7 @@ function buildRun() {
           <input type="text" id="draft" placeholder="Message… (they receive it as a message from you)" autocomplete="off">
           <button class="btn primary" id="send">Send</button>
         </div>
-      </div>
+      </div></div>
     </div>
     <div class="panel team-panel"><div class="panel-head"><h2>Team</h2><span class="muted" style="font-size:12px">click anyone for details and to talk to them</span></div>
       <div class="panel-body team" id="team"></div></div>

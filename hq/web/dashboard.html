@@ -28,9 +28,14 @@
   /* Run page: the view (office, board, graph) with the event board beside it, the team below, then charts. */
   .run-main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 10px; align-items: stretch; margin-bottom: 10px; }
   /* The event board takes the view's height (size containment keeps its long list out of the row height). */
-  .feed-panel { display: flex; flex-direction: column; min-width: 0; contain: size; min-height: 560px; }
+  /* The event board fills the row the view sets: its content is positioned over the panel, so a long
+     feed never makes the row taller (and nothing relies on size containment). */
+  .feed-panel { position: relative; min-width: 0; min-height: 560px; }
+  .feed-inner { position: absolute; inset: 0; display: flex; flex-direction: column; }
   .feed-panel .chat-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .feed { flex: 1; min-height: 0; max-height: none; overflow-anchor: none; align-content: start; gap: 6px; }
+  /* .chat.feed beats the older .chat rule below (a height-capped grid, whose rows collapsed long entries). */
+  .chat.feed { flex: 1; min-height: 0; max-height: none; overflow-anchor: none; display: flex; flex-direction: column; gap: 6px; }
+  .feed > *, .thread > * { flex: none; }   /* entries keep their full height; the list scrolls */
   .feed:empty::before { content: "No messages or actions yet."; color: var(--muted); font-size: 13px; }
   .feed.f-updates > :not(.upd):not(.move), .feed.f-chat > :not(.msg), .feed.f-tools > :not(.tool) { display: none; }
   /* An agent's own update: a readable line, set apart from chat bubbles and tool calls. */
@@ -189,7 +194,7 @@
   .events { font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
   .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
   .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
-  @media (max-width: 1100px) { .run-main { grid-template-columns: minmax(0, 1fr); } .feed-panel { contain: none; height: 70vh; min-height: 420px; } }
+  @media (max-width: 1100px) { .run-main { grid-template-columns: minmax(0, 1fr); } .feed-panel { height: 70vh; min-height: 420px; } }
   @media (max-width: 640px) { .office-host { height: 360px; } .needs { top: 52px; } }
   @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
 </style>

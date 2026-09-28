@@ -225,6 +225,31 @@ await page.click('[data-filter="all"]');
 // Team cards show each person's latest update in their words.
 if (!/Reading the orders module/.test(await page.textContent(`.member[data-person="${ids.Priya}"]`))) await fail("Priya's card should show her latest update");
 if (!/Checking the board/.test(await page.textContent('.member[data-person="ceo"]'))) await fail("the CEO's card should show its latest update");
+// A busy board: long messages and long commands stream in. Under every filter, no entry is
+// squashed or cut off, and there is no empty gap under the newest one.
+const para = "Status: the build is green and the docs page renders. Next I will add the search box and its tests.\n\nNotes: nothing blocks me right now; the release checklist is up to date and shared with the team.";
+for (let i = 0; i < 12; i++) {
+  await api("POST", `/api/runs/${runId}/messages`, { from: ids.Rin, to: "ceo", body: `${i}: ${para}` });
+  await beat(["Alex", "Priya", "Sam"][i % 3], { status: "working", events: [{ kind: "tool", text: `bash: cd /tmp/project && npm run build -- --verbose && npm test -- --reporter dot --grep "search box ${i}"`, ms: 900 + i }, { kind: "say", text: `Step ${i}: running the build and the search tests to check the docs page still renders.` }] });
+}
+await page.waitForFunction(() => document.querySelectorAll("#feed > *").length > 40);
+await page.waitForTimeout(600);
+for (const f of ["all", "updates", "chat", "tools"]) {
+  await page.click(`[data-filter="${f}"]`);
+  await page.waitForTimeout(200);
+  const g = await page.evaluate(() => {
+    const feed = document.getElementById("feed"), fr = feed.getBoundingClientRect();
+    const shown = [...feed.children].filter((c) => c.offsetParent);
+    const bad = shown.filter((c) => c.scrollHeight > c.clientHeight + 1);
+    const squashed = bad.length, sample = bad.slice(0, 4).map((c) => `${c.className}: ${c.scrollHeight}/${c.clientHeight}`);
+    const last = shown.at(-1)?.getBoundingClientRect();
+    return { squashed, sample, shown: shown.length, atEnd: feed.scrollHeight - feed.scrollTop - feed.clientHeight, gap: last ? fr.bottom - last.bottom : 0 };
+  });
+  if (!g.shown || g.squashed || g.atEnd > 2 || g.gap > 20) await fail(`event board layout broken under "${f}"`, g);
+  if (shots && (f === "all" || f === "chat")) await page.locator(".feed-panel").screenshot({ path: join(shots, `feed-${f}.png`) });
+}
+await page.click('[data-filter="all"]');
+
 
 // The CEO can be opened from the team list and from the office floor, and you can talk to them.
 await page.click('.member[data-person="ceo"]');
