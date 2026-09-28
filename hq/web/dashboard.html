@@ -82,6 +82,9 @@
   .harness-pill { font-size: 10px; padding: 0 6px; vertical-align: 1px; } .member .role { color: var(--muted); font-size: 12px; }
   .member .doing { font-size: 12px; color: var(--text); opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .chat { max-height: 520px; overflow-y: auto; display: grid; gap: 8px; padding: 12px 14px; }
+  .chat-wrap { position: relative; }
+  .chat-new { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); border: 1px solid var(--green-dim); background: var(--panel-2); color: var(--green); border-radius: 999px; padding: 5px 12px; font: 600 12px var(--sans); cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+  .chat-new[hidden] { display: none; }
   .msg { font-size: 13px; }
   .msg .hdr { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
   .msg .from { font-weight: 700; } .msg .to { color: var(--muted); } .msg .when { color: var(--faint); font-size: 11px; margin-left: auto; }

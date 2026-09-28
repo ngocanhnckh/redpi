@@ -7,6 +7,7 @@ const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
 const projectId = location.pathname.startsWith("/projects/") ? location.pathname.split("/")[2] : null;
 const COLUMNS = [["todo", "To do"], ["in_progress", "In progress"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done"]];
+let renderedPanel = null;
 let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
@@ -158,6 +159,22 @@ function needsYou() {
   return items.slice(0, 8);
 }
 
+// Scroll areas are rebuilt on every live update. They keep the reader's place: a list of
+// messages stays pinned to the newest one only while the reader is already at the bottom;
+// otherwise it stays exactly where they were reading.
+function saveScroll(sel) {
+  const el = document.querySelector(sel);
+  return el ? { top: el.scrollTop, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 30 } : null;
+}
+function restoreScroll(sel, saved, { toEnd = false } = {}) {
+  const el = document.querySelector(sel);
+  if (!el) return;
+  const apply = () => { if (toEnd && (!saved || saved.atEnd)) el.scrollTop = el.scrollHeight; else if (saved) el.scrollTop = saved.top; };
+  apply();
+  requestAnimationFrame(apply);   // again once the new content has laid out
+}
+let chatSeen = null, chatUnseen = 0;
+
 function renderRun() {
   const { run, project, plan, workers, tasks, messages } = state;
   document.title = `${run.title} · RedPi HQ`;
@@ -166,8 +183,11 @@ function renderRun() {
   const done = tasks.filter((t) => t.status === "done").length;
   const byId = Object.fromEntries(workers.map((w) => [w.id, w]));
   const titles = plan ? Object.fromEntries(plan.plan.stories.flatMap((s) => s.tasks.map((t) => [t.id, { story: s, task: t }]))) : {};
-  const chatScroll = document.querySelector(".chat");
-  const stick = !chatScroll || chatScroll.scrollTop + chatScroll.clientHeight >= chatScroll.scrollHeight - 30;
+  const chatPos = saveScroll(".chat");
+  // New messages that arrive while you are reading older ones are counted, not scrolled to.
+  if (chatSeen !== null && chatPos && !chatPos.atEnd) chatUnseen += Math.max(0, messages.length - chatSeen);
+  else chatUnseen = 0;
+  chatSeen = messages.length;
   const draft = document.getElementById("draft")?.value || "";
   const needs = needsYou();
   if (officeHost && officeHost.parentNode) officeHost.remove();   // keep the canvas alive across re-renders
@@ -209,7 +229,8 @@ function renderRun() {
               <div class="doing">${w.current_task ? `${esc(w.current_task)} · ` : ""}${esc(w.activity?.text || w.last_message || w.status)}</div></span><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}" title="${workerState(w)}"></span></button>`).join("")}
           </div></div>
         <div class="panel"><div class="panel-head"><h2>Team chat</h2><span class="muted" style="font-size:12px">${messages.length} messages</span></div>
-          <div class="chat">${messages.length ? messages.map(msgView).join("") : `<div class="empty">No messages yet.</div>`}</div>
+          <div class="chat-wrap"><div class="chat">${messages.length ? messages.map(msgView).join("") : `<div class="empty">No messages yet.</div>`}</div>
+          <button class="chat-new" type="button" ${chatUnseen ? "" : "hidden"}>↓ ${chatUnseen} new message${chatUnseen === 1 ? "" : "s"}</button></div>
           <div class="composer">
             <select id="to" aria-label="Send to"><option value="ceo">CEO</option><option value="all">Everyone</option>${workers.map((w) => `<option value="${esc(w.id)}">${esc(w.name)}</option>`).join("")}</select>
             <input type="text" id="draft" placeholder="Message… (they receive it as a message from you)" autocomplete="off">
@@ -236,8 +257,10 @@ function renderRun() {
   if (draftTo) toSel.value = draftTo;
   toSel.onchange = () => { draftTo = toSel.value; };
   document.getElementById("draft").value = draft;
-  const chat = document.querySelector(".chat");
-  if (stick) chat.scrollTop = chat.scrollHeight;
+  restoreScroll(".chat", chatPos, { toEnd: true });
+  const chat = document.querySelector(".chat"), newBtn = document.querySelector(".chat-new");
+  newBtn.onclick = () => { chat.scrollTo({ top: chat.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); };
+  chat.onscroll = () => { if (chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 30 && chatUnseen) { chatUnseen = 0; newBtn.hidden = true; } };
   const sendDraft = async () => {
     const input = document.getElementById("draft");
     const body = input.value.trim();
@@ -300,6 +323,9 @@ async function renderPanel() {
   let d;
   try { d = await api("GET", `/api/workers/${openPanel.worker}`); } catch (e) { toast(e.message); openPanel = null; root.innerHTML = ""; return; }
   const w = d.worker;
+  const same = renderedPanel === `w:${openPanel.worker}`;
+  const drawerPos = same ? saveScroll(".drawer .scroll") : null, threadPos = same ? saveScroll(".btw") : null;
+  renderedPanel = `w:${openPanel.worker}`;
   const keep = document.getElementById("wmsg");
   const kept = keep ? { value: keep.value, focused: document.activeElement === keep } : null;
   const attach = w.attach || "";
@@ -340,8 +366,8 @@ async function renderPanel() {
   };
   document.getElementById("wask").onclick = () => send("aside");
   document.getElementById("wsend").onclick = () => send("command");
-  const thread = document.querySelector(".btw");
-  if (thread) thread.scrollTop = thread.scrollHeight;
+  restoreScroll(".drawer .scroll", drawerPos);
+  restoreScroll(".btw", threadPos, { toEnd: true });
   document.getElementById("wint").onclick = () => send("interrupt");
 }
 
@@ -351,6 +377,8 @@ async function renderTask(root, taskId) {
   const meta = state.plan?.plan.stories.flatMap((s) => s.tasks.map((k) => ({ story: s, task: k }))).find((x) => x.task.id === taskId);
   let history = [];
   try { history = await api("GET", `/api/runs/${runId}/tasks/${encodeURIComponent(taskId)}/history`); } catch {}
+  const drawerPos = renderedPanel === `t:${taskId}` ? saveScroll(".drawer .scroll") : null;
+  renderedPanel = `t:${taskId}`;
   root.innerHTML = `<aside class="drawer" role="dialog" aria-label="Task ${esc(taskId)}">
     <div class="panel-head"><div style="flex:1;min-width:0"><div class="mono muted">${esc(taskId)} · ${esc(meta?.story.title || t.story_id)}</div><div style="font-weight:700;font-size:16px">${esc(t.title)}</div></div>${pill(t.status === "done" ? "done" : t.status)}<button class="btn" id="close" aria-label="Close">✕</button></div>
     <div class="scroll">
@@ -358,10 +386,11 @@ async function renderTask(root, taskId) {
       ${t.note ? `<div><div class="section-title" style="margin-bottom:6px">Latest note</div><div class="last">${esc(t.note)}</div></div>` : ""}
       <div><div class="section-title" style="margin-bottom:6px">History</div>${history.length ? `<ol class="history">${history.map((h) => `<li><span class="mono">${esc(h.from_status || "–")} → ${esc(h.to_status)}</span> by <b>${esc(h.actorName)}</b>${h.targetName ? ` → ${esc(h.targetName)}` : ""} <span class="faint">${ago(h.created)}</span>${h.reason ? `<div class="muted">${esc(h.reason)}</div>` : ""}</li>`).join("")}</ol>` : `<span class="muted">No changes yet.</span>`}</div>
     </div></aside>`;
+  restoreScroll(".drawer .scroll", drawerPos);
   document.getElementById("close").onclick = closePanel;
 }
 
-function closePanel() { openPanel = null; document.getElementById("drawer-root").innerHTML = ""; }
+function closePanel() { openPanel = null; renderedPanel = null; document.getElementById("drawer-root").innerHTML = ""; }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openPanel) closePanel(); });
 
 const refresh = () => (runId ? loadRun() : projectId ? loadProject() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });

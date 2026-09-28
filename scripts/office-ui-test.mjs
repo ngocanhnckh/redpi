@@ -137,6 +137,51 @@ w = await until(page, "a coffee chat", (w) => w.Sam.errand === "chat" && w.Rin.e
 if (!w.Sam.talk || !w.Rin.talk || w.Sam.bubble || w.Rin.bubble) await fail("coffee chat should be a dots bubble without text", { s: w.Sam, r: w.Rin });
 await shot(page, "coffee");
 
+// Team chat: opens on the newest message, keeps your place while you read older ones as
+// live updates arrive, counts new messages instead of jumping, and follows new messages
+// again once you are back at the bottom. The worker drawer keeps its place too.
+const say = (body) => api("POST", `/api/runs/${runId}/messages`, { from: "human", to: "ceo", body });
+for (let i = 0; i < 30; i++) await say(`Note ${i}: ${"a long line of text to fill the chat ".repeat(4)}`);
+const count = () => page.evaluate(() => document.querySelectorAll(".chat .msg").length);
+const chatAt = () => page.evaluate(() => { const c = document.querySelector(".chat"), b = document.querySelector(".chat-new"); return { top: c.scrollTop, end: c.scrollHeight - c.clientHeight, newVisible: !b.hidden, newText: b.textContent }; });
+await page.waitForFunction(() => document.querySelectorAll(".chat .msg").length >= 30, null, { timeout: 10000 }).catch(async () => fail("chat did not load the messages", await page.evaluate(() => document.querySelectorAll(".chat .msg").length)));
+await page.waitForTimeout(300);
+let c = await chatAt();
+if (c.end < 200 || c.end - c.top > 30) await fail("chat should open at the newest message", c);
+await page.evaluate(() => { document.querySelector(".chat").scrollTop = 150; });
+const before1 = await count();
+await beat("Alex", { status: "working", activity: { tool: "edit", text: "edit: x.ts", at: Date.now() } });   // live update, no new message
+await say("A new message while you read");
+await page.waitForFunction((n) => document.querySelectorAll(".chat .msg").length > n, before1);
+await page.waitForTimeout(400);
+c = await chatAt();
+if (Math.abs(c.top - 150) > 2) await fail("chat jumped while reading older messages", c);
+if (!c.newVisible || !/1 new message/.test(c.newText)) await fail("new-message button should show while reading", c);
+await page.click(".chat-new");
+await page.waitForFunction(() => { const c = document.querySelector(".chat"); return c.scrollHeight - c.clientHeight - c.scrollTop < 30; });
+await page.waitForTimeout(500);
+if ((await chatAt()).newVisible) await fail("new-message button should hide at the bottom");
+const before2 = await count();
+await say("Another one at the bottom");
+await page.waitForFunction((n) => document.querySelectorAll(".chat .msg").length > n, before2);
+await page.waitForTimeout(300);
+c = await chatAt();
+if (c.end - c.top > 30 || c.newVisible) await fail("chat should follow new messages at the bottom", c);
+// Worker drawer: scroll down, a live update arrives, the drawer stays put.
+for (let i = 0; i < 25; i++) await beat("Alex", { status: "working", events: [{ kind: "tool", text: `bash: step ${i}` }] });
+await page.click(`.member[data-worker="${ids.Alex}"]`);
+await page.setViewportSize({ width: 1400, height: 480 });
+await page.waitForSelector(".drawer .scroll");
+await page.waitForTimeout(300);
+const dEnd = await page.evaluate(() => { const d = document.querySelector(".drawer .scroll"); d.scrollTop = 120; return d.scrollHeight - d.clientHeight; });
+if (dEnd < 120) await fail("drawer too short to test scrolling", await page.evaluate(() => { const d = document.querySelector(".drawer .scroll"); return { sh: d.scrollHeight, ch: d.clientHeight, ev: d.querySelectorAll(".ev").length, dh: document.querySelector(".drawer").clientHeight }; }));
+await beat("Alex", { status: "working", events: [{ kind: "tool", text: "bash: one more" }] });
+await page.waitForTimeout(1200);
+const dTop = await page.evaluate(() => document.querySelector(".drawer .scroll").scrollTop);
+if (Math.abs(dTop - 120) > 2) await fail("worker drawer jumped on a live update", dTop);
+await page.keyboard.press("Escape");
+await page.setViewportSize({ width: 1400, height: 900 });
+
 // Dark theme renders the same rooms.
 const dark = await open({ colorScheme: "dark" });
 await dark.waitForTimeout(800);
@@ -171,5 +216,5 @@ if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex
 if (errors.length) await fail("console errors", errors);
 
 await browser.close();
-console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns.");
+console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place.");
 process.exit(0);
