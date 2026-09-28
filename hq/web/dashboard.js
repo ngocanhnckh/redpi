@@ -59,7 +59,7 @@ async function loadHome() {
   const done = active.reduce((n, p) => n + p.done, 0), tasks = active.reduce((n, p) => n + p.tasks, 0);
   const focused = document.activeElement?.id === "psearch";
   app.innerHTML = `
-    <div class="stats" style="margin-bottom:16px">
+    <div class="stats" style="margin-bottom:10px">
       <div class="panel stat"><div class="v">${active.length}</div><div class="k">project${active.length === 1 ? "" : "s"} with active runs</div></div>
       <div class="panel stat"><div class="v">${online.length}</div><div class="k">worker${online.length === 1 ? "" : "s"} online</div></div>
       <div class="panel stat"><div class="v" style="${needs ? "color:var(--red)" : ""}">${needs}</div><div class="k">need${needs === 1 ? "s" : ""} you</div></div>
@@ -193,7 +193,7 @@ function buildRun() {
     <div id="live" class="sr-only" aria-live="polite"></div>
     <div class="run-head" id="run-head"></div>
     <div id="needs-slot"></div>
-    <div class="stats" id="stats" style="margin-bottom:16px"></div>
+    <div class="stats" id="stats" style="margin-bottom:10px"></div>
     <div class="run-main">
       <div class="panel view-panel">
         <div class="panel-head"><div class="viewtabs" role="tablist">
