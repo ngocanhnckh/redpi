@@ -69,7 +69,7 @@ function render() {
   if (tab === "stories") { body.innerHTML = harnessBar(plan, pending) + storiesView(plan, schedule, pending); wireHarness(); }
   if (tab === "timeline") { body.innerHTML = timelineView(plan, schedule, pending); drawGantt(plan, schedule); }
   if (tab === "architecture") { body.innerHTML = `<div class="panel"><div class="panel-head"><h2>Architecture</h2>${pending ? pinButton("arch") : ""}</div><div class="panel-body" id="arch"></div></div>`; drawArchitecture(plan.architecture); }
-  if (tab === "tech") body.innerHTML = techView(plan.techStack || []);
+  if (tab === "tech") body.innerHTML = techView(plan.techStack || [], pending);
   if (tab === "risks") body.innerHTML = risksView(plan);
   body.querySelectorAll("details.story").forEach((d) => {
     d.open = openStories.has(d.dataset.story);
@@ -110,7 +110,7 @@ function decisionPanel(pending, run, runState) {
   if (pending) return `
     <div class="panel-head"><h2>Review</h2>${pill(data.status)}</div>
     <div class="panel-body">
-      <p class="muted" style="margin:0 0 10px">Highlight any text, or use <b>💬 Comment on diagram</b> on the timeline and architecture, to leave comments. Then send them to the CEO in one go: it revises the plan and a new version appears here. You can keep chatting with it in the terminal too.</p>
+      <p class="muted" style="margin:0 0 10px">Highlight any text, press <b>💬</b> on a tech stack card, or use <b>💬 Comment on diagram</b> on the timeline and architecture, to leave comments. Then send them to the CEO in one go: it revises the plan and a new version appears here. You can keep chatting with it in the terminal too.</p>
       ${list.length ? `<ol class="fb-list">${list.map((c) => commentItem(c, true)).join("")}</ol>` : `<div class="fb-empty">No comments yet. Select some text in the plan to start.</div>`}
       <label class="fb-overall">Overall comment <span class="faint">(optional)</span>
         <textarea id="comment" placeholder="Anything that is not about one spot">${esc(overall)}</textarea></label>
@@ -177,8 +177,26 @@ function applyAnnotations() {
     }
     const scope = a.tab === "overview" ? hero : a.tab === tab ? tabBody : null;
     if (!scope) continue;
-    const el = [...(scope.matches(`[data-anchor="${CSS.escape(a.target || "")}"]`) ? [scope] : []), ...scope.querySelectorAll(`[data-anchor="${CSS.escape(a.target || "")}"]`)].find((e) => !e.closest("svg"));
-    const marks = el ? highlight(el, c.quote, a.prefix, { class: `anno ${c.status}`, "data-cid": String(c.id) }) : [];
+    if (a.kind === "card") {
+      const card = scope.querySelector(`[data-anchor="${CSS.escape(a.target || "")}"]`);
+      const spot = card?.querySelector(".card-tools") || card;
+      if (!spot) { document.querySelector(`.fb-item[data-cid="${c.id}"]`)?.classList.add("orphan"); continue; }
+      const badge = document.createElement("button");
+      badge.type = "button";
+      badge.className = `anno-badge card-badge ${c.status}`;
+      badge.dataset.cid = c.id;
+      badge.textContent = c.num;
+      badge.title = c.body;
+      badge.setAttribute("aria-label", `Comment ${c.num}: ${c.body}`);
+      spot.appendChild(badge);
+      card.classList.add("has-comment");
+      continue;
+    }
+    // Same target on several elements (older plans anchored duplicate packages alike): use the one holding the quote.
+    const target = CSS.escape(a.target || "");
+    const els = [...(scope.matches(`[data-anchor="${target}"]`) ? [scope] : []), ...scope.querySelectorAll(`[data-anchor="${target}"], [data-anchor^="${target}#"]`)].filter((e) => !e.closest("svg"));
+    let marks = [];
+    for (const el of els) { marks = highlight(el, c.quote, a.prefix, { class: `anno ${c.status}`, "data-cid": String(c.id) }); if (marks.length) break; }
     if (!marks.length) { document.querySelector(`.fb-item[data-cid="${c.id}"]`)?.classList.add("orphan"); continue; }
     const badge = document.createElement("button");
     badge.type = "button";
@@ -266,6 +284,10 @@ addEventListener("scroll", () => { if (selection) checkSelection(); }, { passive
 
 // Diagram pins: in comment mode a click drops a numbered bubble where you clicked.
 function wirePins() {
+  app.querySelectorAll("[data-card-comment]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    addComment({ kind: "card", tab, target: b.dataset.cardComment, label: `${TAB_NAME[tab]} › ${b.dataset.cardLabel}` }, null, b.getBoundingClientRect());
+  });
   app.querySelectorAll("[data-pin]").forEach((b) => b.onclick = () => { pinMode = pinMode === b.dataset.pin ? null : b.dataset.pin; render(); if (pinMode) toast("Click anywhere on the diagram to pin a comment"); });
   app.querySelectorAll(".diagram").forEach((host) => {
     const on = pinMode === host.dataset.diagram;
@@ -438,13 +460,18 @@ function drawArchitecture(arch) {
   mountPanZoom(el.querySelector(".pz"), { key: `${planId}:arch`, fit: "contain", minFit: 0.45 });
 }
 
-function techView(stack) {
+function techView(stack, pending) {
   if (!stack.length) return `<div class="empty">No technologies listed.</div>`;
+  // One package can appear on several cards (two parts of the same library): each card needs its
+  // own anchor, or comments on the second card are looked for in the first one and get lost.
+  const seen = {};
   return `<div class="tech">${stack.map((t) => {
     const ok = t.verified === true && /^https?:\/\//.test(t.source || "");
-    return `<div class="panel card" data-anchor="tech:${esc(t.package)}" data-label="${esc(`${t.name} (${t.package})`)}">
+    const n = (seen[t.package] = (seen[t.package] || 0) + 1);
+    const anchor = `tech:${t.package}${n > 1 ? `#${n}` : ""}`, label = `${t.name} (${t.package})`;
+    return `<div class="panel card" data-anchor="${esc(anchor)}" data-label="${esc(label)}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><div style="font-weight:600">${esc(t.name)}</div><div class="pkg">${esc(t.package)}${t.version ? `<span class="muted">@${esc(t.version)}</span>` : ""}</div></div>
-        ${ok ? `<span class="pill green">verified</span>` : `<span class="pill amber">unverified</span>`}</div>
+        <div class="card-tools no-annotate">${ok ? `<span class="pill green">verified</span>` : `<span class="pill amber">unverified</span>`}${pending ? cardCommentButton(anchor, label) : ""}</div></div>
       <dl>
         ${t.ecosystem ? `<dt>From</dt><dd>${esc(t.ecosystem)}</dd>` : ""}
         ${t.usedFor ? `<dt>Used for</dt><dd>${esc(t.usedFor)}</dd>` : ""}
@@ -465,6 +492,9 @@ function risksView(plan) {
     ${(plan.outOfScope || []).length ? `<div class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Out of scope</h2></div><div class="panel-body"><ul style="margin:0;padding-left:18px">${plan.outOfScope.map((r, ri) => `<li data-anchor="oos:${ri}" data-label="Out of scope ${ri + 1}">${esc(r)}</li>`).join("")}</ul></div></div>` : ""}
   </div>`;
 }
+
+// "💬" on a card: comment on the whole card (no text selection needed).
+const cardCommentButton = (anchor, label) => `<button class="btn card-comment" type="button" data-card-comment="${esc(anchor)}" data-card-label="${esc(label)}" aria-label="${esc(`Comment on ${label}`)}" title="Comment on this">💬</button>`;
 
 function trim(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 function safeUrl(u) { return /^https?:\/\//i.test(u) ? u : "#"; }

@@ -427,7 +427,8 @@ function cleanAnchor(a) {
   a = a && typeof a === "object" ? a : {};
   const str = (v, n) => (v == null ? undefined : String(v).slice(0, n));
   const frac = (v) => (Number.isFinite(Number(v)) ? Math.min(1, Math.max(0, Number(v))) : undefined);
-  const kind = a.kind === "pin" ? "pin" : "text";
+  // text: a quote inside a section · pin: a spot on a diagram · card: a whole card (e.g. one technology)
+  const kind = a.kind === "pin" || a.kind === "card" ? a.kind : "text";
   return { kind, tab: str(a.tab, 40), target: str(a.target, 200), label: str(a.label, 300), diagram: str(a.diagram, 40), x: frac(a.x), y: frac(a.y), prefix: str(a.prefix, 80) };
 }
 

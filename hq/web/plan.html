@@ -69,6 +69,10 @@
   mark.anno.sent { background: color-mix(in srgb, var(--cyan) 18%, transparent); border-bottom-color: var(--cyan); }
   .anno-badge, .num { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px; border: 0; background: var(--amber); color: #1a1200; font: 700 10px/1 var(--mono); flex: none; }
   .anno-badge { vertical-align: super; margin-left: 2px; cursor: pointer; }
+  .card-tools { display: flex; align-items: center; gap: 6px; flex: none; }
+  .card-comment { padding: 2px 7px; font-size: 12px; line-height: 1.4; }
+  .card-badge { vertical-align: middle; margin: 0; }
+  .card.has-comment { border-color: var(--amber); }
   .anno-badge.sent, .sent > .fb-jump .num, .fb-item.sent .num, .pin.sent { background: var(--cyan); color: #00161d; }
   .diagram { position: relative; display: inline-block; }
   .diagram > svg { display: block; }

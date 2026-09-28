@@ -59,6 +59,7 @@ async function login(ctx) {
   return page;
 }
 async function selectText(page, selector, text) {
+  await page.locator(selector).first().scrollIntoViewIfNeeded(); // people select text they can see
   await page.evaluate(([sel, t]) => {
     const el = document.querySelector(sel);
     const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -162,13 +163,16 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   const links = [["lib", "web", "matrix + coverage rows"], ["web", "api", "REST"], ["api", "worker", "run control, matrix, checklist"], ["worker", "sup", "drives assessment"], ["worker", "sup", "maps ingests"], ["sup", "sandbox", "shell"], ["sup", "worker", "progress"], ["api", "pg", "SQL"], ["api", "s3", "reports"], ["api", "llm", "summaries"], ["api", "q", "jobs"]]
     .map(([from, to, label]) => ({ from, to, label }));
   const wideRun = (await api("POST", "/api/runs", { projectPath: "/home/yitec/arrowish", title: "Wide diagram" })).run.id;
-  const wide = await api("POST", `/api/runs/${wideRun}/plans`, { plan: { ...plan, architecture: { components: comps, links } } });
+  // Two cards for one package (as real plans do: the library and one of its parts).
+  const techStack = [...plan.techStack, { name: "deepagents LocalShellBackend", package: "deepagents", ecosystem: "PyPI", usedFor: "the sandboxed shell", uses: "LocalShellBackend(root_dir, env)", source: "https://pypi.org/project/deepagents/", verified: true }];
+  const wide = await api("POST", `/api/runs/${wideRun}/plans`, { plan: { ...plan, techStack, architecture: { components: comps, links } } });
   const w = await ctx.newPage();
   w.on("pageerror", (e) => errors.push(e.message));
   await w.goto(`${base}/plans/${wide.id}`);
   await w.waitForSelector("details.story");
   await w.click("[data-tab=architecture]");
   await w.waitForSelector(".pz .diagram svg");
+  await w.evaluate(() => document.querySelector(".pz").scrollIntoView({ block: "start" }));
   const frame = async () => w.evaluate(() => {
     const st = document.querySelector(".pz-stage").getBoundingClientRect();
     const boxes = [...document.querySelectorAll('.pz [data-anchor^="component:"] rect:first-of-type')].map((r) => r.getBoundingClientRect());
@@ -230,6 +234,29 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   // The Gantt chart gets the same frame.
   await w.click("[data-tab=timeline]");
   await w.waitForSelector(".pz #gantt svg");
+  // Tech stack: 💬 on a card comments on the whole card; a highlight on the second card of a
+  // package lands on that card (not lost looking in the first); both reach the CEO.
+  await w.click("[data-tab=tech]");
+  await w.waitForSelector('[data-card-comment="tech:deepagents#2"]');
+  await w.click('[data-card-comment="tech:deepagents#2"]');
+  await w.waitForSelector(".composer-pop textarea");
+  if ((await w.textContent(".cp-where")) !== "Tech stack › deepagents LocalShellBackend (deepagents)") fail(`card comment names ${await w.textContent(".cp-where")}`);
+  await w.fill(".composer-pop textarea", "Run it inside a container, not on the host.");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector('[data-anchor="tech:deepagents#2"] .card-badge');
+  await selectText(w, '[data-anchor="tech:deepagents#2"]', "the sandboxed shell");
+  await w.click(".sel-btn");
+  await w.fill(".composer-pop textarea", "Which commands may it run?");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector('[data-anchor="tech:deepagents#2"] mark.anno');
+  if (await w.$(".fb-item.orphan")) fail("a tech stack comment was lost (orphaned)");
+  if (process.env.REDPI_SHOTS) { await w.locator(".tech").scrollIntoViewIfNeeded(); await w.screenshot({ path: `${process.env.REDPI_SHOTS}/tech.png` }); }
+  if (await w.$('[data-anchor="tech:deepagents"] .card-badge, [data-anchor="tech:deepagents"] mark.anno')) fail("second-card comments showed on the first deepagents card");
+  await w.click("#send");
+  await w.waitForSelector("text=You asked for changes");
+  const wideMsg = (await api("GET", `/api/runs/${wideRun}/inbox?for=ceo&after=0`)).find((m) => m.kind === "decision")?.body || "";
+  for (const line of ["[Tech stack › deepagents LocalShellBackend (deepagents)]: Run it inside a container, not on the host.", '[Tech stack › deepagents LocalShellBackend (deepagents)] on "the sandboxed shell": Which commands may it run?'])
+    if (!wideMsg.includes(line)) fail(`CEO message is missing: ${line}\n${wideMsg}`);
   // Phone: one finger drags the diagram, and the page itself never scrolls sideways.
   const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light", hasTouch: true });
   const p = await login(pctx);
@@ -243,5 +270,5 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
 await browser.close();
 const real = errors.filter((e) => !/status of 401/.test(e));
 if (real.length) fail(`console errors:\n${real.join("\n")}`);
-console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), phone layout.");
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), tech stack card comments, phone layout.");
 process.exit(0);
