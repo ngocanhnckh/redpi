@@ -83,3 +83,14 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+-------------------------------------------------------------------------------
+Jevgrep — https://github.com/dzhng/jevgrep
+Copyright (c) 2026 David Zhang — MIT License
+
+Not bundled: RedPi installs the published @dzhng/jevgrep package from npm on
+demand into ~/.pi/agent/yitec/tools and runs its `jg` CLI. Adapted: the Jev
+provider endpoints and model ids (lib/jev.ts, from packages/core/src/providers.ts),
+the redpi_jevgrep usage guidance (from skills/jevgrep/SKILL.md), the connection
+check (from `jg doctor`), and the test-only request-routing preload
+(scripts/fixtures/jev-route-preload.mjs, from test/fixtures/provider-route.mjs).

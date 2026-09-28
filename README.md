@@ -319,6 +319,60 @@ cheap summarize this folder
 orchestrate inspect auth, database, and frontend in parallel
 ```
 
+### 🧭 Decision model: Jev picks the model for each prompt
+
+Turn it on with `/redpi-decision` (or `/redpi-setup` → **Decision model (Jev) + Jevgrep**). It is **off** until you turn it on. When you do, RedPi asks for:
+
+1. **Provider**: OpenRouter, Vercel AI Gateway, TypeSafe, OpenCode Zen, or a custom endpoint that speaks the TypeSafe `/systemone` protocol.
+2. **Endpoint**: press Enter for the provider's standard URL, or type your own.
+3. **API key**: typed masked and saved owner-only in `~/.pi/agent/yitec/decision-model.json`.
+4. **Model id**: press Enter for the provider's Jev model.
+
+RedPi checks the connection before saving.
+
+[Jev](https://openrouter.ai/blog/insights/what-is-jev/) is TypeSafe's *decision* model. It writes no text. It answers typed questions (choice, score, yes/no) with calibrated probabilities in about the time of a network round trip, and it is very cheap (about $0.04 per million input tokens, with output free). For every prompt you type, RedPi sends Jev the prompt, plus the start and end of the previous reply so that "yes, do it" inherits the difficulty of what it approves. It asks two questions.
+
+- **Which model?** Jev chooses one of three tiers, each mapped to a role:
+
+  | Jev's choice | Role used |
+  | --- | --- |
+  | strong: design, multi-file work, unclear bugs, reviews, long autonomous work | `planner` |
+  | fast: small, clear edits, known commands, direct questions | `executor` |
+  | tiny: greetings, acknowledgements, one-line answers | `tiny`, or `executor` if unset |
+
+- **How much effort?** A score from 0 (trivial) to 4 (very hard) sets the thinking level within each tier's band:
+
+  | Tier | Thinking range |
+  | --- | --- |
+  | strong | medium or above |
+  | fast | low to medium |
+  | tiny | off |
+
+RedPi leans towards quality:
+- A cheaper tier is used only when Jev is at least 60% sure. Otherwise the prompt goes to the strong model.
+- If Jev is slow (5-second limit) or unreachable, the prompt goes to the planner as usual.
+- The magic keywords (`ultrathink`, `cheap`), a model you pinned with `/model`, and images keep working as before, without asking Jev.
+
+The status line shows each decision, for example `executor on 9router/SubAgent:low · jev fast 85% · effort 1.0`. **Try routing a prompt** in the menu shows the decision for any text without sending it to a coding model. `/redpi-decision on|off|test|status` works without the menu.
+
+### 🔎 Jevgrep: find code by asking what it does
+
+With the decision model on, the agent gets a `redpi_jevgrep` tool powered by [Jevgrep](https://github.com/dzhng/jevgrep) (`jg`, MIT). Ask it something like "How are database connections created, pooled, and closed?" and it returns:
+- a summary
+- the relevant files, ranked by their role
+- reading leads
+- verbatim source excerpts with line numbers
+
+Jevgrep reports that coding agents solved the same tasks at about 30% lower cost with it.
+
+**Setup:**
+- RedPi installs `jg` into its own tools folder (`~/.pi/agent/yitec/tools`) when you turn Jevgrep on. There is no global npm install.
+- `jg` reuses your decision-model key through its supported `jg auth --provider … --stdin`, kept in a RedPi-only config folder.
+- `jg` only knows the four listed providers. With a custom endpoint, it falls back to your own `jg auth`.
+- Jevgrep can be switched off separately in the menu. When the decision model is off, the tool is hidden from the agent entirely.
+
+Searches send the repository's eligible source (ignored, hidden, dependency and obvious secret files are skipped) to Jev through your provider.
+
 ### 📁 Strict role models for one folder
 
 By default RedPi picks the planner model at the start of every turn and can fail over to other models. When a project needs exact models, open:
@@ -751,6 +805,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 🧙 | `/yitec-setup` | Alias for `/redpi-setup`. |
 | 🎯 | `/redpi-config` | Set role models and thinking for this folder (strict), this session, the project file, or globally; apply preset profiles (Cybersecurity); show or unpin routing. |
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
+| 🧭 | `/redpi-decision` | Decision model (Jev): on/off, endpoint and key, prompt routing, thinking from Jev, Jevgrep install/toggle, connection test, try a prompt. Also `on`, `off`, `test`, `status`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 🌐 | `/redpi-browser-install` | Install or reinstall the Playwright Chromium runtime. |
 | 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
@@ -773,6 +828,8 @@ flowchart TB
   A --> Y["🔴 yitec/"]
   Y --> MT["🎯 model-tiers.json<br/>global role config"]
   Y --> NR["🔐 9router.local.json<br/>private URL/key"]
+  Y --> DM["🧭 decision-model.json<br/>Jev endpoint/key (0600)"]
+  Y --> TL["🔎 tools/ + jevgrep-config/<br/>jg and its credentials"]
   Y --> MEM["📚 memory.md"]
   Y --> LES["🧠 lessons.md"]
   Y --> BR["🌐 browser/<br/>Playwright profile/state"]
@@ -885,6 +942,13 @@ Smoke coverage includes:
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
+- Multi-line paste in terminals without bracketed paste: three pasted lines reach the model as one prompt, and a line typed with Enter still submits (real Pi TUI)
+- Decision model (Jev), against a fake Jev and a fake model:
+  - `/redpi-decision` setup: the key is masked and saved 0600, and the connection is checked
+  - routing to strong, fast and tiny, including the confidence floor, Jev errors, and magic keywords
+  - the previous reply is sent for follow-ups, and turning it off returns to the planner and hides the tool
+  - the agent calls `redpi_jevgrep`, and `jg` credentials are kept apart from your own
+  - `REDPI_TEST_REAL_JG=1` also installs the real `@dzhng/jevgrep` and runs a search through it
 
 Browser CLI test:
 
@@ -946,6 +1010,7 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 
 - The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens), the communication-graph layout, and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
 - Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
+- Prompt routing uses [Jev](https://openrouter.ai/blog/insights/what-is-jev/), TypeSafe's decision model; `redpi_jevgrep` runs [Jevgrep](https://github.com/dzhng/jevgrep) (MIT), installed from npm on demand, with usage guidance adapted from its agent skill.
 - Plan-and-subagent workflow skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT) and skills from [Matt Pocock](https://github.com/mattpocock/skills).
 
 See [`NOTICE`](./NOTICE) for licenses and details.

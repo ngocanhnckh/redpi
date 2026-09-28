@@ -2,7 +2,7 @@
 // worker sub-sessions (full Pi sessions in tmux) that coordinate through HQ.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Input } from "@earendil-works/pi-tui";
+import { secretInput } from "../lib/secret-input.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -112,22 +112,6 @@ function saveHqPassword(user: string, password: string): void {
 }
 
 // A one-line input that shows dots instead of the text (Pi's input dialog echoes what you type).
-async function secretInput(ctx: any, title: string): Promise<string | undefined> {
-  return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: string | undefined) => void) => {
-    const input = new Input();
-    input.onSubmit = (v: string) => done(v);
-    input.onEscape = () => done(undefined);
-    return {
-      render(width: number) {
-        const dots = "•".repeat(input.getValue().length);
-        return [theme.fg("accent", title), `  ${dots}${theme.fg("accent", "▌")}`.slice(0, Math.max(10, width)), theme.fg("dim", "  enter to confirm · esc to cancel")];
-      },
-      invalidate() { input.invalidate(); },
-      handleInput(data: string) { input.handleInput(data); tui.requestRender(); },
-    };
-  });
-}
-
 // Ask for the HQ username and password. Returns false if the user backed out.
 async function setupHqPassword(ctx: any, changing = false): Promise<boolean> {
   if (!ctx.hasUI) return false;
