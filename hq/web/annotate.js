@@ -10,7 +10,7 @@ const WS = /\s/;
 function textIndex(root) {
   const chars = [], map = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.parentElement?.closest("svg, .anno-badge, .pin, script, style") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    acceptNode: (n) => (n.parentElement?.closest("svg, .anno-badge, .pin, .cmt-slot, script, style") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });
   let space = true;
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {

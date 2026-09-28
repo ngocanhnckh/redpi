@@ -234,6 +234,26 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   // The Gantt chart gets the same frame.
   await w.click("[data-tab=timeline]");
   await w.waitForSelector(".pz #gantt svg");
+  // Every block has a 💬 button: stories, tasks, acceptance criteria, risks, overview.
+  await w.click("[data-tab=stories]");
+  await w.waitForSelector("details.story");
+  for (const a of ["story:S1", "task:T1", "acc:S1:0", "summary", "goal"]) if (!(await w.$(`[data-card-comment="${a}"]`))) fail(`no comment button on ${a}`);
+  await w.evaluate(() => { document.querySelector('details[data-story="S1"]').open = true; });
+  await w.click('[data-card-comment="task:T2"]');
+  await w.waitForSelector(".composer-pop textarea");
+  if ((await w.textContent(".cp-where")) !== "Stories & tasks › Task T2 · Support agent") fail(`task comment names ${await w.textContent(".cp-where")}`);
+  await w.fill(".composer-pop textarea", "Split this into two tasks.");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector('[data-anchor="task:T2"] .card-badge');
+  if (process.env.REDPI_SHOTS) { await w.locator('details[data-story="S1"]').scrollIntoViewIfNeeded(); await w.screenshot({ path: `${process.env.REDPI_SHOTS}/stories.png` }); }
+  // The story header button comments without opening/closing the story.
+  const openBefore = await w.$eval('details[data-story="S2"]', (d) => d.open);
+  await w.click('[data-card-comment="story:S2"]');
+  await w.waitForSelector(".composer-pop textarea");
+  if ((await w.$eval('details[data-story="S2"]', (d) => d.open)) !== openBefore) fail("the story comment button toggled the story");
+  await w.keyboard.press("Escape");
+  await w.click("[data-tab=risks]");
+  if (!(await w.$('[data-card-comment="risk:0"]'))) fail("no comment button on a risk");
   // Tech stack: 💬 on a card comments on the whole card; a highlight on the second card of a
   // package lands on that card (not lost looking in the first); both reach the CEO.
   await w.click("[data-tab=tech]");
@@ -255,7 +275,7 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
   await w.click("#send");
   await w.waitForSelector("text=You asked for changes");
   const wideMsg = (await api("GET", `/api/runs/${wideRun}/inbox?for=ceo&after=0`)).find((m) => m.kind === "decision")?.body || "";
-  for (const line of ["[Tech stack › deepagents LocalShellBackend (deepagents)]: Run it inside a container, not on the host.", '[Tech stack › deepagents LocalShellBackend (deepagents)] on "the sandboxed shell": Which commands may it run?'])
+  for (const line of ["[Stories & tasks › Task T2 · Support agent]: Split this into two tasks.", "[Tech stack › deepagents LocalShellBackend (deepagents)]: Run it inside a container, not on the host.", '[Tech stack › deepagents LocalShellBackend (deepagents)] on "the sandboxed shell": Which commands may it run?'])
     if (!wideMsg.includes(line)) fail(`CEO message is missing: ${line}\n${wideMsg}`);
   // Phone: one finger drags the diagram, and the page itself never scrolls sideways.
   const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light", hasTouch: true });
@@ -270,5 +290,5 @@ if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi
 await browser.close();
 const real = errors.filter((e) => !/status of 401/.test(e));
 if (real.length) fail(`console errors:\n${real.join("\n")}`);
-console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), tech stack card comments, phone layout.");
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), a comment button on every story, task, criterion, risk and card, phone layout.");
 process.exit(0);

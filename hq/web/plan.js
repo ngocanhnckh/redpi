@@ -55,7 +55,7 @@ function render() {
           <div class="panel stat"><div class="v">${schedule.maxParallel}×</div><div class="k">Max parallel tasks</div></div>
           <div class="panel stat"><div class="v">${plan.stories.length} / ${tasks.length}</div><div class="k">Stories / tasks</div></div>
         </div>
-        ${warnings.length ? `<div class="panel" style="margin-top:14px" data-anchor="warnings" data-label="Needs attention"><div class="panel-head"><h2>Needs attention</h2><span class="pill amber">${warnings.length}</span></div><div class="panel-body"><ul class="warn-list">${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div></div>` : ""}
+        ${warnings.length ? `<div class="panel" style="margin-top:14px" data-anchor="warnings" data-label="Needs attention"><div class="panel-head"><h2>Needs attention</h2><span class="pill amber">${warnings.length}</span></div><div class="panel-body"><ul class="warn-list">${warnings.map((w, wi) => `<li data-anchor="warn:${wi}" data-label="${esc(`Needs attention · ${trim(w, 70)}`)}">${esc(w)}</li>`).join("")}</ul></div></div>` : ""}
       </div>
       <aside class="panel decision no-annotate">${decisionPanel(pending, run, runState)}</aside>
     </section>
@@ -75,6 +75,7 @@ function render() {
     d.open = openStories.has(d.dataset.story);
     d.addEventListener("toggle", () => { if (d.open) openStories.add(d.dataset.story); else openStories.delete(d.dataset.story); });
   });
+  addCommentSlots(pending);
   wirePins();
   applyAnnotations();
 }
@@ -179,7 +180,7 @@ function applyAnnotations() {
     if (!scope) continue;
     if (a.kind === "card") {
       const card = scope.querySelector(`[data-anchor="${CSS.escape(a.target || "")}"]`);
-      const spot = card?.querySelector(".card-tools") || card;
+      const spot = card?.querySelector(`.cmt-slot[data-for="${CSS.escape(a.target || "")}"]`) || card;
       if (!spot) { document.querySelector(`.fb-item[data-cid="${c.id}"]`)?.classList.add("orphan"); continue; }
       const badge = document.createElement("button");
       badge.type = "button";
@@ -286,7 +287,9 @@ addEventListener("scroll", () => { if (selection) checkSelection(); }, { passive
 function wirePins() {
   app.querySelectorAll("[data-card-comment]").forEach((b) => b.onclick = (e) => {
     e.stopPropagation();
-    addComment({ kind: "card", tab, target: b.dataset.cardComment, label: `${TAB_NAME[tab]} › ${b.dataset.cardLabel}` }, null, b.getBoundingClientRect());
+    e.preventDefault(); // a button in a story header must not open or close the story
+    const t = b.closest(".hero") ? "overview" : tab;
+    addComment({ kind: "card", tab: t, target: b.dataset.cardComment, label: `${TAB_NAME[t]} › ${b.dataset.cardLabel}` }, null, b.getBoundingClientRect());
   });
   app.querySelectorAll("[data-pin]").forEach((b) => b.onclick = () => { pinMode = pinMode === b.dataset.pin ? null : b.dataset.pin; render(); if (pinMode) toast("Click anywhere on the diagram to pin a comment"); });
   app.querySelectorAll(".diagram").forEach((host) => {
@@ -341,7 +344,7 @@ function storiesView(plan, schedule, pending) {
     return `<details class="panel story" data-story="${esc(s.id)}" data-anchor="story:${esc(s.id)}" data-label="${esc(`Story ${s.id} · ${s.title}`)}">
       <summary><span class="chev">›</span>
         <span><span class="sid">${esc(s.id)}</span> <span class="story-title">${esc(s.title)}</span><div class="user-story">${esc(s.userStory)}</div></span>
-        <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${onCrit ? `<span class="pill red">critical path</span>` : ""}${(s.dependsOn || []).length ? `<span class="pill">after ${esc(s.dependsOn.join(", "))}</span>` : ""}<span class="pill">${s.tasks.length} tasks · ${hours(hrs)}</span></span>
+        <span class="story-tools" style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center">${onCrit ? `<span class="pill red">critical path</span>` : ""}${(s.dependsOn || []).length ? `<span class="pill">after ${esc(s.dependsOn.join(", "))}</span>` : ""}<span class="pill">${s.tasks.length} tasks · ${hours(hrs)}</span></span>
       </summary>
       <div class="story-body">
         ${s.description ? `<p style="margin:0 0 8px">${esc(s.description)}</p>` : ""}
@@ -471,7 +474,7 @@ function techView(stack, pending) {
     const anchor = `tech:${t.package}${n > 1 ? `#${n}` : ""}`, label = `${t.name} (${t.package})`;
     return `<div class="panel card" data-anchor="${esc(anchor)}" data-label="${esc(label)}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><div style="font-weight:600">${esc(t.name)}</div><div class="pkg">${esc(t.package)}${t.version ? `<span class="muted">@${esc(t.version)}</span>` : ""}</div></div>
-        <div class="card-tools no-annotate">${ok ? `<span class="pill green">verified</span>` : `<span class="pill amber">unverified</span>`}${pending ? cardCommentButton(anchor, label) : ""}</div></div>
+        <div class="card-tools no-annotate">${ok ? `<span class="pill green">verified</span>` : `<span class="pill amber">unverified</span>`}</div></div>
       <dl>
         ${t.ecosystem ? `<dt>From</dt><dd>${esc(t.ecosystem)}</dd>` : ""}
         ${t.usedFor ? `<dt>Used for</dt><dd>${esc(t.usedFor)}</dd>` : ""}
@@ -493,8 +496,30 @@ function risksView(plan) {
   </div>`;
 }
 
-// "💬" on a card: comment on the whole card (no text selection needed).
-const cardCommentButton = (anchor, label) => `<button class="btn card-comment" type="button" data-card-comment="${esc(anchor)}" data-card-label="${esc(label)}" aria-label="${esc(`Comment on ${label}`)}" title="Comment on this">💬</button>`;
+// Every block you might want to comment on gets a slot: its 💬 button (pending plans) and the
+// numbered badges of comments on the whole block. Text inside can still be highlighted.
+const COMMENTABLE = "details.story, .task, .card[data-anchor], .panel[data-anchor], li[data-anchor], .wave[data-anchor], [data-anchor=summary], [data-anchor=goal]";
+function addCommentSlots(pending) {
+  for (const el of app.querySelectorAll(COMMENTABLE)) {
+    const a = el.dataset.anchor;
+    if (!a || el.id === "tab-body" || el.closest("svg")) continue;
+    let host = el, where = "end";
+    if (el.matches("details.story")) host = el.querySelector(":scope > summary .story-tools") || el;
+    else if (el.matches(".task")) { host = el.querySelector(":scope > .est") || el; where = "start"; }
+    else if (el.querySelector(".card-tools")) host = el.querySelector(".card-tools");
+    else if (el.querySelector(":scope > .panel-head")) host = el.querySelector(":scope > .panel-head");
+    else if (el.matches(".card")) where = "corner";
+    const slot = document.createElement("span");
+    slot.className = `cmt-slot no-annotate${where === "corner" ? " corner" : ""}${where === "start" ? " start" : ""}`;
+    slot.dataset.for = a;
+    const compact = el.matches("li, .wave, [data-anchor=summary], [data-anchor=goal]");
+    if (pending) slot.innerHTML = cardCommentButton(a, el.dataset.label || a, compact ? "💬" : "💬 Comment");
+    where === "start" ? host.prepend(slot) : host.append(slot);
+  }
+}
+
+// "💬" on a block: comment on the whole thing (no text selection needed).
+const cardCommentButton = (anchor, label, text = "💬") => `<button class="btn card-comment" type="button" data-card-comment="${esc(anchor)}" data-card-label="${esc(label)}" aria-label="${esc(`Comment on ${label}`)}" title="Comment on this">${text}</button>`;
 
 function trim(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 function safeUrl(u) { return /^https?:\/\//i.test(u) ? u : "#"; }
