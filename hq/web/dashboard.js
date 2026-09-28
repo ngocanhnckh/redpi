@@ -147,7 +147,8 @@ function needsYou() {
   const { workers, tasks, messages } = state;
   const items = [];
   const name = (id) => workers.find((w) => w.id === id)?.name || id;
-  for (const t of tasks.filter((t) => t.status === "blocked")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
+  // Only blockers waiting on you; the rest (a teammate, the CEO, something external) the team handles.
+  for (const t of tasks.filter((t) => t.status === "blocked" && t.blocked_on === "human")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
   for (const w of workers) {
     if (!w.alive && w.status !== "stopped") items.push({ id: w.id, level: "red", text: `${w.name} is offline`, action: "resume" });
     else if (w.needs_input) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_input.reason}` });
@@ -186,7 +187,8 @@ let feedFilter = { chat: "chat", updates: "updates", tools: "tools", actions: "t
 const STATUS_LABEL = { todo: "to do", in_progress: "in progress", review: "review", blocked: "blocked", done: "done" };
 const STATUS_COLOR = { todo: "var(--faint)", in_progress: "var(--cyan)", review: "var(--amber)", blocked: "var(--red)", done: "var(--green)" };
 const TOOL_ICON = { bash: "$", read: "<", edit: ">", write: ">", grep: "?", find: "?", ls: "?", glob: "?", redpi_jevgrep: "?", redpi_browser: "@", web: "@" };
-const nameOf = (id) => id === "ceo" ? "CEO" : id === "human" ? "You" : state.workers.find((w) => w.id === id)?.name || id;
+const nameOf = (id) => id === "ceo" ? "CEO" : id === "human" ? "You" : id === "external" ? "something outside the team" : state.workers.find((w) => w.id === id)?.name || id;
+const waitingOn = (t) => t.blocked_on === "human" ? "waiting on you" : t.blocked_on ? `waiting on ${nameOf(t.blocked_on)}` : "";
 const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function buildRun() {
@@ -311,7 +313,7 @@ function renderView() {
     return `<div class="col ${k}"><h3>${label}<span>${cards.length}</span></h3><div class="cards">${cards.map((t) => {
       const w = byId[t.worker_id];
       return `<button class="card" data-task="${esc(t.id)}" title="${esc(titles[t.id]?.task.description || "")}"><div class="id">${esc(t.id)} · ${esc(titles[t.id]?.story.title || t.story_id)}</div><div class="tt">${esc(t.title)}</div>
-        <div class="who">${w ? `${avatar(w.name, w.id, "sm")} ${esc(w.name)}` : `<span class="faint">unassigned</span>`}</div>${t.note && k !== "done" ? `<div class="note">${esc(t.note)}</div>` : ""}</button>`;
+        <div class="who">${w ? `${avatar(w.name, w.id, "sm")} ${esc(w.name)}` : `<span class="faint">unassigned</span>`}</div>${k === "blocked" && t.blocked_on ? `<div class="waiting ${t.blocked_on === "human" ? "you" : ""}">${esc(waitingOn(t))}</div>` : ""}${t.note && k !== "done" ? `<div class="note">${esc(t.note)}</div>` : ""}</button>`;
     }).join("")}</div></div>`;
   }).join("")}</div>` : `<div class="empty">The board fills in when you approve the plan.</div>`;
   const k = body.querySelector(".kanban");
@@ -336,7 +338,7 @@ function moveView(tr) {
   const title = state.tasks.find((t) => t.id === tr.task_id)?.title || "";
   const who = tr.actor && tr.actor !== "human" ? `<button class="linkish" data-person="${esc(tr.actor)}">${esc(nameOf(tr.actor))}</button>` : `<b>${esc(nameOf(tr.actor || "human"))}</b>`;
   return `<div class="act move"><span class="act-dot" style="background:${STATUS_COLOR[tr.to_status] || "var(--faint)"}"></span>
-    <span class="act-text">${who} moved <button class="linkish" data-task="${esc(tr.task_id)}">${esc(tr.task_id)}</button> ${esc(title)}: ${tr.from_status ? `${esc(STATUS_LABEL[tr.from_status] || tr.from_status)} → ` : ""}<b style="color:${STATUS_COLOR[tr.to_status] || "inherit"}">${esc(STATUS_LABEL[tr.to_status] || tr.to_status)}</b>${tr.target ? ` for ${esc(nameOf(tr.target))}` : ""}${tr.reason ? `<span class="muted"> · ${esc(tr.reason)}</span>` : ""}</span>
+    <span class="act-text">${who} moved <button class="linkish" data-task="${esc(tr.task_id)}">${esc(tr.task_id)}</button> ${esc(title)}: ${tr.from_status ? `${esc(STATUS_LABEL[tr.from_status] || tr.from_status)} → ` : ""}<b style="color:${STATUS_COLOR[tr.to_status] || "inherit"}">${esc(STATUS_LABEL[tr.to_status] || tr.to_status)}</b>${tr.target ? (tr.to_status === "blocked" ? `, waiting on ${esc(tr.target === "human" ? "you" : nameOf(tr.target))}` : ` for ${esc(nameOf(tr.target))}`) : ""}${tr.reason ? `<span class="muted"> · ${esc(tr.reason)}</span>` : ""}</span>
     <span class="when" data-t="${tr.created}">${ago(tr.created)}</span></div>`;
 }
 
@@ -551,7 +553,9 @@ async function renderPerson(root) {
   $("p-status").innerHTML = w ? `<span class="pill ${st === "working" ? "green" : st === "needs" || st === "offline" ? "red" : ""}">${esc(st)}</span>` : pill(state.run.status);
   // What this person is blocked on, in full, so you can answer it right here.
   const blocked = w ? state.tasks.filter((t) => t.worker_id === id && t.status === "blocked") : [];
-  const blockers = blocked.map((t) => `<div class="block-card"><div class="block-head"><span class="pill red">blocked</span><button class="linkish" data-task="${esc(t.id)}">${esc(t.id)}</button> <b>${esc(t.title)}</b><span style="flex:1"></span>${tab === "chat" ? `<button class="btn" data-reply-task="${esc(t.id)}">Reply about ${esc(t.id)}</button>` : ""}</div><div class="block-note">${esc(t.note || "No reason given.")}</div></div>`).join("");
+  const blockers = blocked.map((t) => `<div class="block-card ${t.blocked_on === "human" ? "" : "team"}"><div class="block-head"><span class="pill ${t.blocked_on === "human" ? "red" : "amber"}">blocked</span><button class="linkish" data-task="${esc(t.id)}">${esc(t.id)}</button> <b>${esc(t.title)}</b><span style="flex:1"></span>${tab === "chat" ? `<button class="btn" data-reply-task="${esc(t.id)}">Reply about ${esc(t.id)}</button>` : ""}</div>
+    ${t.blocked_on && t.blocked_on !== "human" ? `<div class="block-who">${esc(waitingOn(t))}: the team is handling it (they and the CEO have the note). You only need to act if you want to.</div>` : t.blocked_on === "human" ? `<div class="block-who you">Waiting on you.</div>` : ""}
+    <div class="block-note">${esc(t.note || "No reason given.")}</div></div>`).join("");
   const banner = w && !w.alive ? `<div class="banner red">${esc(name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>`
     : w?.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w?.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>`
       : w?.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : "";

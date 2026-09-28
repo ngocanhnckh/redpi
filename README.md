@@ -522,7 +522,7 @@ Click a name to open that person, click a task id to see its history, and send a
 
 Around the views:
 
-- a sticky **Needs you** strip: blocked tasks, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered
+- a sticky **Needs you** strip: tasks blocked on you, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered. A worker who blocks a task says who must act (`waitingOn`: a teammate, the CEO, something external, or the human); HQ sends the note to that teammate and always tells the CEO, and only blocks on you land here. Without `waitingOn`, a teammate named in the note is assumed, else the CEO. Cards and panels show "waiting on Alex" and the like
 - the **team** with pixel portraits, the CEO included; each card quotes that person's latest update. Click anyone (in the team list, on the office floor, or on the event board) to open their panel:
   - **Chat** (the default) is a messenger: your messages on the right, theirs on the left, the box pinned at the bottom (Enter sends, Shift+Enter for a new line). After you send, a note says they have it and that the reply appears right there. When the agent finishes the turn that handled your message, its answer is posted back to you in this chat (and on the event board), from Pi, Claude Code, Codex, and OpenCode workers and from the CEO alike. **Interrupt + send** stops their current work first; workers also offer **Ask on the side** (btw).
   - **Details**: what they are doing now, their tasks, context use, and their messages with teammates (for the CEO: the plan and what they last told the team).

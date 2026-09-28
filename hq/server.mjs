@@ -135,6 +135,7 @@ for (const [table, col, type] of [
   ["workers", "parked_level", "INTEGER NOT NULL DEFAULT 0"], ["workers", "parked_at", "INTEGER"], ["workers", "needs_human", "TEXT"],
   ["events", "ms", "INTEGER"], ["events", "ok", "INTEGER"],
   ["workers", "harness", "TEXT NOT NULL DEFAULT 'pi'"], ["tasks", "harness", "TEXT NOT NULL DEFAULT 'pi'"],
+  ["tasks", "blocked_on", "TEXT"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -234,6 +235,41 @@ function planReview(runId) {
 function recordTransition(runId, taskId, from, to, actor, reason, target) {
   run("INSERT INTO task_transitions (run_id, task_id, from_status, to_status, actor, reason, target, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     runId, taskId, from, to, actor, reason || null, target || null, now());
+}
+
+// Who has to act for a blocked task to move: a teammate (worker id), "ceo", "human", or "external".
+// Explicit waitingOn wins; otherwise a teammate named in the note, else the human only when the note
+// clearly asks for a human decision, else the CEO. Most blockers are the team's to solve, not yours.
+function whoMustAct(runId, task, waitingOn, note) {
+  const team = all("SELECT id, name FROM workers WHERE run_id = ?", runId).filter((w) => w.id !== task.worker_id);
+  const want = String(waitingOn || "").trim().toLowerCase();
+  if (want) {
+    if (["human", "you", "user", "owner"].includes(want)) return "human";
+    if (want === "ceo" || want === "external") return want;
+    const w = team.find((x) => x.id === waitingOn || x.name.toLowerCase() === want);
+    if (w) return w.id;
+    throw httpError(400, `waitingOn must be a teammate's name, "ceo", "human", or "external" (team: ${team.map((x) => x.name).join(", ") || "none"})`);
+  }
+  const text = String(note || "");
+  const named = team.find((x) => new RegExp(`\\b${x.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text));
+  if (named) return named.id;
+  if (/\b(the human|human (decision|input|approval)|needs? (your|the user's|the owner's) (decision|approval|input|answer)|ask(ing)? the (human|user))\b/i.test(text)) return "human";
+  return "ceo";
+}
+
+// A blocker goes to whoever can clear it: the teammate it waits on hears it directly, and the CEO always
+// knows (it coordinates and escalates to the human only for real decisions).
+function routeBlocker(runId, task, actor, blockedOn, note) {
+  const owner = one("SELECT name FROM workers WHERE id = ?", task.worker_id)?.name || "the owner";
+  const target = blockedOn && blockedOn.startsWith("wkr_") ? one("SELECT id, name FROM workers WHERE id = ?", blockedOn) : null;
+  if (target) addMessage(runId, task.worker_id || actor, target.id, "chat", `${task.id} (${task.title}) is blocked waiting on you. ${note}`);
+  const who = target ? target.name : blockedOn === "human" ? "the human" : blockedOn === "external" ? "something outside the team" : "you (the CEO)";
+  addMessage(runId, "human", "ceo", "system", `${task.id} ${task.title} is blocked (${owner}), waiting on ${who}. ${blockedOn === "human" ? "The human sees it under Needs you." : "Get it unblocked inside the team: have the teammate act now, or reassign the work. Ask the human only if it truly needs their decision."} Reason: ${note}`.slice(0, 4000));
+}
+
+// Blockers recorded before blocked_on existed get the same routing (so they leave Needs you unless they ask you).
+for (const t of all("SELECT * FROM tasks WHERE status = 'blocked' AND blocked_on IS NULL")) {
+  try { run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", whoMustAct(t.run_id, t, null, t.note), t.run_id, t.id); } catch {}
 }
 
 // ---------- tmux liveness ----------
@@ -634,6 +670,7 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   }
 
   if (b.status === "blocked" && !note) throw httpError(400, "blocked needs a note with the reason and what would unblock it");
+  const blockedOn = b.status === "blocked" ? whoMustAct(p.id, t, b.waitingOn, note) : null;
   if (b.status === "done" && !note) throw httpError(400, "done needs a note saying how the work was verified (tests, build, review)");
   // Independent review: the author moves work to review; someone else marks it done.
   if (b.status === "done" && t.worker_id && actor === t.worker_id && planReview(p.id) === "independent") {
@@ -642,8 +679,10 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
 
   run("UPDATE tasks SET status = COALESCE(?, status), worker_id = COALESCE(?, worker_id), note = COALESCE(?, note), updated = ? WHERE run_id = ? AND id = ?",
     b.status || null, b.workerId || null, note || null, now(), p.id, p.task);
+  if (b.status) run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", blockedOn, p.id, p.task);
+  if (b.status === "blocked" && (b.status !== t.status || blockedOn !== t.blocked_on)) routeBlocker(p.id, t, actor, blockedOn, note);
   if (b.status && b.status !== t.status) {
-    recordTransition(p.id, p.task, t.status, b.status, actor, note, null);
+    recordTransition(p.id, p.task, t.status, b.status, actor, note, b.status === "blocked" ? blockedOn : null);
     addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: ${t.status} → ${b.status}${note ? ` (${note})` : ""}`);
     if (b.status === "review" && t.worker_id) {
       addMessage(p.id, "human", "ceo", "system", `${p.task} ${t.title} is ready for review. ${planReview(p.id) === "independent" ? "Have the independent reviewer check the exact diff against the acceptance criteria." : ""}`.trim());

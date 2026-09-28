@@ -518,7 +518,8 @@ export class Office {
     const monitors = new Map(), typing = new Set();
     const counts = {};
     for (const t of tasks) counts[t.status] = (counts[t.status] || 0) + 1;
-    const blockedBy = new Set(tasks.filter((t) => t.status === "blocked").map((t) => t.worker_id));
+    // Only people blocked on you queue at the "needs you" mat; blocks on teammates are the team's to clear.
+    const blockedBy = new Set(tasks.filter((t) => t.status === "blocked" && (t.blocked_on === "human" || t.blocked_on === undefined)).map((t) => t.worker_id));
 
     // CEO: whiteboard while planning, desk while leading, meeting table when the run is done.
     const ceo = this.person("ceo", "CEO", "ceo", m.ceoSeat);

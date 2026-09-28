@@ -315,7 +315,9 @@ const lee = (await api("POST", `/api/runs/${run2}/workers`, { name: "Lee", role:
 const move = (task, status, actor, note) => api("POST", `/api/runs/${run2}/tasks/${task}`, { status, actor, note });
 await move("T1", "in_progress", kim); await move("T1", "review", kim, "tests pass"); await move("T1", "done", lee, "reviewed the diff");
 await move("T2", "in_progress", kim); const blocker = "needs the payments API. " + "The refund endpoint calls the charge lookup, which is not merged yet; once Kim lands T2 I can finish in about an hour. Could you confirm refunds should be full-amount only for now? ".repeat(3) + "END-OF-BLOCKER";
-await move("T4", "blocked", lee, blocker);
+await api("POST", `/api/runs/${run2}/tasks/T4`, { status: "blocked", actor: lee, note: blocker, waitingOn: "human" });
+// A blocker on a teammate is the team's: it is not under Needs you, and the card says who it waits on.
+await api("POST", `/api/runs/${run2}/tasks/T3`, { status: "blocked", actor: kim, note: "waiting on Lee to confirm the receipt email template" });
 await api("POST", `/api/workers/${kim}/heartbeat`, { status: "working", events: [{ kind: "tool", text: "bash: pytest -q", ms: 1200, ok: true }, { kind: "tool", text: "bash: npm run build", ms: 900, ok: false }] });
 await page.goto(`${base}/runs/${run2}`);
 await page.waitForSelector(".chart");
@@ -323,17 +325,18 @@ const charts = await page.evaluate(() => Object.fromEntries([...document.querySe
 const keys = ["burndown", "flow", "throughput", "cycle", "workload", "status", "activity"];
 if (keys.some((k) => !charts[k]?.svg)) await fail("charts missing", Object.keys(charts));
 if (!/11h of 15h left · 1\/4 done/.test(charts.burndown.sub)) await fail("burndown numbers wrong", charts.burndown.sub);
-if (!/1 done · 1 in flight · 1 blocked · 1 waiting/.test(charts.flow.sub)) await fail("cumulative flow numbers wrong", charts.flow.sub);
+if (!/1 done · 1 in flight · 2 blocked · 0 waiting/.test(charts.flow.sub)) await fail("cumulative flow numbers wrong", charts.flow.sub);
 if (!/^1 task done/.test(charts.throughput.sub)) await fail("throughput wrong", charts.throughput.sub);
 if (!/1 done/.test(charts.cycle.sub)) await fail("cycle time wrong", charts.cycle.sub);
 if (!/2 people · 4 tasks · most open: Kim \(2\)/.test(charts.workload.sub)) await fail("workload wrong", charts.workload.sub);
-if (!/1 of 4 tasks done · 1 blocked/.test(charts.status.sub)) await fail("status wrong", charts.status.sub);
+if (!/1 of 4 tasks done · 2 blocked/.test(charts.status.sub)) await fail("status wrong", charts.status.sub);
 if (!/2 tool calls/.test(charts.activity.sub)) await fail("activity wrong", charts.activity.sub);
 // Moves show on the event board as actions, with the failed tool call in red; no duplicate task echoes.
 const feed2 = await page.evaluate(() => ({ moves: [...document.querySelectorAll("#feed .act.move")].map((e) => e.textContent.replace(/\s+/g, " ")), bad: document.querySelectorAll("#feed .act.tool.bad").length, echoes: document.querySelectorAll("#feed .msg.task").length }));
-if (feed2.moves.length !== 5 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked · needs the payments API/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
+if (feed2.moves.length !== 6 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked, waiting on you · needs the payments API/.test(m)) || !feed2.moves.some((m) => /Kim moved T3 Receipts: to do → blocked, waiting on Lee/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
 // A blocker is readable in full: the Needs you item opens the person with the whole reason at the
 // top of their chat, and "Reply about T4" starts your answer.
+if (await page.locator(".needs-item", { hasText: "T3 blocked" }).count()) await fail("a blocker waiting on a teammate should not be under Needs you");
 const item = page.locator(".needs-item", { hasText: "T4 blocked" });
 if (!/END-OF-BLOCKER/.test(await item.getAttribute("title"))) await fail("the Needs you item should carry the full blocker as its tooltip");
 await item.click();
@@ -343,6 +346,10 @@ if (!/END-OF-BLOCKER/.test(card.text) || card.clipped || !card.visible) await fa
 await page.click('[data-reply-task="T4"]');
 if (!(await page.evaluate(() => document.activeElement?.id === "wmsg" && document.getElementById("wmsg").value === "About T4: "))) await fail("Reply about T4 should start the answer in the box");
 if (shots) await page.screenshot({ path: join(shots, "blocker.png") });
+await page.keyboard.press("Escape");
+await page.click(`.member[data-person="${kim}"]`);
+await page.waitForSelector('.drawer[aria-label="Kim"] .block-card.team');
+if (!/waiting on Lee: the team is handling it/.test(await page.textContent(".drawer .block-card.team"))) await fail("a teammate blocker should say who it waits on and that the team handles it");
 await page.keyboard.press("Escape");
 
 // Live: finishing another task updates the charts without a reload.

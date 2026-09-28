@@ -187,6 +187,23 @@ const peterMsgs = (await api("GET", `/api/runs/${runId}/inbox?for=${peter.id}&af
 if (!peterMsgs.some((m) => m.body.startsWith("Handing T2"))) fail("new owner not told about the handoff");
 if ((await api("GET", `/api/runs/${runId}/tasks/T2/history`)).body.at(-1)?.target !== peter.id) fail("handoff not in history");
 
+// Blockers go to whoever must act: a teammate named in the note (they are told directly), the CEO by
+// default, the human only when asked for explicitly or clearly needed. Only human blocks are "needs you".
+const blockT2 = (body) => api("POST", `/api/runs/${runId}/tasks/T2`, { status: "blocked", actor: peter.id, ...body });
+const bt = await blockT2({ note: "waiting on Alex to merge the schema migration" });
+const blockedOn = () => api("GET", `/api/runs/${runId}`).then((r) => r.body.tasks.find((t) => t.id === "T2").blocked_on);
+if (bt.status !== 200 || (await blockedOn()) !== alex.id) fail("a blocker naming a teammate should wait on that teammate", bt.body);
+if (!(await api("GET", `/api/runs/${runId}/inbox?for=${alex.id}&after=0`)).body.some((m) => /T2 .*blocked waiting on you/.test(m.body))) fail("the teammate was not told the task waits on them");
+if (!(await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body.some((m) => m.kind === "system" && /T2 .*waiting on Alex/.test(m.body))) fail("the CEO was not told about the blocker");
+if ((await api("GET", `/api/runs/${runId}/tasks/T2/history`)).body.at(-1)?.target !== alex.id) fail("blocker target not in history");
+await blockT2({ note: "the vendor sandbox is down" });
+if ((await blockedOn()) !== "ceo") fail("an unnamed blocker should default to the CEO, not the human");
+await blockT2({ note: "need the production database password", waitingOn: "human" });
+if ((await blockedOn()) !== "human") fail("waitingOn human not recorded");
+if ((await blockT2({ note: "x", waitingOn: "Bob" })).status !== 400) fail("unknown waitingOn accepted");
+await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "todo", actor: "ceo" });
+if ((await blockedOn()) !== null) fail("blocked_on should clear when the task moves on");
+
 // Stale launch: a heartbeat from an earlier process must be ignored.
 const stale = await api("POST", `/api/workers/${alex.id}/heartbeat`, { launchId: "OLD", status: "working", lastMessage: "ghost" });
 if (!stale.body.stale || (await api("GET", `/api/workers/${alex.id}`)).body.worker.last_message === "ghost") fail("stale-launch heartbeat was applied");
@@ -265,5 +282,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, stale launches, parked ladder, projects home, password sign-in, plan review comments, harness per task.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

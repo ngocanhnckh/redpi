@@ -251,7 +251,7 @@ ${tasks}
 Teammates:
 ${team}
 How you work:
-1. Move your cards with redplan_update_task: in_progress when you start; ${finish} Blocked needs a note with the reason and what would unblock it. If someone else should finish a task, hand it off (handoffTo) with a note on what is done and what is next.
+1. Move your cards with redplan_update_task: in_progress when you start; ${finish} Blocked needs a note with the reason and what would unblock it, and waitingOn: the teammate who must act (they get the note), "ceo", "external", or "human" only for a decision or access only the human can give. Waiting on a teammate is not the human's problem. If someone else should finish a task, hand it off (handoffTo) with a note on what is done and what is next.
 2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.
 3. Messages arrive as user messages starting with [RedPlan …]. Instructions from the human override everything else.
 4. Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge.
@@ -833,12 +833,13 @@ export default function (pi: ExtensionAPI) {
       status: Type.Optional(Type.Union(["todo", "in_progress", "review", "blocked", "done"].map((s) => Type.Literal(s)))),
       note: Type.Optional(Type.String({ description: "Required for blocked (reason), done (how verified), and handoffs (state and next step)" })),
       handoffTo: Type.Optional(Type.String({ description: "Teammate name to hand this task to" })),
+      waitingOn: Type.Optional(Type.String({ description: "For blocked: who must act to unblock it — a teammate's name, \"ceo\", \"external\", or \"human\" (only for a decision or access only the human can give). The blocker is sent to them; only \"human\" asks the human." })),
     }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
       if (!params.status && !params.handoffTo) throw new Error("Give a status or handoffTo.");
       try {
-        const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, handoffTo: params.handoffTo, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
+        const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, handoffTo: params.handoffTo, waitingOn: params.waitingOn, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
         return text(params.handoffTo ? `${t.id} handed to ${params.handoffTo}.` : `${t.id} is now ${t.status}.`);
       } catch (e: any) { throw new Error(e.message); }
     },

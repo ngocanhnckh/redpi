@@ -17,6 +17,7 @@ const USAGE = `redpi-hq — your RedPlan board and team chat
   redpi-hq status                              the run: tasks, owners, workers
   redpi-hq team                                you, your tasks, your teammates
   redpi-hq task <id> <status> [note]           status: ${STATUSES.join(" | ")}
+  redpi-hq task <id> blocked --on <who> <note> who must act: a teammate's name, ceo, external, or human
         blocked needs a note (reason); done needs a note (how you verified it)
   redpi-hq task <id> --handoff <name> <note>   hand a task to a teammate
   redpi-hq send <name|ceo|all> <message>       message a teammate, the CEO, or everyone`;
@@ -54,14 +55,16 @@ if (cmd === "status") {
 } else if (cmd === "task") {
   const [id, ...more] = rest;
   if (!id) die(USAGE);
-  let status, handoffTo, note;
+  let status, handoffTo, note, waitingOn;
   if (more[0] === "--handoff") { handoffTo = more[1]; note = more.slice(2).join(" "); if (!handoffTo) die("redpi-hq: --handoff needs a teammate name"); }
   else {
     status = more[0];
     if (!STATUSES.includes(status)) die(`redpi-hq: status must be one of ${STATUSES.join(", ")}`);
-    note = more.slice(1).join(" ").replace(/^--note\s+/, "");
+    let args = more.slice(1);
+    if (args[0] === "--on") { waitingOn = args[1]; args = args.slice(2); }
+    note = args.join(" ").replace(/^--note\s+/, "");
   }
-  const t = await hq("POST", `/api/runs/${RUN}/tasks/${encodeURIComponent(id)}`, { status, note: note || undefined, handoffTo, actor: ME, ...(status === "in_progress" ? { workerId: ME } : {}) });
+  const t = await hq("POST", `/api/runs/${RUN}/tasks/${encodeURIComponent(id)}`, { status, note: note || undefined, handoffTo, waitingOn, actor: ME, ...(status === "in_progress" ? { workerId: ME } : {}) });
   console.log(handoffTo ? `${t.id} handed to ${handoffTo}.` : `${t.id} is now ${t.status}.`);
 } else if (cmd === "send") {
   const [to, ...words] = rest;

@@ -93,7 +93,7 @@ Teammates:
 ${d.teammates.map((t) => `- ${t.name} (${t.role})`).join("\n") || "- (just you)"}
 Use the \`redpi-hq\` command in your shell to work with the team (run \`redpi-hq help\`):
 - \`redpi-hq task <id> in_progress\` when you start a task; \`redpi-hq task <id> ${reviewer ? "done" : independent ? "review" : "done"} "<how you verified it>"\` — ${finish}.
-- \`redpi-hq task <id> blocked "<reason and what would unblock it>"\`; \`redpi-hq task <id> --handoff <name> "<what is done, what is next>"\`.
+- \`redpi-hq task <id> blocked --on <teammate|ceo|external|human> "<reason and what would unblock it>"\` (the blocker goes to whoever must act; use human only for a decision or access only the human can give); \`redpi-hq task <id> --handoff <name> "<what is done, what is next>"\`.
 - \`redpi-hq send <name> "<message>"\` to talk to a teammate, \`redpi-hq send ceo "<message>"\` for decisions outside your tasks or when blocked. \`redpi-hq team\` / \`redpi-hq status\` show the team and board.
 Messages from the CEO, teammates, and the human arrive as your next prompt, starting with [RedPlan …]. Instructions from the human override everything else.
 Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge. Use the exact technologies and APIs in your brief. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
