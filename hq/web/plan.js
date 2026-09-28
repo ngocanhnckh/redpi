@@ -1,5 +1,6 @@
 import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
+import { mountPanZoom, panZoomFrame } from "/static/panzoom.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
@@ -340,7 +341,7 @@ function timelineView(plan, schedule, pending) {
   return `
     <div class="panel"><div class="panel-head"><h2>Gantt</h2><span class="muted mono" style="margin-right:auto">${hours(schedule.duration)} wall clock · ${hours(schedule.totalHours)} effort</span>${pending ? pinButton("gantt") : ""}</div>
       <div class="panel-body"><div class="legend"><span><i style="background:var(--red)"></i>critical path</span><span><i style="background:var(--green-dim)"></i>has slack</span><span><i style="border-top:1px dashed var(--faint);height:0"></i>slack (can slip without delaying the project)</span></div>
-      <div class="gantt-wrap"><div class="diagram" data-diagram="gantt" id="gantt"></div></div></div></div>
+      ${panZoomFrame("Gantt chart", `<div class="diagram" data-diagram="gantt" id="gantt"></div>`)}</div></div>
     <div class="stats" style="margin-top:14px">
       <div class="panel" style="grid-column:1/-1" data-anchor="critical-path" data-label="Critical path"><div class="panel-head"><h2>Critical path</h2><span class="pill red">${schedule.criticalPath.length} tasks</span></div>
         <div class="panel-body mono">${schedule.criticalPath.map((id) => `<span class="pill red" title="${esc(names[id])}">${esc(id)}</span>`).join(" → ")}</div></div>
@@ -354,7 +355,7 @@ function drawGantt(plan, schedule) {
   const el = document.getElementById("gantt");
   const rowH = 26, labelW = 300, top = 26;
   const rows = plan.stories.flatMap((s) => [{ story: s }, ...s.tasks.map((t) => ({ task: t }))]);
-  const chartW = Math.max(520, el.clientWidth - labelW - 10);
+  const chartW = Math.max(520, el.closest(".pz").clientWidth - labelW - 12);
   const scale = chartW / Math.max(1, schedule.duration);
   const step = [1, 2, 4, 8, 16, 24, 40, 80, 160].find((s) => s * scale >= 56) || 320;
   const h = top + rows.length * rowH + 8;
@@ -370,6 +371,8 @@ function drawGantt(plan, schedule) {
     svg += `<rect class="bar ${t.critical ? "crit" : ""}" x="${x}" y="${y + 6}" width="${w}" height="${rowH - 12}" rx="3"><title>${esc(r.task.id)} ${esc(r.task.title)}: h${t.es}–h${t.ef} (${hours(t.hours)})${t.critical ? ", critical" : `, slack ${hours(t.slack)}`}</title></rect></g>`;
   });
   el.innerHTML = svg + "</svg>";
+  // Long plans are read top to bottom: fit the width and pan down.
+  mountPanZoom(el.closest(".pz"), { key: `${planId}:gantt`, fit: "width", minFit: 0.6 });
 }
 
 const KIND_COLOR = { ui: "var(--cyan)", service: "var(--green)", api: "var(--green)", db: "var(--violet)", database: "var(--violet)", queue: "var(--amber)", external: "var(--muted)", library: "var(--red)", model: "var(--red)", agent: "var(--red)" };
@@ -379,24 +382,47 @@ function drawArchitecture(arch) {
   const comps = arch?.components || [];
   if (!comps.length) { el.innerHTML = `<div class="empty">No architecture in this plan.</div>`; return; }
   const links = (arch.links || []).filter((l) => comps.some((c) => c.id === l.from) && comps.some((c) => c.id === l.to));
+  // Columns = longest path over the links, ignoring links that close a loop (A → B → A): those
+  // are drawn as return curves. Counting them pushed looping components one column further
+  // right per pass, which made diagrams extremely wide.
+  const out = Object.fromEntries(comps.map((c) => [c.id, links.filter((l) => l.from === c.id)]));
+  const state = {}, loops = new Set();
+  const visit = (id) => {
+    state[id] = 1;
+    for (const l of out[id]) { if (state[l.to] === 1) loops.add(l); else if (!state[l.to]) visit(l.to); }
+    state[id] = 2;
+  };
+  for (const c of comps) if (!state[c.id]) visit(c.id);
   const level = Object.fromEntries(comps.map((c) => [c.id, 0]));
-  for (let i = 0; i < comps.length; i++) for (const l of links) if (level[l.to] < level[l.from] + 1 && level[l.from] + 1 < comps.length) level[l.to] = level[l.from] + 1;
+  for (let i = 0; i < comps.length; i++) for (const l of links) if (!loops.has(l) && level[l.to] < level[l.from] + 1) level[l.to] = level[l.from] + 1;
   const cols = [];
   for (const c of comps) (cols[level[c.id]] ||= []).push(c);
-  const W = 190, H = 64, gx = 110, gy = 28, pad = 20;
+  const W = 190, H = 64, gx = 150, gy = 36, pad = 24, back = 46;
   const pos = {};
   cols.forEach((col, ci) => col.forEach((c, ri) => { pos[c.id] = { x: pad + ci * (W + gx), y: pad + ri * (H + gy) }; }));
+  const names = Object.fromEntries(comps.map((c) => [c.id, c.name]));
   const width = pad * 2 + cols.length * W + (cols.length - 1) * gx;
-  const height = pad * 2 + Math.max(...cols.map((c) => c.length)) * (H + gy) - gy;
-  let svg = `<div style="overflow-x:auto"><div class="diagram" data-diagram="arch"><svg class="arch" width="${width}" height="${height}" role="img" aria-label="Architecture diagram"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
+  const returns = links.some((l) => pos[l.to].x <= pos[l.from].x);
+  const height = pad * 2 + Math.max(...cols.map((c) => c.length)) * (H + gy) - gy + (returns ? back + 24 : 0);
+  // Labels sit in the gap between columns (forward links) or under the return curve, trimmed to
+  // the space they have; links sharing a gap and height are stacked instead of printed on top of each other.
+  const maxChars = Math.floor((gx - 12) / 6.2);
+  const taken = [];
+  const place = (x, y) => { while (taken.some((t) => Math.abs(t.x - x) < gx * 0.8 && Math.abs(t.y - y) < 13)) y += 14; taken.push({ x, y }); return y; };
+  let svg = `<div class="diagram" data-diagram="arch"><svg class="arch" width="${width}" height="${height}" role="img" aria-label="Architecture diagram"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--faint)"/></marker></defs>`;
+  let labels = "";
   for (const l of links) {
     const a = pos[l.from], b = pos[l.to];
+    const forward = b.x > a.x;
     const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
-    const d = x2 > x1 ? `M${x1},${y1} C${x1 + gx / 2},${y1} ${x2 - gx / 2},${y2} ${x2},${y2}` : `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${a.y + H + 40} ${b.x + W / 2},${b.y + H + 40} ${b.x + W / 2},${b.y + H}`;
-    const names = Object.fromEntries(comps.map((c) => [c.id, c.name]));
-    svg += `<g data-anchor="link:${esc(l.from)}>${esc(l.to)}" data-label="${esc(`${names[l.from]} → ${names[l.to]}${l.label ? ` (${l.label})` : ""}`)}"><path class="edge" d="${d}" marker-end="url(#arr)"/><path class="edge-hit" d="${d}"/>`;
-    if (l.label) svg += `<text class="elabel" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 5}" text-anchor="middle">${esc(trim(l.label, 22))}</text>`;
-    svg += `</g>`;
+    const low = Math.max(a.y, b.y) + H + back;
+    const d = forward ? `M${x1},${y1} C${x1 + gx / 2},${y1} ${x2 - gx / 2},${y2} ${x2},${y2}` : `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${low} ${b.x + W / 2},${low} ${b.x + W / 2},${b.y + H}`;
+    svg += `<g data-anchor="link:${esc(l.from)}>${esc(l.to)}" data-label="${esc(`${names[l.from]} → ${names[l.to]}${l.label ? ` (${l.label})` : ""}`)}"><title>${esc(`${names[l.from]} → ${names[l.to]}${l.label ? `: ${l.label}` : ""}`)}</title><path class="edge" d="${d}" marker-end="url(#arr)"/><path class="edge-hit" d="${d}"/></g>`;
+    if (l.label) {
+      const lx = forward ? (x1 + x2) / 2 : (a.x + b.x) / 2 + W / 2;
+      const ly = place(lx, forward ? (y1 + y2) / 2 - 6 : a.y + H + back * 0.75 + 12);
+      labels += `<text class="elabel" x="${lx}" y="${ly}" text-anchor="middle"><title>${esc(l.label)}</title>${esc(trim(l.label, forward ? maxChars : 40))}</text>`;
+    }
   }
   for (const c of comps) {
     const p = pos[c.id], color = KIND_COLOR[String(c.kind || "").toLowerCase()] || "var(--green)";
@@ -407,7 +433,9 @@ function drawArchitecture(arch) {
       <text x="${p.x + 14}" y="${p.y + 36}" style="font-weight:600">${esc(trim(c.name, 24))}</text>
       ${c.tech ? `<text class="kind" x="${p.x + 14}" y="${p.y + 53}">${esc(trim(c.tech, 28))}</text>` : ""}</g>`;
   }
-  el.innerHTML = svg + `</svg></div></div>${comps.some((c) => c.description) ? `<div class="tech" style="margin-top:14px">${comps.filter((c) => c.description).map((c) => `<div class="panel card" data-anchor="component:${esc(c.id)}" data-label="${esc(`${c.name} (${c.kind || "component"})`)}"><b>${esc(c.name)}</b> <span class="muted mono">${esc(c.kind || "")}</span><div class="muted" style="font-size:13px;margin-top:4px">${esc(c.description)}</div></div>`).join("")}</div>` : ""}`;
+  // Labels last, with a halo, so no box or line covers them.
+  el.innerHTML = panZoomFrame("Architecture diagram", svg + labels + `</svg></div>`) + (comps.some((c) => c.description) ? `<div class="tech" style="margin-top:14px">${comps.filter((c) => c.description).map((c) => `<div class="panel card" data-anchor="component:${esc(c.id)}" data-label="${esc(`${c.name} (${c.kind || "component"})`)}"><b>${esc(c.name)}</b> <span class="muted mono">${esc(c.kind || "")}</span><div class="muted" style="font-size:13px;margin-top:4px">${esc(c.description)}</div></div>`).join("")}</div>` : "");
+  mountPanZoom(el.querySelector(".pz"), { key: `${planId}:arch`, fit: "contain", minFit: 0.45 });
 }
 
 function techView(stack) {

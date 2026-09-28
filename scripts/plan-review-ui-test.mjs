@@ -153,8 +153,95 @@ await page.waitForSelector("text=Watch execution");
 const approvedMsg = (await api("GET", `/api/runs/${r}/inbox?for=ceo&after=0`)).filter((m) => m.kind === "decision").pop()?.body || "";
 if (!approvedMsg.includes("Pi (RedPi): T1, T2; Claude Code: T3")) fail(`approval message lacks the harness per task: ${approvedMsg}`);
 if (!(await page.textContent(".harness-bar")).includes("Coding agents: Pi (RedPi) 2 · Claude Code 1")) fail("approved plan should show the agents read-only");
+// Big diagrams: a wide, tangled architecture (a long chain, a return link, two links between the
+// same pair, a crowded column) opens fitted inside its frame, can be dragged and zoomed, and pins
+// still land on the component under the pointer at any zoom. A drag in comment mode drops no pin.
+{
+  const comps = ["lib:library:Framework mapping data", "web:ui:ARROW Web", "api:service:ARROW API", "worker:agent:ARROW Worker", "sup:agent:Deep Agent supervisor", "sandbox:service:CLI sandbox", "pg:db:Postgres", "s3:external:Object store", "llm:model:Model gateway", "q:queue:Job queue"]
+    .map((c) => { const [id, kind, name] = c.split(":"); return { id, kind, name, tech: `${kind} tech` }; });
+  const links = [["lib", "web", "matrix + coverage rows"], ["web", "api", "REST"], ["api", "worker", "run control, matrix, checklist"], ["worker", "sup", "drives assessment"], ["worker", "sup", "maps ingests"], ["sup", "sandbox", "shell"], ["sup", "worker", "progress"], ["api", "pg", "SQL"], ["api", "s3", "reports"], ["api", "llm", "summaries"], ["api", "q", "jobs"]]
+    .map(([from, to, label]) => ({ from, to, label }));
+  const wideRun = (await api("POST", "/api/runs", { projectPath: "/home/yitec/arrowish", title: "Wide diagram" })).run.id;
+  const wide = await api("POST", `/api/runs/${wideRun}/plans`, { plan: { ...plan, architecture: { components: comps, links } } });
+  const w = await ctx.newPage();
+  w.on("pageerror", (e) => errors.push(e.message));
+  await w.goto(`${base}/plans/${wide.id}`);
+  await w.waitForSelector("details.story");
+  await w.click("[data-tab=architecture]");
+  await w.waitForSelector(".pz .diagram svg");
+  const frame = async () => w.evaluate(() => {
+    const st = document.querySelector(".pz-stage").getBoundingClientRect();
+    const boxes = [...document.querySelectorAll('.pz [data-anchor^="component:"] rect:first-of-type')].map((r) => r.getBoundingClientRect());
+    return { st: { l: st.left, r: st.right, t: st.top, b: st.bottom }, inside: boxes.every((b) => b.left >= st.left - 1 && b.right <= st.right + 1 && b.top >= st.top - 1 && b.bottom <= st.bottom + 1), zoom: document.querySelector("[data-pz=zoom]").textContent, first: boxes[0].left };
+  });
+  const f0 = await frame();
+  if (!f0.inside) fail("the architecture does not open fitted inside its frame");
+  if (await w.evaluate(() => document.documentElement.scrollWidth > innerWidth)) fail("the architecture makes the page scroll sideways");
+  // Labels never share a spot.
+  const overlaps = await w.evaluate(() => {
+    const rs = [...document.querySelectorAll(".arch .elabel")].map((t) => t.getBoundingClientRect());
+    return rs.some((a, i) => rs.some((b, j) => j > i && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom));
+  });
+  if (overlaps) fail("architecture link labels overlap");
+  // Ctrl + scroll zooms in at the pointer; the zoom level shows.
+  const cx = (f0.st.l + f0.st.r) / 2, cy = (f0.st.t + f0.st.b) / 2;
+  await w.mouse.move(cx, cy);
+  await w.keyboard.down("Control"); await w.mouse.wheel(0, -400); await w.keyboard.up("Control");
+  const f1 = await frame();
+  if (parseInt(f1.zoom) <= parseInt(f0.zoom)) fail(`ctrl+scroll did not zoom in (${f0.zoom} → ${f1.zoom})`);
+  if (f1.inside) fail("zoomed in, the diagram should overflow its frame");
+  // Drag moves it.
+  await w.mouse.move(cx, cy); await w.mouse.down(); await w.mouse.move(cx - 200, cy - 20, { steps: 6 }); await w.mouse.up();
+  const f2 = await frame();
+  if (Math.abs(f2.first - (f1.first - 200)) > 2) fail(`drag did not move the diagram by 200px (${f1.first} → ${f2.first})`);
+  // Comment mode: a drag drops no pin; a click pins the component under the pointer, even zoomed and moved.
+  await w.click("[data-pin=arch]");
+  await w.mouse.move(cx, cy); await w.mouse.down(); await w.mouse.move(cx + 120, cy, { steps: 5 }); await w.mouse.up();
+  if (await w.$(".composer-pop")) fail("dragging in comment mode opened a comment");
+  const target = await w.evaluate(([l, r, t, b]) => {
+    const els = [...document.querySelectorAll('.pz [data-anchor^="component:"]')];
+    for (const el of els) { const x = el.querySelector("rect").getBoundingClientRect(); const px = x.left + x.width / 2, py = x.top + x.height / 2; if (px > l + 20 && px < r - 20 && py > t + 40 && py < b - 30) return { id: el.dataset.anchor, label: el.dataset.label, px, py }; }
+  }, [f2.st.l, f2.st.r, f2.st.t, f2.st.b]);
+  if (!target) fail("no component visible after zoom and drag");
+  await w.mouse.click(target.px, target.py);
+  await w.waitForSelector(".composer-pop textarea");
+  const pinWhere = await w.textContent(".cp-where");
+  if (pinWhere !== `Architecture diagram › ${target.label}`) fail(`zoomed pin named ${pinWhere}, expected ${target.label}`);
+  await w.fill(".composer-pop textarea", "Pinned while zoomed.");
+  await w.keyboard.press("Control+Enter");
+  await w.waitForSelector(".pz .pin");
+  const pinOff = await w.evaluate((id) => { const r = document.querySelector(".pz .pin").getBoundingClientRect(); const c = document.querySelector(`.pz [data-anchor="${id}"] rect`).getBoundingClientRect(); return { d: Math.hypot(r.left + r.width / 2 - (c.left + c.width / 2), r.bottom - (c.top + c.height / 2)), c: [c.left + c.width / 2, c.top + c.height / 2] }; }, target.id);
+  if (pinOff.d > 3) fail(`the pin is drawn ${pinOff.d.toFixed(1)}px away from the component center it was placed on`);
+  // Zooming again keeps the pin on its spot and at a readable size.
+  await w.click("[data-pz=in]");
+  const pinSize = await w.evaluate(() => document.querySelector(".pz .pin").getBoundingClientRect().height);
+  if (pinSize < 20 || pinSize > 30) fail(`pins should stay a constant size at any zoom (got ${pinSize}px)`);
+  // Fit, Expand (fills the window), Esc closes it.
+  await w.click("[data-pin=arch]");
+  await w.click("[data-pz=expand]");
+  const exp = await w.evaluate(() => { const r = document.querySelector(".pz").getBoundingClientRect(); return r.width > innerWidth - 40 && r.height > innerHeight - 40; });
+  if (!exp) fail("Expand did not fill the window");
+  await w.screenshot({ path: process.env.REDPI_SHOTS ? `${process.env.REDPI_SHOTS}/arch-expanded.png` : join(dir, "x.png") });
+  await w.keyboard.press("Escape");
+  if (await w.$(".pz-expanded")) fail("Esc did not close the expanded view");
+  await w.click("[data-pz=fit]");
+  if (!(await frame()).inside) fail("Fit did not bring the whole diagram back into view");
+  if (process.env.REDPI_SHOTS) await w.screenshot({ path: `${process.env.REDPI_SHOTS}/arch-fit.png` });
+  // The Gantt chart gets the same frame.
+  await w.click("[data-tab=timeline]");
+  await w.waitForSelector(".pz #gantt svg");
+  // Phone: one finger drags the diagram, and the page itself never scrolls sideways.
+  const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: "light", hasTouch: true });
+  const p = await login(pctx);
+  await p.goto(`${base}/plans/${wide.id}`); await p.waitForSelector("details.story");
+  await p.click("[data-tab=architecture]"); await p.waitForSelector(".pz .diagram svg");
+  if (await p.evaluate(() => document.documentElement.scrollWidth > innerWidth)) fail("wide architecture overflows the phone screen");
+  if (process.env.REDPI_SHOTS) await p.screenshot({ path: `${process.env.REDPI_SHOTS}/arch-phone.png`, fullPage: false });
+  await pctx.close();
+  await w.close();
+}
 await browser.close();
 const real = errors.filter((e) => !/status of 401/.test(e));
 if (real.length) fail(`console errors:\n${real.join("\n")}`);
-console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), phone layout.");
+console.log("Plan review UI test passed: text highlights, diagram pins on architecture and Gantt, edit, send feedback → one numbered anchored CEO message, v2 shows what changed and the v1 comments, coding agent per task (installed only, all/each, sent with the approval), big diagrams (fit, drag, zoom, pins at any zoom, expand), phone layout.");
 process.exit(0);
