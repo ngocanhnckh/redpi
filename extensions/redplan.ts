@@ -231,7 +231,7 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Draw flows: one flowchart per feature the human will use (usually one per story), step by step from the user's action to the result, each step saying where it runs (component and technology), what happens in plain words, and what data moves, with decision steps for the branches that matter (wrong password, not found, timeout, retry). The human reads the flows to confirm the business logic and the tech at each step, so make them concrete and readable: "User types username and password (Browser · Next.js login form)" → "Form posts them over HTTPS to POST /auth/login (NestJS AuthController)" → "Look up the user and compare the password with its bcrypt hash (NestJS AuthService · Postgres users table)" → decision "Match?" → yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'". Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
@@ -257,6 +257,8 @@ How you work:
 4. Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge.
 5. Use the exact technologies and APIs in your brief; do not substitute look-alikes.
 6. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
+Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why (e.g. "Reading the auth module to see how sessions are stored."), and after it, one sentence on what you found or changed. The human follows these lines live in RedPi HQ.
+
 Team norms: review the exact change, not a description of it. Never close or mark someone else's task on their behalf unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in your task notes or messages so the next person can follow them.`;
 }
 
@@ -361,7 +363,17 @@ export default function (pi: ExtensionAPI) {
 
   // ----- heartbeat (workers) -----
   function beat(patch: any, event?: { kind: string; text: string; ms?: number; ok?: boolean }) {
-    if (!WORKER_ID) return;
+    if (!WORKER_ID) {
+      // The CEO has no worker record: only its events (tool calls, updates) go to HQ, for the event board.
+      if (!runId || !event) return;
+      pendingEvents.push(event);
+      if (beatTimer) return;
+      beatTimer = setTimeout(async () => {
+        beatTimer = undefined;
+        await hq("POST", `/api/runs/${runId}/ceo-events`, { events: pendingEvents.splice(0) }).catch(() => {});
+      }, 700);
+      return;
+    }
     beatState = { ...beatState, ...patch };
     if (event) pendingEvents.push(event);
     if (beatTimer) return;
@@ -379,11 +391,12 @@ export default function (pi: ExtensionAPI) {
     if (m.kind === "brief") return `[RedPlan brief from the CEO]\n\n${m.body}`;
     if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
     if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
-    if (m.sender === "human") return `[RedPlan · instruction from the human via HQ]\n${m.body}`;
+    if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
     return `[RedPlan · message from ${from}]\n${m.body}\n(Reply with redplan_send to "${from === "CEO" ? "ceo" : from}" if needed.)`;
   }
 
   let asideChain: Promise<void> = Promise.resolve();
+  let owedReply = false;
   async function answerAside(m: any) {
     const ctx = latestCtx;
     const started = Date.now();
@@ -445,6 +458,8 @@ export default function (pi: ExtensionAPI) {
         latestCtx.ui?.notify?.(/APPROVED/.test(decision.body) ? `HQ: plan approved${n ? ` with ${n} note${n === 1 ? "" : "s"}` : ""}. Starting the team.` : `HQ: plan feedback received${n ? ` (${n} comment${n === 1 ? "" : "s"})` : ""}. Revising the plan; you can keep chatting here.`, "info");
       }
       const body = msgs.map(format).join("\n\n---\n\n");
+      // The human wrote from HQ: their answer is owed back there when this turn ends.
+      if (msgs.some((m) => m.sender === "human" && !["system", "decision"].includes(m.kind))) owedReply = true;
       if (latestCtx.isIdle()) pi.sendUserMessage(body);
       else pi.sendUserMessage(body, { deliverAs: urgent ? "steer" : "followUp" });
       beat({}, { kind: "inbox", text: msgs.map((m) => `${m.senderName}: ${String(m.body).slice(0, 120)}`).join(" | ") });
@@ -497,6 +512,19 @@ export default function (pi: ExtensionAPI) {
     const err = [last?.errorMessage, last?.stopReason === "error" ? "error" : ""].filter(Boolean).join(" ");
     const stuck = err && PROVIDER_STUCK.test(err) ? { count: 1, reason: `Model provider problem: ${String(last?.errorMessage || err).slice(0, 200)}` } : null;
     beat({ status: "idle", ...(said ? { lastMessage: said } : {}), ...(openDialogs ? {} : { needsInput: stuck }) }, said ? { kind: "reply", text: said.slice(0, 300) } : stuck ? { kind: "error", text: stuck.reason } : undefined);
+    // Answer the human in HQ, where they asked (unless the turn ended with nothing to say yet).
+    if (owedReply && runId && (said || err)) {
+      owedReply = false;
+      const body = said || `I couldn't answer: ${String(last?.errorMessage || err).slice(0, 300)}`;
+      await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: "reply", body: body.slice(0, 8000) }).catch(() => {});
+    }
+  });
+  // What the agent says as it works (its plain-language updates between tool calls) is shown live in HQ.
+  pi.on("message_end", async (event: any) => {
+    const m = event.message;
+    if (m?.role !== "assistant") return;
+    const said = (Array.isArray(m.content) ? m.content : []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
+    if (said) beat({}, { kind: "say", text: said.slice(0, 1500) });
   });
   pi.on("tool_execution_start", async (event: any) => {
     const a = event.args || {};
@@ -777,13 +805,18 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "redplan_send", label: "RedPlan message",
-    description: "Send a message to a teammate by name, to the CEO (\"ceo\"), or to everyone (\"all\"). It is delivered into their session.",
-    parameters: Type.Object({ to: Type.String({ description: "Teammate name, \"ceo\", or \"all\"" }), message: Type.String() }),
+    description: "Send a message to a teammate by name, to the CEO (\"ceo\"), to everyone (\"all\"), or to the human (\"human\", shown in RedPi HQ). It is delivered into their session.",
+    parameters: Type.Object({ to: Type.String({ description: "Teammate name, \"ceo\", \"all\", or \"human\"" }), message: Type.String() }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
       const s = await hq("GET", `/api/runs/${runId}`);
       const target = String(params.to).trim();
       const lower = target.toLowerCase();
+      if (["human", "you", "user"].includes(lower)) {
+        await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: owedReply ? "reply" : "chat", body: params.message });
+        owedReply = false;
+        return text("Sent to the human in HQ.");
+      }
       let to = lower === "ceo" || lower === "all" ? lower : s.workers.find((w: any) => w.name.toLowerCase() === lower || w.id === target)?.id;
       if (!to) throw new Error(`No teammate named "${target}". Team: ${s.workers.map((w: any) => w.name).join(", ") || "(none)"}, or "ceo" / "all".`);
       if (to === me()) throw new Error("That is you.");

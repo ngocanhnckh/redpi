@@ -503,11 +503,13 @@ Every run has three views:
 
 **🕸 Graph**: who talks to whom. Edge width is message volume, recent conversations glow; drag to pin a node.
 
-**📣 Event board** (beside the view, same height): team chat and actions in one live feed. Actions are:
-- every task move (who moved it, from → to, and why)
-- every tool call, with its duration; failed calls show in red
+**📣 Event board** (beside the view, same height): everything the team does, live. Filter it:
+- **Updates**: what each agent (and the CEO) says it is doing, in its own words ("Reading the auth module to see how sessions are stored"), plus every task move with who moved it and why. Agents are asked to narrate each meaningful step in one plain sentence.
+- **Chat**: messages between the team and with you; messages to or from you are marked in red, and agents' answers to you are tagged **reply**.
+- **Tools**: every tool call with its duration; failed calls in red.
+- **All**: everything together.
 
-Filter with **All / Chat / Actions**, click a name to open that person, click a task id to see its history, and send a message to the CEO, everyone, or one worker from the box at the bottom.
+Click a name to open that person, click a task id to see its history, and send a message to the CEO, everyone, or one worker from the box at the bottom.
 
 **📈 Project charts** (below the team, live from the task history):
 - **Burndown**: estimated hours left (or tasks, without estimates), with a forecast of the finish at the current pace
@@ -521,7 +523,12 @@ Filter with **All / Chat / Actions**, click a name to open that person, click a 
 Around the views:
 
 - a sticky **Needs you** strip: blocked tasks, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered
-- the **team** with pixel portraits, the CEO included. Click anyone (in the team list, on the office floor, or on the event board) for their details and a place to talk to them. The CEO's panel shows what they are doing, your conversation with them, what they last told the team, and **Send** / **Interrupt + send**. Each worker's panel shows its tasks, context usage, latest message, their messages, a **tool waterfall** (one bar per tool call, width by duration, red if it failed), the activity feed, the `tmux attach` command, **Send** / **Interrupt + send**, and **Resume** when its session is gone
+- the **team** with pixel portraits, the CEO included; each card quotes that person's latest update. Click anyone (in the team list, on the office floor, or on the event board) to open their panel:
+  - **Chat** (the default) is a messenger: your messages on the right, theirs on the left, the box pinned at the bottom (Enter sends, Shift+Enter for a new line). After you send, a note says they have it and that the reply appears right there. When the agent finishes the turn that handled your message, its answer is posted back to you in this chat (and on the event board), from Pi, Claude Code, Codex, and OpenCode workers and from the CEO alike. **Interrupt + send** stops their current work first; workers also offer **Ask on the side** (btw).
+  - **Details**: what they are doing now, their tasks, context use, and their messages with teammates (for the CEO: the plan and what they last told the team).
+  - **Activity**: their updates in their own words, newest first, and for workers the tool waterfall and activity log.
+
+  A worker's panel also has the `tmux attach` command (Details) and **Resume** when its session is gone.
 - the event board opens on the newest entry and follows new ones while you are at the bottom; scroll up to read and it stays put, with a **↓ N new** button to jump back (the worker, CEO and task panels keep their place on live updates too)
 
 The office is drawn on a canvas that pauses when the tab is hidden, respects reduced motion (people stay put: no errands, meetings, or flying envelopes), and is decorative for screen readers: the roster, board, and a live announcement region carry the same information.

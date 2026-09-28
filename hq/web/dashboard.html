@@ -32,7 +32,16 @@
   .feed-panel .chat-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .feed { flex: 1; min-height: 0; max-height: none; overflow-anchor: none; align-content: start; gap: 6px; }
   .feed:empty::before { content: "No messages or actions yet."; color: var(--muted); font-size: 13px; }
-  .feed.only-chat .act, .feed.only-actions .msg { display: none; }
+  .feed.f-updates > :not(.upd):not(.move), .feed.f-chat > :not(.msg), .feed.f-tools > :not(.tool) { display: none; }
+  /* An agent's own update: a readable line, set apart from chat bubbles and tool calls. */
+  .upd { font-size: 13px; padding: 6px 9px; border-left: 3px solid var(--cyan); background: color-mix(in srgb, var(--cyan) 6%, transparent); border-radius: 0 8px 8px 0; }
+  .upd-hdr { display: flex; gap: 6px; align-items: center; margin-bottom: 2px; }
+  .upd-hdr .when { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .upd-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .upd-list { display: grid; gap: 8px; }
+  .upd-item { border-left: 3px solid var(--cyan); padding: 4px 10px; font-size: 13px; }
+  .upd-item .when { font-size: 11px; color: var(--faint); }
+  .member .doing.said { font-style: italic; }
   .feed-filter { display: flex; gap: 2px; }
   .feed-filter button { background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
   .feed-filter button[aria-pressed="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
@@ -50,6 +59,30 @@
   #team { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
   .mini-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); } .mini-stats b { color: var(--text); font-family: var(--mono); }
   .mini-msgs { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+  .msg.with-you .body { border-left: 3px solid var(--red); }
+  /* Person panel: tabs, and Chat as a messenger with the box pinned at the bottom. */
+  .drawer-tabs { display: flex; gap: 4px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+  .drawer-tabs button { background: none; border: 1px solid transparent; border-radius: 8px; padding: 4px 12px; cursor: pointer; color: var(--muted); font-weight: 600; }
+  .drawer-tabs button[aria-selected="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
+  .chat-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chat-pane #p-banner:not(:empty) { padding: 10px 14px 0; }
+  .thread { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .thread-empty { margin: auto; max-width: 320px; text-align: center; color: var(--muted); font-size: 13px; }
+  .bub { max-width: 86%; padding: 8px 11px; border-radius: 12px; font-size: 13.5px; border: 1px solid var(--border); }
+  .bub.me { align-self: flex-end; background: color-mix(in srgb, var(--green) 14%, var(--panel)); border-color: color-mix(in srgb, var(--green) 35%, transparent); border-bottom-right-radius: 4px; }
+  .bub.me.int { background: color-mix(in srgb, var(--red) 14%, var(--panel)); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+  .bub.them { align-self: flex-start; background: var(--panel-2); border-bottom-left-radius: 4px; }
+  .bub.pending { color: var(--muted); font-style: italic; border-style: dashed; }
+  .bub.pending .dots { display: inline-block; animation: pulse 1.2s infinite; }
+  .bub-meta { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  .bub-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .drawer-composer { border-top: 1px solid var(--border); padding: 10px 12px 12px; background: var(--panel); display: grid; gap: 8px; }
+  .drawer-composer textarea { resize: vertical; min-height: 44px; max-height: 40vh; }
+  .composer-actions { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+  .composer-actions .hint { flex: 1; min-width: 0; line-height: 1.3; }
+  .composer-actions .btn { flex: none; white-space: nowrap; }
+  @media (max-width: 520px) { .composer-actions { flex-wrap: wrap; } .composer-actions .hint { flex-basis: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .bub.pending .dots { animation: none; } }
   /* Charts */
   .section-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 2px 10px; }
   .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 10px; }

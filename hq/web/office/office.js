@@ -583,6 +583,14 @@ export class Office {
         }
       }
     });
+    // What people say about their work shows as their speech bubble (on first load, only the latest line).
+    for (const e of data.events || []) {
+      if (e.kind !== "say") continue;
+      const p = this.people.get(e.worker_id);
+      if (!p || p.mode === "gone" || p.mode === "wait" || e.id <= (p.lastSay || 0)) continue;
+      p.lastSay = e.id;
+      if (!this.placing && now - e.created < 60_000) p.bubble.show(`“${String(e.text).split("\n")[0]}”`);
+    }
     // Anyone no longer in the team walks out.
     for (const [id, p] of this.people) if (id !== "ceo" && !workers.some((w) => w.id === id) && p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.goTo(m.entry, () => { p.leaving = true; }); }
 
@@ -621,7 +629,7 @@ export class Office {
       if (this.envelopes.length < MAX_ENVELOPES) this.envelopes.push(new Envelope(a, b, color));
     }
     const sender = this.people.get(from);
-    if (!sender || !["chat", "brief", "decision", "aside"].includes(msg.kind)) return;
+    if (!sender || !["chat", "brief", "decision", "aside", "reply"].includes(msg.kind)) return;
     const body = String(msg.body || "").replace(/\s+/g, " ").trim();
     // Messages for you: the sender walks to the YOU terminal to post them.
     if (msg.recipient === "human") {

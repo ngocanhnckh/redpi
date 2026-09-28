@@ -42,7 +42,8 @@ if (shots) mkdirSync(shots, { recursive: true });
 async function open(options = {}) {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 }, ...options });
   const page = await ctx.newPage();
-  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  // The live-update stream is cut when the test navigates away; that is not a page error.
+  page.on("console", (m) => m.type() === "error" && !/net::ERR_(CONNECTION_CLOSED|ABORTED)/.test(m.text()) && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(`${base}/runs/${runId}`);
   await page.waitForSelector("#form:not(.hide)");
@@ -170,8 +171,10 @@ if (c.end - c.top > 30 || c.newVisible) await fail("chat should follow new messa
 // Worker drawer: scroll down, a live update arrives, the drawer stays put.
 for (let i = 0; i < 25; i++) await beat("Alex", { status: "working", events: [{ kind: "tool", text: `bash: step ${i}` }] });
 await page.click(`.member[data-person="${ids.Alex}"]`);
-await page.setViewportSize({ width: 1400, height: 480 });
-await page.waitForSelector(".drawer .scroll");
+await page.setViewportSize({ width: 1400, height: 340 });
+await page.waitForSelector(".drawer #thread");
+await page.click('[data-ptab="activity"]');
+await page.waitForSelector(".drawer .scroll .ev");
 await page.waitForTimeout(300);
 const dEnd = await page.evaluate(() => { const d = document.querySelector(".drawer .scroll"); d.scrollTop = 120; return d.scrollHeight - d.clientHeight; });
 if (dEnd < 120) await fail("drawer too short to test scrolling", await page.evaluate(() => { const d = document.querySelector(".drawer .scroll"); return { sh: d.scrollHeight, ch: d.clientHeight, ev: d.querySelectorAll(".ev").length, dh: document.querySelector(".drawer").clientHeight }; }));
@@ -206,23 +209,57 @@ await page.fill("#draft", "");
 // The event board shows actions next to chat, and the filter narrows it.
 await page.waitForFunction(() => document.querySelectorAll("#feed .act.tool").length >= 3);
 if (!(await page.locator("#feed .act.tool", { hasText: "read: src/file2.ts" }).count())) await fail("tool action missing from the event board");
-await page.click('[data-filter="actions"]');
-if (await page.evaluate(() => [...document.querySelectorAll("#feed .msg")].some((m) => m.offsetParent))) await fail("Actions filter still shows chat");
+// Updates: what agents say they are doing, in their own words (workers and the CEO).
+await beat("Priya", { status: "working", events: [{ kind: "say", text: "Reading the orders module to see how totals are computed." }] });
+await api("POST", `/api/runs/${runId}/ceo-events`, { events: [{ kind: "say", text: "Checking the board: Priya is on orders, Alex on auth." }] });
+await page.waitForFunction(() => document.querySelectorAll("#feed .upd").length >= 2);
+const visible = (sel) => page.evaluate((q) => [...document.querySelectorAll(q)].filter((m) => m.offsetParent).length, sel);
+await page.click('[data-filter="updates"]');
+if (await visible("#feed .msg") || await visible("#feed .act.tool") || (await visible("#feed .upd")) < 2) await fail("Updates filter should show only the team's own updates and task moves");
+if (!(await page.locator("#feed .upd", { hasText: "Checking the board" }).locator("text=CEO").count())) await fail("the CEO's update should be on the event board under the CEO's name");
+await page.click('[data-filter="tools"]');
+if (await visible("#feed .msg") || await visible("#feed .upd") || !(await visible("#feed .act.tool"))) await fail("Tools filter should show only tool calls");
 await page.click('[data-filter="chat"]');
-if (await page.evaluate(() => [...document.querySelectorAll("#feed .act")].some((m) => m.offsetParent))) await fail("Chat filter still shows actions");
+if (await visible("#feed .act") || await visible("#feed .upd")) await fail("Chat filter still shows other entries");
 await page.click('[data-filter="all"]');
+// Team cards show each person's latest update in their words.
+if (!/Reading the orders module/.test(await page.textContent(`.member[data-person="${ids.Priya}"]`))) await fail("Priya's card should show her latest update");
+if (!/Checking the board/.test(await page.textContent('.member[data-person="ceo"]'))) await fail("the CEO's card should show its latest update");
 
 // The CEO can be opened from the team list and from the office floor, and you can talk to them.
 await page.click('.member[data-person="ceo"]');
 await page.waitForSelector('.drawer[aria-label="CEO"] #wmsg');
 const winY = await page.evaluate(() => scrollY);
-await page.fill("#wmsg", "Please prioritise the login flow");
-await page.click("#wsend");
-await page.waitForFunction(() => /Please prioritise the login flow/.test(document.querySelector(".drawer .talk")?.textContent || ""));
+// The message box is at the bottom of the panel, visible without scrolling; Enter sends.
+const box = await page.evaluate(() => { const r = document.querySelector("#wmsg").getBoundingClientRect(), c = document.querySelector(".drawer-composer").getBoundingClientRect(), d = document.querySelector(".drawer").getBoundingClientRect(); return { visible: r.bottom <= innerHeight && r.top >= 0, nearBottom: Math.abs(d.bottom - c.bottom) < 2, focused: document.activeElement?.id === "wmsg" }; });
+if (!box.visible || !box.nearBottom || !box.focused) await fail("the chat box should be pinned at the bottom of the panel and focused", box);
+await page.keyboard.type("Please prioritise the login flow");
+await page.keyboard.press("Enter");
+await page.waitForFunction(() => /Please prioritise the login flow/.test([...document.querySelectorAll(".drawer #thread .bub.me")].at(-1)?.textContent || ""));
+// You can see where the answer will come: a waiting note in the same conversation.
+await page.waitForSelector(".drawer #thread .bub.pending");
+if (!/CEO has your message\. Their reply appears here/.test(await page.textContent(".drawer #thread .bub.pending"))) await fail("no note saying where the reply will appear");
+// While you type the next message, live updates must not touch the box.
+await page.click("#wmsg"); await page.keyboard.type("draft in progress");
+for (let i = 0; i < 3; i++) { await beat("Sam", { status: "working", events: [{ kind: "tool", text: `read: x${i}.ts`, ms: 5 }] }); await page.waitForTimeout(250); }
+const draftState = await page.evaluate(() => { const t = document.querySelector("#wmsg"); return { v: t.value, f: document.activeElement === t, caret: t.selectionStart }; });
+if (draftState.v !== "draft in progress" || !draftState.f || draftState.caret !== draftState.v.length) await fail("typing in the CEO chat was disturbed by live updates", draftState);
+await page.fill("#wmsg", "");
+// The CEO answers (the extension posts its reply when its turn ends): it lands in the same conversation.
+await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "reply", body: "On it: the login flow goes first, Alex starts now." });
+await page.waitForFunction(() => /login flow goes first/.test(document.querySelector(".drawer #thread")?.lastElementChild?.textContent || ""));
+if (await page.locator(".drawer #thread .bub.pending").count()) await fail("waiting note should go once the reply arrives");
+if (/CEO asked you/.test(await page.textContent("#needs-slot"))) await fail("a plain reply should not show as a question in Needs you");
+if (!(await page.locator("#feed .msg.reply", { hasText: "login flow goes first" }).count())) await fail("the reply should also show on the event board");
 if (shots) await page.screenshot({ path: join(shots, "ceo-drawer.png") });
 const sent = (await api("GET", `/api/runs/${runId}`)).messages.filter((m) => m.sender === "human" && m.recipient === "ceo" && m.kind === "command" && /prioritise the login/.test(m.body));
 if (sent.length !== 1) await fail("message to the CEO not sent once as a command", sent);
 if (Math.abs((await page.evaluate(() => scrollY)) - winY) > 2) await fail("opening the CEO scrolled the page");
+// Details tab: what the CEO is doing and the plan.
+await page.click('[data-ptab="details"]');
+await page.waitForFunction(() => /Leading 4 workers/.test(document.querySelector(".drawer .scroll")?.textContent || ""));
+await page.click('[data-ptab="activity"]');
+await page.waitForFunction(() => /Checking the board: Priya is on orders/.test(document.querySelector(".drawer .scroll")?.textContent || ""));
 await page.keyboard.press("Escape");
 await page.evaluate(() => window.scrollTo(0, 0));
 const ceoAt = await page.evaluate(() => {
@@ -316,5 +353,5 @@ if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex
 if (errors.length) await fail("console errors", errors);
 
 await browser.close();
-console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with filters, no page jumps, the CEO opens from the team and the floor and takes messages, live project charts.");
+console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts.");
 process.exit(0);

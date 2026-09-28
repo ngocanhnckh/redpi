@@ -96,6 +96,8 @@ for (const [harness, w] of Object.entries(workers)) {
   const c = await wait(`${harness}: second turn`, () => calls().find((c) => c.worker === w.id && c.prompt.includes("second message")));
   if (!c.resumed || c.session !== w.session) fail(`${harness}: second turn did not continue session ${w.session}: ${JSON.stringify(c.args)}`);
   await wait(`${harness}: second reply`, async () => (await api("GET", `/api/workers/${w.id}`)).worker.last_message?.includes("same session"));
+  // The human wrote from HQ, so the answer is posted back to them there.
+  await wait(`${harness}: reply posted to the human in HQ`, async () => (await api("GET", `/api/runs/${run}`)).messages.find((m) => m.kind === "reply" && m.sender === w.id && m.recipient === "human" && m.body.includes("same session")));
 }
 
 // Side questions run on a fork while the live turn keeps going; an interrupt stops the stuck turn.

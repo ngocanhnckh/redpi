@@ -205,8 +205,12 @@ function runView(runId) {
   // For the event board and the project charts: every task move, the latest worker
   // actions, and tool calls per worker in 5-minute buckets over the last two hours.
   const transitions = all("SELECT id, task_id, from_status, to_status, actor, reason, target, created FROM task_transitions WHERE run_id = ? ORDER BY id", runId);
-  const events = all(`SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e JOIN workers w ON w.id = e.worker_id
-    WHERE w.run_id = ? ORDER BY e.id DESC LIMIT 250) ORDER BY id`, runId);
+  // Tool calls and the agents' own plain-language updates ("say"), each with its own cap so
+  // busy tool use never crowds out what people said. The CEO's events use the id "ceo:<run>".
+  const who = `(e.worker_id IN (SELECT id FROM workers WHERE run_id = ?) OR e.worker_id = ?)`;
+  const events = all(`SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e WHERE ${who} AND e.kind IN ('tool', 'error') ORDER BY e.id DESC LIMIT 250)
+    UNION ALL SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e WHERE ${who} AND e.kind = 'say' ORDER BY e.id DESC LIMIT 200)
+    ORDER BY id`, runId, `ceo:${runId}`, runId, `ceo:${runId}`).map((e) => (e.worker_id === `ceo:${runId}` ? { ...e, worker_id: "ceo" } : e));
   const since = now() - 2 * 3600_000, bucket = 5 * 60_000;
   const activity = all(`SELECT e.worker_id, (e.created / ${bucket}) * ${bucket} AS at, COUNT(*) AS n FROM events e JOIN workers w ON w.id = e.worker_id
     WHERE w.run_id = ? AND e.kind = 'tool' AND e.created >= ? GROUP BY e.worker_id, at ORDER BY at`, runId, since);
@@ -594,6 +598,17 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   return { ok: true };
 });
 
+// The CEO session's activity: its tool calls and plain-language updates, for the event board.
+route("POST", "/api/runs/:id/ceo-events", (b, p) => {
+  if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
+  const id = `ceo:${p.id}`;
+  for (const e of (b.events || []).slice(0, 50)) run("INSERT INTO events (worker_id, kind, text, ms, ok, created) VALUES (?, ?, ?, ?, ?, ?)",
+    id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
+  run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", id, id);
+  notify(p.id, "worker");
+  return { ok: true };
+});
+
 route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   const t = one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
   if (!t) throw httpError(404, `no task ${p.task} in this run (tasks exist after the plan is approved)`);
@@ -657,7 +672,8 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
   if (!b.body || !b.to) throw httpError(400, "to and body are required");
   // aside: a "btw" side question answered by the worker without touching its live session.
-  const kind = ["chat", "command", "interrupt", "aside"].includes(b.kind) ? b.kind : "chat";
+  // reply: an agent's answer to the human's message, posted back when its turn ends.
+  const kind = ["chat", "command", "interrupt", "aside", "reply"].includes(b.kind) ? b.kind : "chat";
   const id = addMessage(p.id, String(b.from || "human"), String(b.to), kind, String(b.body).slice(0, 20000));
   return { id };
 });

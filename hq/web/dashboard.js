@@ -155,7 +155,8 @@ function needsYou() {
     else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
   }
   // Questions addressed to you that you have not answered yet.
-  for (const m of messages.filter((m) => m.recipient === "human" && m.kind !== "system" && m.kind !== "aside")) {
+  // Replies count only when they ask you something back.
+  for (const m of messages.filter((m) => m.recipient === "human" && m.kind !== "system" && m.kind !== "aside" && (m.kind !== "reply" || /\?\s*$/.test(m.body.trim().slice(-300))))) {
     if (!messages.some((r) => r.id > m.id && r.sender === "human" && r.kind !== "system" && r.recipient === m.sender)) items.push({ id: m.sender, level: "amber", text: `${m.senderName} asked you: ${m.body.slice(0, 140)}` });
   }
   return items.slice(0, 8);
@@ -181,7 +182,7 @@ function restoreScroll(sel, saved, { toEnd = false } = {}) {
 // page never jumps, and your scroll position, focus, typed text and selections survive.
 const $ = (id) => document.getElementById(id);
 let built = null, feedUnseen = 0;
-let feedFilter = store.get("redpi-feed-filter") || "all";
+let feedFilter = { chat: "chat", updates: "updates", tools: "tools", actions: "tools" }[store.get("redpi-feed-filter")] || "all";
 const STATUS_LABEL = { todo: "to do", in_progress: "in progress", review: "review", blocked: "blocked", done: "done" };
 const STATUS_COLOR = { todo: "var(--faint)", in_progress: "var(--cyan)", review: "var(--amber)", blocked: "var(--red)", done: "var(--green)" };
 const TOOL_ICON = { bash: "$", read: "<", edit: ">", write: ">", grep: "?", find: "?", ls: "?", glob: "?", redpi_jevgrep: "?", redpi_browser: "@", web: "@" };
@@ -203,7 +204,7 @@ function buildRun() {
       </div>
       <div class="panel feed-panel">
         <div class="panel-head"><h2>Event board</h2><div class="feed-filter" role="group" aria-label="Show">
-          ${[["all", "All"], ["chat", "Chat"], ["actions", "Actions"]].map(([k, l]) => `<button type="button" data-filter="${k}" aria-pressed="false">${l}</button>`).join("")}</div></div>
+          ${[["all", "All", "Everything"], ["updates", "Updates", "What the team says it is doing, and task moves"], ["chat", "Chat", "Messages"], ["tools", "Tools", "Every tool call"]].map(([k, l, t]) => `<button type="button" data-filter="${k}" aria-pressed="false" title="${t}">${l}</button>`).join("")}</div></div>
         <div class="chat-wrap"><div class="chat feed" id="feed" tabindex="0" aria-label="Team chat and actions"></div>
           <button class="chat-new" type="button" hidden></button></div>
         <div class="composer">
@@ -228,7 +229,12 @@ function buildRun() {
     const input = $("draft");
     const body = input.value.trim();
     if (!body) return;
-    try { await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: toSel.value, kind: "command", body }); input.value = ""; feed.scrollTop = feed.scrollHeight; loadRun(); }
+    try {
+      await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: toSel.value, kind: "command", body });
+      input.value = ""; feed.scrollTop = feed.scrollHeight;
+      toast(toSel.value === "all" ? "Sent to everyone. Replies appear here and in each person's chat." : `Sent to ${nameOf(toSel.value)}. Their reply appears here and in their chat.`);
+      loadRun();
+    }
     catch (e) { toast(e.message); }
   };
   $("send").onclick = sendDraft;
@@ -247,8 +253,7 @@ function buildRun() {
 
 function applyFilter() {
   const feed = $("feed");
-  feed.classList.toggle("only-chat", feedFilter === "chat");
-  feed.classList.toggle("only-actions", feedFilter === "actions");
+  for (const f of ["updates", "chat", "tools"]) feed.classList.toggle(`f-${f}`, feedFilter === f);
   app.querySelectorAll("[data-filter]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.filter === feedFilter)));
 }
 
@@ -318,9 +323,12 @@ function feedItems() {
   const { messages, events = [], transitions = [] } = state;
   const items = [];
   // Task moves come from the transition log (who, from → to, why), so their chat echoes are skipped.
-  for (const m of messages) if (!(m.kind === "task" && transitions.length)) items.push({ key: `m${m.id}`, t: m.created, chat: true, html: () => msgView(m) });
-  for (const tr of transitions) items.push({ key: `t${tr.id}`, t: tr.created, html: () => moveView(tr) });
-  for (const e of events) if (e.kind === "tool" || e.kind === "error") items.push({ key: `e${e.id}`, t: e.created, html: () => eventView(e) });
+  for (const m of messages) if (!(m.kind === "task" && transitions.length)) items.push({ key: `m${m.id}`, t: m.created, kind: "chat", html: () => msgView(m) });
+  for (const tr of transitions) items.push({ key: `t${tr.id}`, t: tr.created, kind: "updates", html: () => moveView(tr) });
+  for (const e of events) {
+    if (e.kind === "say") items.push({ key: `e${e.id}`, t: e.created, kind: "updates", html: () => sayView(e) });
+    else if (e.kind === "tool" || e.kind === "error") items.push({ key: `e${e.id}`, t: e.created, kind: "tools", html: () => eventView(e) });
+  }
   return items.sort((a, b) => a.t - b.t);
 }
 
@@ -330,6 +338,19 @@ function moveView(tr) {
   return `<div class="act move"><span class="act-dot" style="background:${STATUS_COLOR[tr.to_status] || "var(--faint)"}"></span>
     <span class="act-text">${who} moved <button class="linkish" data-task="${esc(tr.task_id)}">${esc(tr.task_id)}</button> ${esc(title)}: ${tr.from_status ? `${esc(STATUS_LABEL[tr.from_status] || tr.from_status)} → ` : ""}<b style="color:${STATUS_COLOR[tr.to_status] || "inherit"}">${esc(STATUS_LABEL[tr.to_status] || tr.to_status)}</b>${tr.target ? ` for ${esc(nameOf(tr.target))}` : ""}${tr.reason ? `<span class="muted"> · ${esc(tr.reason)}</span>` : ""}</span>
     <span class="when" data-t="${tr.created}">${ago(tr.created)}</span></div>`;
+}
+
+// An agent's own words about what it is doing: the human-readable progress line.
+function sayView(e) {
+  const text = String(e.text).replace(/\s+\n/g, "\n").trim();
+  return `<div class="upd"><div class="upd-hdr">${avatar(nameOf(e.worker_id), e.worker_id, "sm")}<button class="linkish" data-person="${esc(e.worker_id)}">${esc(nameOf(e.worker_id))}</button><span class="when" data-t="${e.created}">${ago(e.created)}</span></div>
+    <div class="upd-body">${esc(text.length > 700 ? text.slice(0, 700) + "…" : text)}</div></div>`;
+}
+
+// The latest thing someone said about their work (for team cards and panels).
+function latestUpdate(id, maxAgeMs = 15 * 60_000) {
+  const e = (state.events || []).filter((x) => x.kind === "say" && x.worker_id === id).at(-1);
+  return e && Date.now() - e.created < maxAgeMs ? e : null;
 }
 
 function eventView(e) {
@@ -349,7 +370,7 @@ function renderFeed() {
   const anchorTop = anchor?.offsetTop;
   const existing = new Map([...feed.children].map((el) => [el.dataset.key, el]));
   let prev = null, added = 0;
-  const wanted = (chat) => feedFilter === "all" || (feedFilter === "chat") === !!chat;
+  const wanted = (kind) => feedFilter === "all" || feedFilter === kind;
   const tpl = document.createElement("template");
   for (const it of feedItems()) {
     let el = existing.get(it.key);
@@ -358,7 +379,7 @@ function renderFeed() {
       tpl.innerHTML = it.html().trim();
       el = tpl.content.firstElementChild;
       el.dataset.key = it.key;
-      if (wanted(it.chat)) added++;
+      if (wanted(it.kind)) added++;
     }
     const want = prev ? prev.nextElementSibling : feed.firstElementChild;
     if (el !== want) feed.insertBefore(el, want);
@@ -377,9 +398,11 @@ function renderFeed() {
 
 function renderTeam() {
   const { run, workers } = state;
-  $("team").innerHTML = `<button class="member" data-person="ceo">${avatar("CEO", "ceo")}<span><span class="name">CEO</span> <span class="role">lead Pi session</span><div class="doing">${esc(run.status === "awaiting_approval" ? "waiting for your approval" : run.status === "planning" ? "planning" : run.status === "done" ? "run finished" : "coordinating the team")}</div></span><span class="dot working"></span></button>
+  // Each card says what the person last told us they are doing, in their words; else the live tool.
+  const doing = (id, fallback) => { const u = latestUpdate(id); return u ? `<div class="doing said" title="${esc(u.text)}">“${esc(u.text.split("\n")[0])}”</div>` : `<div class="doing">${esc(fallback)}</div>`; };
+  $("team").innerHTML = `<button class="member" data-person="ceo">${avatar("CEO", "ceo")}<span><span class="name">CEO</span> <span class="role">lead Pi session</span>${doing("ceo", run.status === "awaiting_approval" ? "waiting for your approval" : run.status === "planning" ? "planning" : run.status === "done" ? "run finished" : "coordinating the team")}</span><span class="dot working"></span></button>
     ${workers.map((w) => `<button class="member" data-person="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
-      <div class="doing">${w.current_task ? `${esc(w.current_task)} · ` : ""}${esc(w.activity?.text || w.last_message || w.status)}</div></span><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}" title="${workerState(w)}"></span></button>`).join("")}`;
+      ${doing(w.id, `${w.current_task ? `${w.current_task} · ` : ""}${w.activity?.text || w.last_message || w.status}`)}</span><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}" title="${workerState(w)}"></span></button>`).join("")}`;
 }
 
 // The composer's recipients follow the team without resetting your choice.
@@ -397,6 +420,7 @@ function syncRecipients() {
 
 function select(id) {
   if (!id || id === "human") return;
+  if (personId() === id && !openPanel.task) return renderPanel();   // already open: keep the tab
   openPanel = id === "ceo" ? { ceo: true } : { worker: id };
   renderPanel();
 }
@@ -410,64 +434,8 @@ function msgView(m) {
   if (m.kind === "system" && m.sender === "human") m = { ...m, sender: "hq", senderName: "HQ" };
   const from = m.sender === "human" || m.sender === "hq" ? `<span class="from">${esc(m.senderName)}</span>` : `<button class="from linkish" data-person="${esc(m.sender)}">${esc(m.senderName)}</button>`;
   const to = m.recipient === "human" || m.recipient === "all" ? esc(m.recipientName) : `<button class="linkish to-link" data-person="${esc(m.recipient)}">${esc(m.recipientName)}</button>`;
-  return `<div class="msg ${esc(m.kind)}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}${from}${m.kind !== "task" ? `<span class="to">→ ${to}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : m.kind === "aside" ? `<span class="pill violet">btw</span>` : ""}<span class="when" data-t="${m.created}">${ago(m.created)}</span></div>
+  return `<div class="msg ${esc(m.kind)}${m.sender === "human" || m.recipient === "human" ? " with-you" : ""}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}${from}${m.kind !== "task" ? `<span class="to">→ ${to}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : m.kind === "aside" ? `<span class="pill violet">btw</span>` : m.kind === "reply" ? `<span class="pill green">reply</span>` : ""}<span class="when" data-t="${m.created}">${ago(m.created)}</span></div>
     <div class="body">${esc(m.kind === "brief" && m.body.length > 600 ? m.body.slice(0, 600) + "…" : m.body)}</div></div>`;
-}
-
-// A conversation as chat bubbles: yours on the right, theirs on the left.
-function talkThread(msgs, cls = "talk") {
-  if (!msgs.length) return `<span class="muted">No messages yet.</span>`;
-  return `<div class="btw ${cls}">${msgs.map((m) => `<div class="btw-msg ${m.sender === "human" ? "me" : "them"}">${m.sender !== "human" && m.recipient !== "human" ? `<div class="faint" style="margin:0 0 2px">${esc(m.senderName)} → ${esc(m.recipientName)}</div>` : ""}<div>${esc(m.body.length > 1200 ? m.body.slice(0, 1200) + "…" : m.body)}</div><span class="faint">${ago(m.created)}</span></div>`).join("")}</div>`;
-}
-
-// The CEO: what they are doing, your conversation, what they told the team, and a way to talk.
-function renderCeo(root) {
-  const { run, plan, workers, tasks, messages } = state;
-  const same = renderedPanel === "ceo";
-  const drawerPos = same ? saveScroll(".drawer .scroll") : null, threadPos = same ? saveScroll(".talk") : null;
-  renderedPanel = "ceo";
-  const keep = $("wmsg");
-  const kept = keep ? { value: keep.value, focused: document.activeElement === keep } : null;
-  const talk = messages.filter((m) => (m.sender === "human" && m.recipient === "ceo") || (m.sender === "ceo" && m.recipient === "human")).slice(-40);
-  const told = messages.filter((m) => m.sender === "ceo" && m.recipient !== "human").slice(-10);
-  const done = tasks.filter((t) => t.status === "done").length;
-  const doing = run.status === "awaiting_approval" ? "Waiting for you to approve the plan." : run.status === "planning" ? "Planning: researching the project and drafting the plan." : run.status === "done" ? "The run is finished." : `Leading ${workers.length} worker${workers.length === 1 ? "" : "s"}: assigning tasks, answering questions, reviewing work.`;
-  root.innerHTML = `<aside class="drawer" role="dialog" aria-label="CEO">
-    <div class="panel-head">${avatar("CEO", "ceo", "lg")}<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">CEO</div><div class="muted">Lead Pi session: plans the work, forms the team, reviews, reports to you</div></div>${pill(run.status)}<button class="btn" id="close" aria-label="Close">✕</button></div>
-    <div class="scroll">
-      <div>${esc(doing)}</div>
-      <div class="mini-stats"><span><b>${done}/${tasks.length || "–"}</b> tasks done</span><span><b>${tasks.filter((t) => t.status === "in_progress").length}</b> in progress</span><span><b>${tasks.filter((t) => t.status === "blocked").length}</b> blocked</span><span><b>${workers.filter((w) => workerState(w) === "working").length}/${workers.length}</b> working</span></div>
-      ${plan ? `<div><a class="btn" href="/plans/${esc(plan.id)}">Open plan v${plan.version}${plan.status === "pending" ? " · needs your approval" : ""}</a></div>` : ""}
-      <div><div class="section-title" style="margin-bottom:6px">Your conversation</div>${talkThread(talk)}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Latest to the team</div>${told.length ? `<div class="mini-msgs">${told.map(msgView).join("")}</div>` : `<span class="muted">Nothing yet.</span>`}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Talk to the CEO</div>
-        <textarea id="wmsg" rows="3" placeholder="Tell the CEO anything: a change of direction, a question, an answer. It reaches their Pi session as a message from you."></textarea>
-        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn primary" id="wsend">Send</button>
-          <button class="btn danger" id="wint" title="Stops what the CEO is doing now, then delivers your message">Interrupt + send</button></div></div>
-    </div></aside>`;
-  if (kept) { const t = $("wmsg"); t.value = kept.value; if (kept.focused) t.focus(); }
-  $("close").onclick = closePanel;
-  const send = async (kind) => {
-    const body = $("wmsg").value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
-    if (!body) return;
-    try { await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: "ceo", kind, body }); toast(kind === "interrupt" ? "Interrupting the CEO" : "Sent to the CEO"); $("wmsg").value = ""; loadRun(); }
-    catch (e) { toast(e.message); }
-  };
-  $("wsend").onclick = () => send("command");
-  $("wint").onclick = () => send("interrupt");
-  $("wmsg").onkeydown = (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send("command"); };
-  restoreScroll(".drawer .scroll", drawerPos);
-  restoreScroll(".talk", threadPos, { toEnd: true });
-}
-
-// The "btw" side channel with one worker: your questions and their side answers.
-function btwThread(w) {
-  const msgs = (state?.messages || []).filter((m) => m.kind === "aside" && ((m.sender === "human" && m.recipient === w.id) || (m.sender === w.id && m.recipient === "human"))).slice(-20);
-  if (!msgs.length) return "";
-  const waiting = msgs.at(-1).sender === "human";
-  return `<div class="btw side-q" aria-live="polite">${msgs.map((m) => `<div class="btw-msg ${m.sender === "human" ? "me" : "them"}"><div>${esc(m.body)}</div><span class="faint">${ago(m.created)}</span></div>`).join("")}
-    ${waiting ? `<div class="btw-msg them thinking"><div>${esc(w.name)} is answering<span class="dots">…</span></div></div>` : ""}</div>`;
 }
 
 // Tool waterfall (ported idea from munder-difflin's ToolWaterfall.tsx): one bar per
@@ -481,62 +449,174 @@ function waterfall(events) {
     <div class="wf">${calls.map((c) => `<div class="wf-row" title="${esc(c.text)} — ${c.ms} ms${c.ok === 0 ? " (failed)" : ""}"><span class="wf-label">${esc(c.text)}</span><span class="wf-track"><i class="${c.ok === 0 ? "bad" : ""}" style="width:${Math.max(2, Math.round((c.ms / max) * 100))}%"></i></span><span class="wf-ms">${c.ms < 1000 ? `${c.ms}ms` : `${(c.ms / 1000).toFixed(1)}s`}</span></div>`).join("")}</div>`;
 }
 
+// ---------- a person's panel (the CEO or a worker): Chat, Details, Activity ----------
+// Chat is a messenger: your messages on the right, their replies on the left, the box
+// pinned at the bottom. Agents post their answer back here when the turn that handled
+// your message ends. The panel is built once per person and tab; live updates patch it
+// in place, so what you are typing is never touched.
+const personId = () => (openPanel?.ceo ? "ceo" : openPanel?.worker);
+
+// Your conversation with one person: what you sent them (or everyone) and what they sent you.
+function conversation(id) {
+  return (state?.messages || []).filter((m) => m.kind !== "system" && m.kind !== "task" &&
+    ((m.sender === "human" && (m.recipient === id || m.recipient === "all")) || (m.sender === id && m.recipient === "human")));
+}
+
+function bubble(m) {
+  const mine = m.sender === "human";
+  const tag = m.kind === "aside" ? "btw" : m.kind === "interrupt" ? "interrupt" : m.kind === "decision" ? "plan decision" : m.kind === "reply" ? "reply" : m.recipient === "all" ? "to everyone" : "";
+  const body = m.body.length > 6000 ? m.body.slice(0, 6000) + "…" : m.body;
+  return `<div class="bub ${mine ? "me" : "them"}${m.kind === "interrupt" ? " int" : ""}"><div class="bub-meta">${esc(mine ? "You" : m.senderName)}${tag ? ` · ${esc(tag)}` : ""} · <span class="when" data-t="${m.created}">${ago(m.created)}</span></div><div class="bub-body">${esc(body)}</div></div>`;
+}
+
+function pendingNote(id, name, msgs) {
+  const lastMine = [...msgs].reverse().find((m) => m.sender === "human");
+  if (!lastMine || msgs.some((m) => m.id > lastMine.id && m.sender === id)) return "";
+  const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
+  const text = w && !w.alive ? `${name} is offline. Your message waits in their inbox until they are back.`
+    : lastMine.kind === "aside" ? `${name} is answering on the side…`
+      : `${name} has your message. Their reply appears here when they finish the current turn.`;
+  return `<div class="bub them pending"><div class="bub-body">${esc(text)}<span class="dots">…</span></div></div>`;
+}
+
+function personSkeleton(id, tab) {
+  const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
+  const name = w ? w.name : "CEO";
+  const role = w ? `${w.role}${w.harness && w.harness !== "pi" ? ` · ${w.harnessName}` : ""}` : "Lead Pi session: plans, forms the team, reviews, reports to you";
+  const tabs = [["chat", "Chat"], ["details", "Details"], ["activity", "Activity"]];
+  return `<aside class="drawer" role="dialog" aria-label="${esc(name)}">
+    <div class="panel-head">${avatar(name, id, "lg")}<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">${esc(name)}</div><div class="muted" style="font-size:13px">${esc(role)}</div></div><span id="p-status"></span><button class="btn" id="close" aria-label="Close">✕</button></div>
+    <div class="drawer-tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" data-ptab="${k}" aria-selected="${k === tab}">${l}</button>`).join("")}</div>
+    ${tab === "chat" ? `<div class="chat-pane">
+      <div id="p-banner"></div>
+      <div class="thread" id="thread" aria-live="polite" aria-label="Conversation with ${esc(name)}"></div>
+      <div class="drawer-composer">
+        <textarea id="wmsg" rows="2" placeholder="Message ${esc(name)}…" aria-label="Message ${esc(name)}"></textarea>
+        <div class="composer-actions"><span class="faint hint">Enter sends · Shift+Enter new line · replies appear above</span>
+          ${w ? `<button class="btn" id="wask" title="${esc(name)} answers from a copy of their session without stopping their work">Ask on the side</button>` : ""}
+          <button class="btn danger" id="wint" title="Stops what ${esc(name)} is doing now, then delivers your message">Interrupt + send</button>
+          <button class="btn primary" id="wsend" title="Delivered into ${esc(name)}'s session as your next message">Send</button></div>
+      </div></div>` : `<div class="scroll" id="p-body"></div>`}
+  </aside>`;
+}
+
+async function renderPerson(root) {
+  const id = personId(), tab = openPanel.tab || "chat";
+  const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
+  if (id !== "ceo" && !w) { closePanel(); return; }
+  const name = w ? w.name : "CEO";
+  const key = `p:${id}:${tab}`;
+  if (renderedPanel !== key || !root.querySelector(".drawer")) {
+    root.innerHTML = personSkeleton(id, tab);
+    renderedPanel = key;
+    root.querySelector("#close").onclick = closePanel;
+    root.querySelectorAll("[data-ptab]").forEach((b) => b.onclick = () => { openPanel.tab = b.dataset.ptab; renderPanel(); });
+    root.onclick = async (e) => {
+      const c = e.target.closest("[data-copy]");
+      if (c) { try { await navigator.clipboard.writeText(c.dataset.copy); toast("Copied"); } catch { toast("Select the command and copy it"); } }
+      if (e.target.closest("#resume")) resume(id);
+      const tk = e.target.closest("[data-task]"), who = e.target.closest("[data-person]");
+      if (tk) { openPanel = { task: tk.dataset.task }; renderPanel(); }
+      else if (who && who.dataset.person !== id) select(who.dataset.person);
+    };
+    if (tab === "chat") {
+      const input = root.querySelector("#wmsg");
+      const send = async (kind) => {
+        const body = input.value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
+        if (!body) return;
+        try {
+          await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: id, kind, body });
+          input.value = "";
+          const t = $("thread"); if (t) t.dataset.stick = "1";
+          loadRun();
+        } catch (err) { toast(err.message); }
+      };
+      root.querySelector("#wsend").onclick = () => send("command");
+      root.querySelector("#wint").onclick = () => send("interrupt");
+      root.querySelector("#wask")?.addEventListener("click", () => send("aside"));
+      input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send("command"); } };
+      input.focus();
+    }
+  }
+  // Live parts: status, banners, then the tab's content.
+  const st = w ? workerState(w) : state.run.status;
+  $("p-status").innerHTML = w ? `<span class="pill ${st === "working" ? "green" : st === "needs" || st === "offline" ? "red" : ""}">${esc(st)}</span>` : pill(state.run.status);
+  const banner = w && !w.alive ? `<div class="banner red">${esc(name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>`
+    : w?.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w?.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>`
+      : w?.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : "";
+  if (tab === "chat") {
+    $("p-banner").innerHTML = banner;
+    const thread = $("thread");
+    const msgs = conversation(id);
+    const atEnd = thread.dataset.stick === "1" || !thread.children.length || thread.scrollTop + thread.clientHeight >= thread.scrollHeight - 40;
+    delete thread.dataset.stick;
+    const items = msgs.map((m) => ({ key: `m${m.id}`, html: bubble(m) }));
+    const pending = pendingNote(id, name, msgs);
+    if (pending) items.push({ key: `pending${msgs.at(-1)?.id}`, html: pending });
+    if (!items.length) items.push({ key: "empty", html: `<div class="thread-empty">No messages yet. Say hello, give an instruction, or ask a question: ${esc(name)} replies here.</div>` });
+    const existing = new Map([...thread.children].map((el) => [el.dataset.key, el]));
+    const tpl = document.createElement("template");
+    let prev = null;
+    for (const it of items) {
+      let el = existing.get(it.key);
+      if (el) existing.delete(it.key);
+      else { tpl.innerHTML = it.html.trim(); el = tpl.content.firstElementChild; el.dataset.key = it.key; }
+      const want = prev ? prev.nextElementSibling : thread.firstElementChild;
+      if (el !== want) thread.insertBefore(el, want);
+      prev = el;
+    }
+    for (const el of existing.values()) el.remove();
+    thread.querySelectorAll(".when[data-t]").forEach((x) => { x.textContent = ago(Number(x.dataset.t)); });
+    if (atEnd) thread.scrollTop = thread.scrollHeight;
+    return;
+  }
+  const body = $("p-body");
+  const pos = { top: body.scrollTop };
+  body.innerHTML = tab === "activity" && !w ? updatesList("ceo") : w ? await workerDetails(w, tab, banner) : ceoDetails();
+  body.scrollTop = pos.top;
+}
+
+// What someone has said about their work, newest first.
+function updatesList(id) {
+  const ups = (state.events || []).filter((e) => e.kind === "say" && e.worker_id === id).slice(-30).reverse();
+  return `<div><div class="section-title" style="margin-bottom:6px">Updates in their words</div>${ups.length ? `<div class="upd-list">${ups.map((e) => `<div class="upd-item"><span class="when">${ago(e.created)}</span><div class="upd-body">${esc(e.text.length > 1500 ? e.text.slice(0, 1500) + "…" : e.text)}</div></div>`).join("")}</div>` : `<span class="muted">No updates yet. They appear as ${esc(nameOf(id))} explains what they are doing.</span>`}</div>`;
+}
+
+function ceoDetails() {
+  const { run, plan, workers, tasks, messages } = state;
+  const told = messages.filter((m) => m.sender === "ceo" && m.recipient !== "human").slice(-10);
+  const done = tasks.filter((t) => t.status === "done").length;
+  const doing = run.status === "awaiting_approval" ? "Waiting for you to approve the plan." : run.status === "planning" ? "Planning: researching the project and drafting the plan." : run.status === "done" ? "The run is finished." : `Leading ${workers.length} worker${workers.length === 1 ? "" : "s"}: assigning tasks, answering questions, reviewing work.`;
+  const u = latestUpdate("ceo");
+  return `<div>${esc(doing)}</div>${u ? `<div class="upd-body">“${esc(u.text)}”</div>` : ""}
+    <div class="mini-stats"><span><b>${done}/${tasks.length || "–"}</b> tasks done</span><span><b>${tasks.filter((t) => t.status === "in_progress").length}</b> in progress</span><span><b>${tasks.filter((t) => t.status === "blocked").length}</b> blocked</span><span><b>${workers.filter((w) => workerState(w) === "working").length}/${workers.length}</b> working</span></div>
+    ${plan ? `<div><a class="btn" href="/plans/${esc(plan.id)}">Open plan v${plan.version}${plan.status === "pending" ? " · needs your approval" : ""}</a></div>` : ""}
+    <div><div class="section-title" style="margin-bottom:6px">Latest to the team</div>${told.length ? `<div class="mini-msgs">${told.map(msgView).join("")}</div>` : `<span class="muted">Nothing yet.</span>`}</div>`;
+}
+
+async function workerDetails(w, tab, banner) {
+  let d;
+  try { d = await api("GET", `/api/workers/${w.id}`); } catch (e) { return `<div class="error-box">${esc(e.message)}</div>`; }
+  if (tab === "activity") return `${updatesList(w.id)}<div><div class="section-title" style="margin-bottom:6px">Tool calls</div>${waterfall(d.events)}</div>
+      <div><div class="section-title" style="margin-bottom:6px">Activity</div><div class="events">${d.events.length ? d.events.slice().reverse().map((e) => `<div class="ev"><span>${ago(e.created)}</span><span>${esc(e.kind)}</span><span>${esc(e.text)}</span></div>`).join("") : `<span class="muted">No activity yet.</span>`}</div></div>`;
+  const ww = d.worker, ctx = ww.context, attach = ww.attach || "";
+  const team = (state.messages || []).filter((m) => m.kind !== "task" && m.kind !== "system" && m.sender !== "human" && m.recipient !== "human" && (m.sender === w.id || m.recipient === w.id)).slice(-15);
+  return `${banner}
+    <div><div class="section-title" style="margin-bottom:6px">Now</div>${latestUpdate(w.id) ? `<div class="upd-body">“${esc(latestUpdate(w.id).text)}”</div>` : ""}<div class="muted" style="font-size:13px;margin-top:4px">${ww.current_task ? `<span class="mono">${esc(ww.current_task)}</span> · ` : ""}${esc(ww.activity?.text || ww.status)}</div></div>
+    <div><div class="section-title" style="margin-bottom:6px">Tasks</div>${d.tasks.length ? d.tasks.map((t) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><button class="linkish mono" data-task="${esc(t.id)}">${esc(t.id)}</button><span style="flex:1">${esc(t.title)}</span><span class="pill ${t.status === "done" ? "green" : t.status === "blocked" ? "red" : t.status === "in_progress" ? "cyan" : ""}">${esc(t.status.replace("_", " "))}</span></div>`).join("") : `<span class="muted">No tasks assigned.</span>`}</div>
+    ${ctx && ctx.percent != null ? `<div><div class="section-title" style="margin-bottom:6px">Context</div><div class="bar"><i style="width:${Math.min(100, ctx.percent)}%;background:${ctx.percent > 80 ? "var(--red)" : ctx.percent > 50 ? "var(--amber)" : "var(--green)"}"></i></div><div class="faint" style="font-size:12px;margin-top:4px">${Math.round(ctx.percent)}% of ${Math.round((ctx.window || 0) / 1000)}k tokens</div></div>` : ""}
+    <div><div class="section-title" style="margin-bottom:6px">Latest message</div><div class="last">${esc(ww.last_message || "Nothing yet.")}</div></div>
+    <div><div class="section-title" style="margin-bottom:6px">With the team</div>${team.length ? `<div class="mini-msgs">${team.map(msgView).join("")}</div>` : `<span class="muted">No messages with teammates yet.</span>`}</div>
+    ${attach ? `<div><div class="section-title" style="margin-bottom:6px">Live session</div><div class="cmd"><code>${esc(attach)}</code><button class="btn" data-copy="${esc(attach)}">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">${ww.harness && ww.harness !== "pi" ? `Run this in a terminal on this machine to watch ${esc(w.name)}'s ${esc(ww.harnessName)} turns; type a line there to message them.` : `Run this in a terminal on this machine to watch or type into ${esc(w.name)}'s Pi.`} Detach with Ctrl-b d.</div></div>` : ""}
+    ${ww.open ? `<div><div class="section-title" style="margin-bottom:6px">Open in ${esc(ww.harnessName)}</div><div class="cmd"><code>${esc(ww.open)}</code><button class="btn" data-copy="${esc(ww.open)}">Copy</button></div></div>` : ""}
+    <div class="muted" style="font-size:13px">Working in <code>${esc(ww.cwd)}</code>${ww.branch ? ` on branch <code>${esc(ww.branch)}</code>` : ""}</div>`;
+}
+
 async function renderPanel() {
   const root = document.getElementById("drawer-root");
   if (!openPanel) { root.innerHTML = ""; return; }
   if (openPanel.task) return renderTask(root, openPanel.task);
-  if (openPanel.ceo) return renderCeo(root);
-  let d;
-  try { d = await api("GET", `/api/workers/${openPanel.worker}`); } catch (e) { toast(e.message); openPanel = null; root.innerHTML = ""; return; }
-  const w = d.worker;
-  const same = renderedPanel === `w:${openPanel.worker}`;
-  const drawerPos = same ? saveScroll(".drawer .scroll") : null, threadPos = same ? saveScroll(".btw.side-q") : null, talkPos = same ? saveScroll(".talk") : null;
-  renderedPanel = `w:${openPanel.worker}`;
-  const keep = document.getElementById("wmsg");
-  const kept = keep ? { value: keep.value, focused: document.activeElement === keep } : null;
-  const attach = w.attach || "";
-  const ctx = w.context;
-  root.innerHTML = `<aside class="drawer" role="dialog" aria-label="${esc(w.name)}">
-    <div class="panel-head">${avatar(w.name, w.id, "lg")}<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">${esc(w.name)}</div><div class="muted">${esc(w.role)}${w.harness && w.harness !== "pi" ? ` · ${esc(w.harnessName)}` : ""}</div></div><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}"></span><span class="muted">${workerState(w)}</span><button class="btn" id="close" aria-label="Close">✕</button></div>
-    <div class="scroll">
-      ${!w.alive ? `<div class="banner red">${esc(w.name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>` : ""}
-      ${w.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>` : w.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : ""}
-      ${attach ? `<div><div class="section-title" style="margin-bottom:6px">Live session</div><div class="cmd"><code>${esc(attach)}</code><button class="btn" id="copy">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">${w.harness && w.harness !== "pi" ? `Run this in a terminal on this machine to watch ${esc(w.name)}'s ${esc(w.harnessName)} turns; type a line there to message them.` : `Run this in a terminal on this machine to watch or type into ${esc(w.name)}'s Pi.`} Detach with Ctrl-b d.</div></div>` : ""}
-      ${w.open ? `<div><div class="section-title" style="margin-bottom:6px">Open in ${esc(w.harnessName)}</div><div class="cmd"><code>${esc(w.open)}</code><button class="btn" id="copyopen">Copy</button></div><div class="faint" style="font-size:12px;margin-top:4px">Opens ${esc(w.name)}'s own ${esc(w.harnessName)} session interactively. Best while ${esc(w.name)} is idle.</div></div>` : ""}
-      <div class="muted" style="font-size:13px">Working in <code>${esc(w.cwd)}</code>${w.branch ? ` on branch <code>${esc(w.branch)}</code>` : ""}</div>
-      ${ctx && ctx.percent != null ? `<div><div class="section-title" style="margin-bottom:6px">Context</div><div class="bar"><i style="width:${Math.min(100, ctx.percent)}%;background:${ctx.percent > 80 ? "var(--red)" : ctx.percent > 50 ? "var(--amber)" : "var(--green)"}"></i></div><div class="faint" style="font-size:12px;margin-top:4px">${Math.round(ctx.percent)}% of ${Math.round((ctx.window || 0) / 1000)}k tokens</div></div>` : ""}
-      <div><div class="section-title" style="margin-bottom:6px">Tasks</div>${d.tasks.length ? d.tasks.map((t) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><span class="mono muted">${esc(t.id)}</span><span style="flex:1">${esc(t.title)}</span><span class="pill ${t.status === "done" ? "green" : t.status === "blocked" ? "red" : t.status === "in_progress" ? "cyan" : ""}">${esc(t.status.replace("_", " "))}</span></div>`).join("") : `<span class="muted">No tasks assigned.</span>`}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Latest message</div><div class="last">${esc(w.last_message || "Nothing yet.")}</div></div>
-      <div><div class="section-title" style="margin-bottom:6px">Tool calls</div>${waterfall(d.events)}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Activity</div><div class="events">${d.events.length ? d.events.slice().reverse().map((e) => `<div class="ev"><span>${ago(e.created)}</span><span>${esc(e.kind)}</span><span>${esc(e.text)}</span></div>`).join("") : `<span class="muted">No activity yet.</span>`}</div></div>
-      <div><div class="section-title" style="margin-bottom:6px">Messages</div>${talkThread((state?.messages || []).filter((m) => m.kind !== "aside" && m.kind !== "task" && (m.sender === w.id || m.recipient === w.id)).slice(-30))}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Talk to ${esc(w.name)}</div>
-        ${btwThread(w)}
-        <textarea id="wmsg" rows="3" placeholder="Ask ${esc(w.name)} anything: they answer on the side without stopping. Say it naturally if you want the live work to change."></textarea>
-        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn primary" id="wask" title="Answered from ${esc(w.name)}'s session without interrupting it; clear instructions are passed on to the live session">Ask (btw)</button>
-          <button class="btn" id="wsend" title="Delivered into ${esc(w.name)}'s live session as your next message">Send to session</button>
-          <button class="btn danger" id="wint" title="Stops what ${esc(w.name)} is doing now, then delivers your message">Interrupt + send</button></div></div>
-    </div></aside>`;
-  if (kept) { const t = document.getElementById("wmsg"); t.value = kept.value; if (kept.focused) t.focus(); }
-  document.getElementById("close").onclick = closePanel;
-  document.getElementById("resume")?.addEventListener("click", () => resume(w.id));
-  const copy = document.getElementById("copy");
-  if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(attach); toast("Copied"); } catch { toast("Select the command and copy it"); } };
-  const copyOpen = document.getElementById("copyopen");
-  if (copyOpen) copyOpen.onclick = async () => { try { await navigator.clipboard.writeText(w.open); toast("Copied"); } catch { toast("Select the command and copy it"); } };
-  const send = async (kind) => {
-    const body = document.getElementById("wmsg").value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
-    if (!body) return;
-    try { await api("POST", `/api/runs/${w.run_id}/messages`, { from: "human", to: w.id, kind, body }); toast(kind === "interrupt" ? `Interrupting ${w.name}` : kind === "aside" ? `Asked ${w.name} on the side` : `Sent to ${w.name}'s session`); document.getElementById("wmsg").value = ""; loadRun(); }
-    catch (e) { toast(e.message); }
-  };
-  document.getElementById("wask").onclick = () => send("aside");
-  document.getElementById("wsend").onclick = () => send("command");
-  restoreScroll(".drawer .scroll", drawerPos);
-  restoreScroll(".btw.side-q", threadPos, { toEnd: true });
-  restoreScroll(".talk", talkPos, { toEnd: true });
-  document.getElementById("wint").onclick = () => send("interrupt");
+  return renderPerson(root);
 }
 
 async function renderTask(root, taskId) {

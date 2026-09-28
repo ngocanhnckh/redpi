@@ -262,7 +262,9 @@ try:
         i = peter_sys.find("RedPlan worker"); print(peter_sys[i:i+700]); raise SystemExit("worker system prompt lacks identity, team, or tasks")
 
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "command", "body": "Please also add a /health endpoint."})
-    wait("human instruction delivered to Alex", lambda: any(i == "Alex" and "instruction from the human via HQ" in u and "/health" in u for i, u, _ in requests))
+    wait("human instruction delivered to Alex", lambda: any(i == "Alex" and "message from the human via HQ" in u and "/health" in u for i, u, _ in requests))
+    # Alex's answer comes back to the human in HQ when the turn that handled it ends.
+    wait("Alex's reply posted to the human in HQ", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "reply" and m["senderName"] == "Alex" and m["recipient"] == "human" and "Alex: ok." in m["body"]), None), 30)
     # Interrupt: Alex is stuck in a 60s model response; an HQ interrupt must abort it and deliver at once.
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "command", "body": "SLOWTASK: write the docs."})
     wait("Alex busy on the slow task", lambda: any(i == "Alex" and "SLOWTASK" in u for i, u, _ in requests))
@@ -303,6 +305,7 @@ try:
     # Crash + resume: kill Alex's tmux session, ask the CEO to resume, and prove the saved session continued.
     subprocess.run(["tmux", "-L", sock, "kill-session", "-t", f"={names['Alex']['tmux']}"], check=True)
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "command", "body": "RESUME-ALEX: his session crashed."})
+    wait("CEO's reply posted to the human in HQ", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "reply" and m["sender"] == "ceo" and m["recipient"] == "human"), None), 40)
     wait("Alex relaunched in tmux", lambda: subprocess.run(["tmux", "-L", sock, "has-session", "-t", f"={names['Alex']['tmux']}"], capture_output=True).returncode == 0, 40)
     time.sleep(3)
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "command", "body": "AFTER-RESUME: are you back?"})
@@ -315,7 +318,11 @@ try:
     report = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", out.decode("utf8", "ignore")).split("RedPlan doctor:")[-1][:1200]
     if "not healthy" in report or "tmux session gone" in report:
         raise SystemExit(f"doctor not healthy after resume:\n{report}")
-    msgs = hq("GET", f"/api/runs/{run['id']}")["messages"]
+    view = hq("GET", f"/api/runs/{run['id']}")
+    # What agents say as they work reaches HQ as updates, from workers and from the CEO.
+    if not any(e["kind"] == "say" and e["worker_id"] == names["Alex"]["id"] for e in view["events"]) or not any(e["kind"] == "say" and e["worker_id"] == "ceo" for e in view["events"]):
+        raise SystemExit(f"agents' updates missing: {[(e['worker_id'], e['kind']) for e in view['events'] if e['kind'] == 'say'][:10]}")
+    msgs = view["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
     print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")

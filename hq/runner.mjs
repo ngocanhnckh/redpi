@@ -97,6 +97,7 @@ Use the \`redpi-hq\` command in your shell to work with the team (run \`redpi-hq
 - \`redpi-hq send <name> "<message>"\` to talk to a teammate, \`redpi-hq send ceo "<message>"\` for decisions outside your tasks or when blocked. \`redpi-hq team\` / \`redpi-hq status\` show the team and board.
 Messages from the CEO, teammates, and the human arrive as your next prompt, starting with [RedPlan …]. Instructions from the human override everything else.
 Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge. Use the exact technologies and APIs in your brief. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
+Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why, and after it what you found or changed. The human follows these lines live in RedPi HQ.
 Team norms: review the exact change, not a description of it. Never mark someone else's task unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in task notes or messages.`;
 }
 
@@ -105,7 +106,7 @@ function format(m) {
   if (m.kind === "brief") return `[RedPlan brief from the CEO]\n\n${m.body}`;
   if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
   if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
-  if (m.sender === "human") return `[RedPlan · instruction from the human via HQ]\n${m.body}`;
+  if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
   return `[RedPlan · message from ${from}]\n${m.body}\n(Reply with: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>")`;
 }
 
@@ -156,6 +157,8 @@ async function startTurn(msgs) {
   let instructionsText = "";
   try { instructionsText = await instructions(); } catch {}
   const prompt = msgs.map(format).join("\n\n---\n\n");
+  // The human wrote to this worker from HQ: its answer goes back to them there when the turn ends.
+  const fromHuman = msgs.some((m) => m.sender === "human" && !["system", "decision"].includes(m.kind));
   say();
   say(bold(cyan(`── ${new Date().toLocaleTimeString()} · ${msgs.map((m) => m.senderName || m.sender).join(", ")} → ${process.env.REDPI_HQ_NAME || "worker"} (${H.name}) ──`)));
   say(dim(prompt.length > 900 ? `${prompt.slice(0, 900)}…` : prompt));
@@ -173,7 +176,7 @@ async function startTurn(msgs) {
         say(`  ${green("▸")} ${line}`);
         beat({ activity: { text: line, tool: ev.tool, at: Date.now() } }, { kind: "tool", text: line });
       }
-      if (ev.text) say(ev.text);
+      if (ev.text) { say(ev.text); beat({}, { kind: "say", text: ev.text.trim().slice(0, 1500) }); }
     },
   });
   current = run;
@@ -190,6 +193,10 @@ async function startTurn(msgs) {
     interrupted ? { kind: "interrupt", text: "Turn interrupted by the human" }
       : r.ok ? (final ? { kind: "reply", text: final.slice(0, 300), ms, ok: true } : { kind: "turn", text: "Turn finished", ms, ok: true })
         : { kind: "error", text: `${H.name}: ${r.error.slice(0, 300)}`, ms, ok: false });
+  if (fromHuman && !interrupted) {
+    const body = final || (r.ok ? "(I finished that turn without a written reply.)" : `I couldn't finish that: ${r.error.slice(0, 300)}`);
+    await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: "human", kind: "reply", body: body.slice(0, 8000) }).catch(() => {});
+  }
   if (queue.length) startTurn(queue.splice(0));
 }
 
