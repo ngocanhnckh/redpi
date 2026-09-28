@@ -1,8 +1,8 @@
 import { ago, api, esc, live, pill, signedInAs, toast } from "/static/hq.js";
 import { portraitUrl } from "/static/office/people.js";
 import { Office } from "/static/office/office.js";
-import { renderGraph } from "/static/graph.js";
 import { renderCharts } from "/static/charts.js";
+import { renderTimeline } from "/static/timeline.js";
 
 const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
@@ -12,7 +12,13 @@ let renderedPanel = null;
 let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-let view = store.get(`redpi-view-${runId}`);
+const VIEWS = [["office", "Office"], ["board", "Board"], ["timeline", "Timeline"], ["stats", "Stats"]];
+let view = { graph: "stats" }[store.get(`redpi-view-${runId}`)] || store.get(`redpi-view-${runId}`);
+if (view && !VIEWS.some(([k]) => k === view)) view = null;
+// Auto-play: the view fades through Office, Board, Timeline and Stats (10 s each; ?autoplay_ms= for tests).
+const AUTOPLAY_MS = Number(new URLSearchParams(location.search).get("autoplay_ms")) || 10_000;
+let autoplay = store.get("redpi-autoplay") === "1", apTimer = null, apHover = false;
+const viewScroll = {};
 
 const workerState = (w) => !w.alive ? "offline" : w.needs_human || w.needs_input || w.parked ? "needs" : w.status === "working" ? "working" : w.status === "starting" ? "starting" : "idle";
 const roleOf = (id) => id === "ceo" ? "ceo" : state?.workers.find((w) => w.id === id)?.role || "";
@@ -200,8 +206,10 @@ function buildRun() {
     <div class="run-main">
       <div class="panel view-panel">
         <div class="panel-head"><div class="viewtabs" role="tablist">
-          ${[["office", "Office"], ["board", "Board"], ["graph", "Graph"]].map(([k, l]) => `<button role="tab" data-view="${k}">${l}</button>`).join("")}
-        </div><span class="muted" id="view-hint" style="font-size:12px"></span></div>
+          ${VIEWS.map(([k, l]) => `<button role="tab" data-view="${k}">${l}</button>`).join("")}
+        </div><span class="muted" id="view-hint" style="font-size:12px"></span>
+        <button type="button" class="autoplay" id="autoplay" aria-pressed="false" title="Fade through Office, Board, Timeline and Stats every ${AUTOPLAY_MS / 1000} seconds (pauses while the pointer is over the view)">Auto-play</button></div>
+        <div class="ap-bar" id="ap-bar" hidden><i></i></div>
         <div class="panel-body" id="view-body"></div>
       </div>
       <div class="panel feed-panel"><div class="feed-inner">
@@ -218,8 +226,9 @@ function buildRun() {
     </div>
     <div class="panel team-panel"><div class="panel-head"><h2>Team</h2><span class="muted" style="font-size:12px">click anyone for details and to talk to them</span></div>
       <div class="panel-body team" id="team"></div></div>
-    <section class="charts-section"><div class="section-head"><h2 class="section-title">Project charts</h2><span class="faint" style="font-size:12px">live</span></div><div class="charts" id="charts"></div></section>`;
+    `;
   built = runId;
+  bindAutoplay();
   const feed = $("feed"), newBtn = app.querySelector(".chat-new");
   const atEnd = () => feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30;
   newBtn.onclick = () => feed.scrollTo({ top: feed.scrollHeight, behavior: reduceMotion() ? "auto" : "smooth" });
@@ -245,7 +254,7 @@ function buildRun() {
   app.onclick = (e) => {
     const el = e.target.closest("[data-view],[data-filter],[data-person],[data-task],[data-open]");
     if (!el || !app.contains(el)) return;
-    if (el.dataset.view) { view = el.dataset.view; store.set(`redpi-view-${runId}`, view); renderView(); updateTabs(); }
+    if (el.dataset.view) { switchView(el.dataset.view, false); scheduleAutoplay(); }
     else if (el.dataset.filter) { feedFilter = el.dataset.filter; store.set("redpi-feed-filter", feedFilter); applyFilter(); feed.scrollTop = feed.scrollHeight; }
     else if (el.dataset.person) select(el.dataset.person);
     else if (el.dataset.task) { openPanel = { task: el.dataset.task }; renderPanel(); }
@@ -261,7 +270,7 @@ function applyFilter() {
 
 function updateTabs() {
   app.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : "drag to pin · click to open";
+  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : "live project charts";
 }
 
 function renderRun() {
@@ -286,7 +295,46 @@ function renderRun() {
   renderFeed();
   renderTeam();
   syncRecipients();
-  renderCharts($("charts"), state);
+}
+
+// ---------- switching views, by hand or on auto-play ----------
+function switchView(next, fade) {
+  if (next === view) return;
+  const body = $("view-body");
+  viewScroll[view] = body.scrollTop;
+  const go = () => { view = next; store.set(`redpi-view-${runId}`, view); renderView(); updateTabs(); body.classList.remove("fading"); };
+  if (fade && !reduceMotion()) { body.classList.add("fading"); setTimeout(go, 260); }
+  else go();
+}
+
+function scheduleAutoplay() {
+  clearTimeout(apTimer); apTimer = null;
+  const btn = $("autoplay"), bar = $("ap-bar");
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", String(autoplay));
+  btn.textContent = autoplay ? (apHover ? "Auto-play · paused" : "Auto-play · on") : "Auto-play";
+  bar.hidden = !autoplay;
+  if (!autoplay) return;
+  // The bar fills over the interval; it restarts on every switch and holds while paused.
+  const fill = bar.firstElementChild;
+  fill.style.animation = "none"; void fill.offsetWidth;
+  fill.style.animation = `ap-fill ${AUTOPLAY_MS}ms linear forwards`;
+  fill.style.animationPlayState = apHover ? "paused" : "running";
+  if (apHover) return;
+  apTimer = setTimeout(() => {
+    const i = VIEWS.findIndex(([k]) => k === view);
+    switchView(VIEWS[(i + 1) % VIEWS.length][0], true);
+    scheduleAutoplay();
+  }, AUTOPLAY_MS);
+}
+
+function bindAutoplay() {
+  $("autoplay").onclick = () => { autoplay = !autoplay; store.set("redpi-autoplay", autoplay ? "1" : "0"); scheduleAutoplay(); };
+  // Reading or pointing at the view holds the rotation; leaving it starts a fresh interval.
+  const panel = app.querySelector(".view-panel");
+  panel.addEventListener("pointerenter", () => { apHover = true; if (autoplay) scheduleAutoplay(); });
+  panel.addEventListener("pointerleave", () => { apHover = false; if (autoplay) scheduleAutoplay(); });
+  scheduleAutoplay();
 }
 
 function renderView() {
@@ -298,12 +346,17 @@ function renderView() {
       office = new Office(officeHost, { onSelect: select });
     }
     if (officeHost.parentNode !== body) body.replaceChildren(officeHost);
+    body.dataset.view = "office";
     office.setActive(true);
     office.update(state);
     return;
   }
   office?.setActive(false);
-  if (view === "graph") { body.innerHTML = `<div id="graph-host" class="graph-host"></div>`; renderGraph($("graph-host"), state, select); return; }
+  // Board, Timeline and Stats scroll inside the view; each keeps its own place.
+  const top = body.dataset.view === view ? body.scrollTop : viewScroll[view] || 0;
+  body.dataset.view = view;
+  if (view === "stats") { body.innerHTML = `<div class="charts" id="charts"></div>`; renderCharts($("charts"), state); body.scrollTop = top; return; }
+  if (view === "timeline") { renderTimeline(body, state); body.scrollTop = top; return; }
   const { tasks, workers, plan } = state;
   const byId = Object.fromEntries(workers.map((w) => [w.id, w]));
   const titles = plan ? Object.fromEntries(plan.plan.stories.flatMap((s) => s.tasks.map((t) => [t.id, { story: s, task: t }]))) : {};
@@ -312,12 +365,13 @@ function renderView() {
     const cards = tasks.filter((t) => t.status === k);
     return `<div class="col ${k}"><h3>${label}<span>${cards.length}</span></h3><div class="cards">${cards.map((t) => {
       const w = byId[t.worker_id];
-      return `<button class="card" data-task="${esc(t.id)}" title="${esc(titles[t.id]?.task.description || "")}"><div class="id">${esc(t.id)} · ${esc(titles[t.id]?.story.title || t.story_id)}</div><div class="tt">${esc(t.title)}</div>
+      return `<button class="card" data-task="${esc(t.id)}" title="${esc(`${t.id} ${t.title}${t.note ? `\n\n${t.note}` : ""}`.slice(0, 1500))}"><div class="id">${esc(t.id)} · ${esc(titles[t.id]?.story.title || t.story_id)}</div><div class="tt">${esc(t.title)}</div>
         <div class="who">${w ? `${avatar(w.name, w.id, "sm")} ${esc(w.name)}` : `<span class="faint">unassigned</span>`}</div>${k === "blocked" && t.blocked_on ? `<div class="waiting ${t.blocked_on === "human" ? "you" : ""}">${esc(waitingOn(t))}</div>` : ""}${t.note && k !== "done" ? `<div class="note">${esc(t.note)}</div>` : ""}</button>`;
     }).join("")}</div></div>`;
   }).join("")}</div>` : `<div class="empty">The board fills in when you approve the plan.</div>`;
   const k = body.querySelector(".kanban");
   if (k) k.scrollLeft = left;
+  body.scrollTop = top;
 }
 
 // ---------- event board: chat and actions in one live feed ----------
@@ -495,7 +549,7 @@ function personSkeleton(id, tab) {
       <div class="drawer-composer">
         <textarea id="wmsg" rows="2" placeholder="Message ${esc(name)}…" aria-label="Message ${esc(name)}"></textarea>
         <div class="composer-actions"><span class="faint hint">Enter sends · Shift+Enter new line · replies appear above</span>
-          ${w ? `<button class="btn" id="wask" title="${esc(name)} answers from a copy of their session without stopping their work">Ask on the side</button>` : ""}
+          <button class="btn" id="wask" title="${esc(name)} answers from a copy of their session without stopping their work">Ask on the side</button>
           <button class="btn danger" id="wint" title="Stops what ${esc(name)} is doing now, then delivers your message">Interrupt + send</button>
           <button class="btn primary" id="wsend" title="Delivered into ${esc(name)}'s session as your next message">Send</button></div>
       </div></div>` : `<div class="scroll" id="p-body"></div>`}

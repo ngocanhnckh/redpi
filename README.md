@@ -478,9 +478,9 @@ Every task runs on **Pi** by default. On the plan page (Stories & tasks), pick a
 
 **Home: all projects.** The home page lists every project on the machine as a card: its latest run, progress, blocked tasks, the faces of the workers online, and a red "needs you" count (plans awaiting approval, workers that are stuck or waiting on you). Projects with active runs come first. Switch between **Active** and **All**, or search by name or path. Click a project to see its runs, active first, then open a run.
 
-The run page puts the live view (Office, Board or Graph) beside the **event board**, with the team and the project charts below. It updates in place: the page never jumps while you scroll, and whatever you are typing stays put.
+The run page puts the live view (Office, Board, Timeline or Stats) beside the **event board**, with the team below. It updates in place: the page never jumps while you scroll, and whatever you are typing stays put. The view area keeps one height, so switching views never moves the page.
 
-Every run has three views:
+Every run has four views. **Auto-play** (the button beside the tabs) fades through them, ten seconds each: handy on a wall screen. It pauses while your pointer is over the view, clicking a tab restarts the ten seconds, and the choice is remembered.
 
 **🏢 Office** (default once workers exist): an animated pixel office where the team works.
 
@@ -499,9 +499,19 @@ Every run has three views:
 - Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
 - The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
 
-**📋 Board**: the live Kanban (to do, in progress, review, blocked, done). Click a card for its full history: who moved it, when, and why.
+**📋 Board**: the live Kanban (to do, in progress, review, blocked, done). Cards stay compact: long titles and notes are cut to a few lines, with the full text on hover. Click a card for its full history: who moved it, when, and why.
 
-**🕸 Graph**: who talks to whom. Edge width is message volume, recent conversations glow; drag to pin a node.
+**📅 Timeline**: the approved plan as a Gantt chart with live progress. Each story and task sits where the plan scheduled it (hours from the start, critical path outlined in red), and its bar fills as the work moves: done 100%, in review 90%, not started 0%, and in-progress work estimated from how long finished tasks really took against their estimates (the team's pace), capped at 85% until it is done. The top shows overall progress by estimated hours. Click a row for the task's history.
+
+**📈 Stats**: the project charts, live from the task history:
+
+- **Burndown**: estimated hours left (or tasks, without estimates), with a forecast of the finish at the current pace
+- **Cumulative flow**: tasks in each column over time
+- **Throughput**: tasks done per time slot
+- **Cycle time**: from in progress to done per task, with the average; open tasks show how long they have run so far
+- **Workload**: each person's tasks by status
+- **Status**: the board as a donut with % done
+- **Team activity**: tool calls per person in 5-minute cells over the last two hours
 
 **📣 Event board** (beside the view, same height): everything the team does, live. Filter it:
 - **Updates**: what each agent (and the CEO) says it is doing, in its own words ("Reading the auth module to see how sessions are stored"), plus every task move with who moved it and why. Agents are asked to narrate each meaningful step in one plain sentence.
@@ -511,20 +521,11 @@ Every run has three views:
 
 Click a name to open that person, click a task id to see its history, and send a message to the CEO, everyone, or one worker from the box at the bottom.
 
-**📈 Project charts** (below the team, live from the task history):
-- **Burndown**: estimated hours left (or tasks, without estimates), with a forecast of the finish at the current pace
-- **Cumulative flow**: tasks in each column over time
-- **Throughput**: tasks done per time slot
-- **Cycle time**: from in progress to done per task, with the average; open tasks show how long they have run so far
-- **Workload**: each person's tasks by status
-- **Status**: the board as a donut with % done
-- **Team activity**: tool calls per person in 5-minute cells over the last two hours
-
 Around the views:
 
 - a sticky **Needs you** strip: tasks blocked on you, workers that are offline, parked, rate-limited or waiting on a prompt, and questions addressed to you that you have not answered. A worker who blocks a task says who must act (`waitingOn`: a teammate, the CEO, something external, or the human); HQ sends the note to that teammate and always tells the CEO, and only blocks on you land here. Without `waitingOn`, a teammate named in the note is assumed, else the CEO. Cards and panels show "waiting on Alex" and the like
 - the **team** with pixel portraits, the CEO included; each card quotes that person's latest update. Click anyone (in the team list, on the office floor, or on the event board) to open their panel:
-  - **Chat** (the default) is a messenger: your messages on the right, theirs on the left, the box pinned at the bottom (Enter sends, Shift+Enter for a new line). After you send, a note says they have it and that the reply appears right there. When the agent finishes the turn that handled your message, its answer is posted back to you in this chat (and on the event board), from Pi, Claude Code, Codex, and OpenCode workers and from the CEO alike. **Interrupt + send** stops their current work first; workers also offer **Ask on the side** (btw).
+  - **Chat** (the default) is a messenger: your messages on the right, theirs on the left, the box pinned at the bottom (Enter sends, Shift+Enter for a new line). After you send, a note says they have it and that the reply appears right there. When the agent finishes the turn that handled your message, its answer is posted back to you in this chat (and on the event board), from Pi, Claude Code, Codex, and OpenCode workers and from the CEO alike. **Interrupt + send** stops their current work first, and **Ask on the side** (btw) asks without stopping them, for workers and the CEO alike.
   - **Details**: what they are doing now, their tasks, context use, and their messages with teammates (for the CEO: the plan and what they last told the team).
   - **Activity**: their updates in their own words, newest first, and for workers the tool waterfall and activity log.
 
@@ -542,7 +543,7 @@ The office is drawn on a canvas that pauses when the tab is hidden, respects red
 - **Needs input.** Workers report when a rate limit or quota stops them, or when a prompt is waiting in their terminal.
 - **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
 
-**Talk to a worker without interrupting it ("btw").** In a worker's panel, **Ask (btw)** asks them anything while they keep working: their RedPi answers on the side with a separate call to the same model, reading the live session's conversation, tasks, and current activity. The live session never sees the question. If what you write is really an instruction ("please also make it return 202", "use Postgres instead"), the answer says so and passes it into the live session as a steer, without aborting what it is doing. **Send to session** delivers your message into the live session as its next message, and **Interrupt + send** stops the current turn first.
+**Talk to a worker or the CEO without interrupting them ("btw").** In anyone's panel, **Ask on the side** asks them anything while they keep working: their RedPi answers on the side with a separate call to the same model, reading the live session's conversation, tasks, and current activity (the CEO also reads the whole team and board). The live session never sees the question. If what you write is really an instruction ("please also make it return 202", "use Postgres instead"), the answer says so and passes it into the live session as a steer, without aborting what it is doing. **Send to session** delivers your message into the live session as its next message, and **Interrupt + send** stops the current turn first.
 
 Workers are real Pi sessions, not subagents: they keep running if the CEO is busy, you can attach to them (`tmux attach -t '=redpi-<run>-alex'`, detach with Ctrl-b d), and anything you or a teammate sends arrives in their session as a message. An interrupt stops the current turn first.
 
@@ -1053,7 +1054,7 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 
 ## 🙏 Credits
 
-- The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens), the communication-graph layout, and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
+- The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens) and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
 - Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
 - Prompt routing uses [Jev](https://openrouter.ai/blog/insights/what-is-jev/), TypeSafe's decision model; `redpi_jevgrep` runs [Jevgrep](https://github.com/dzhng/jevgrep) (MIT), installed from npm on demand, with usage guidance adapted from its agent skill.
 - Plan-and-subagent workflow skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT) and skills from [Matt Pocock](https://github.com/mattpocock/skills).

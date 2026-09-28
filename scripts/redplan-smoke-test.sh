@@ -94,7 +94,9 @@ def reply(handler, identity, messages, system=""):
     if identity.endswith("-side"):
         # Side-channel ("btw") answers: plain answer, or FORWARD when the human gives an instruction.
         text = ("FORWARD: Also add a /health endpoint that returns ok.\nGot it, passing that to my live session."
-                if "please also" in (user_text or "").split("THE HUMAN ASKS")[-1].lower() else "Alex here (btw): I'm mid-way through the todo endpoints; tests are next.")
+                if "please also" in (user_text or "").split("THE HUMAN ASKS")[-1].lower()
+                else f"CEO here (btw): the team is on it{'; I can see the board and Alex' if 'Board: ' in (user_text or '') and 'Alex (' in (user_text or '') else ''}." if identity == "the-side"
+                else "Alex here (btw): I'm mid-way through the todo endpoints; tests are next.")
         chunks = [{"choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
         body = ("".join(f"data: {json.dumps({'id': 'x', 'object': 'chat.completion.chunk', 'model': 'MainAgent', **c})}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
         handler.send_response(200); handler.send_header("content-type", "text/event-stream"); handler.send_header("content-length", str(len(body))); handler.end_headers(); handler.wfile.write(body)
@@ -285,6 +287,13 @@ try:
         raise SystemExit("the side question disturbed Alex's live session")
     if any(i == "Alex" and "how far along" in u for i, u, _ in requests):
         raise SystemExit("the side question leaked into the live session")
+    # btw to the CEO: answered on the side from the whole run (team and board), not in its live session.
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "aside", "body": "btw, how is the team doing?"})
+    ceo_side = wait("side answer from the CEO", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "aside" and m["sender"] == "ceo"), None), 30)
+    if "I can see the board and Alex" not in ceo_side["body"] or ceo_side["recipient"] != "human":
+        raise SystemExit(f"bad CEO side answer: {ceo_side}")
+    if any(i == "CEO" and "how is the team doing" in u for i, u, _ in requests):
+        raise SystemExit("the side question leaked into the CEO's live session")
     t0 = time.time()
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "interrupt", "body": "INTERRUPTED-NOW: stop and fix the failing test first."})
     try: wait("interrupt delivered to Alex", lambda: any(i == "Alex" and "INTERRUPTED-NOW" in u for i, u, _ in requests), 25)

@@ -25,7 +25,57 @@
   .stat { padding: 8px 12px; } .stat .v { font-size: 19px; }
   .view-panel .panel-body { padding: 8px; }
   .run-head h1 { margin: 0; font-size: 22px; }
-  /* Run page: the view (office, board, graph) with the event board beside it, the team below, then charts. */
+  /* Run page: the view (office, board, timeline, stats) with the event board beside it, the team below.
+     The view area has a fixed height, so switching views (by hand or auto-play) never shifts the page. */
+  #view-body { height: min(72vh, 860px); overflow: auto; transition: opacity .25s ease; }
+  #view-body.fading { opacity: 0; }
+  #view-body > .office-host { height: 100%; }
+  .view-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
+  #view-hint { flex: 1; min-width: 0; text-align: right; }
+  @media (max-width: 640px) { #view-hint { display: none; } .viewtabs button { padding: 5px 8px; } .view-panel .panel-head { padding: 8px 10px; } }
+  .autoplay { margin-left: auto; background: none; border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .autoplay[aria-pressed="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
+  .ap-bar { height: 2px; background: var(--border); } .ap-bar i { display: block; height: 100%; width: 0; background: var(--green); }
+  @keyframes ap-fill { from { width: 0; } to { width: 100%; } }
+  /* Board cards stay compact: story line 1 row, title 3, note 3; the full text is on hover and in the card's history. */
+  .card .id { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden; }
+  .card .tt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+  .card .note { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+  /* Timeline */
+  .tl { display: grid; gap: 12px; }
+  .tl-summary { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: end; justify-content: space-between; }
+  .tl-overall { flex: 1 1 360px; display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; align-items: center; }
+  .tl-big { font: 700 26px var(--mono); grid-row: span 2; }
+  .tl-sum-text { font-size: 12px; color: var(--muted); }
+  .pbar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; } .pbar i { display: block; height: 100%; background: var(--green); }
+  .tl-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+  .tl-legend .lg { display: inline-block; width: 12px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: 0; }
+  .lg.done { background: var(--green); } .lg.review { background: var(--amber); } .lg.in_progress { background: var(--cyan); } .lg.blocked { background: var(--red); } .lg.todo { background: var(--panel-2); border: 1px solid var(--faint); } .lg.crit { border: 2px solid var(--red); background: none; }
+  .tl-grid { display: grid; }
+  .tl-row { display: grid; grid-template-columns: minmax(180px, 34%) minmax(0, 1fr); min-height: 30px; align-items: center; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+  .tl-row.task { cursor: pointer; } .tl-row.task:hover, .tl-row.task:focus-visible { background: var(--panel-2); outline: none; }
+  .tl-row.story { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+  .tl-head { position: sticky; top: 0; z-index: 1; background: var(--panel); min-height: 24px; font-size: 11px; color: var(--muted); }
+  .tl-label { padding: 4px 10px 4px 6px; font-size: 13px; min-width: 0; display: flex; gap: 6px; align-items: center; }
+  .tl-row.story .tl-label { font-size: 13px; } .tl-row.task .tl-label { padding-left: 18px; }
+  .tl-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-meta { margin-left: auto; font: 12px var(--mono); color: var(--muted); white-space: nowrap; padding-left: 8px; }
+  .tl-who { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; } .tl-who .avatar.sm { width: 12px; height: 19px; }
+  .tl-id { color: var(--muted); font-size: 12px; }
+  .tl-track { position: relative; height: 100%; min-height: 24px; margin-right: 90px;
+    background-image: linear-gradient(to right, color-mix(in srgb, var(--border) 70%, transparent) 1px, transparent 1px); background-size: var(--step) 100%; }
+  .tl-head .tl-track { background: none; }
+  .tl-tick { position: absolute; top: 5px; transform: translateX(2px); font-family: var(--mono); }
+  .tl-bar { position: absolute; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--faint); overflow: hidden; }
+  .tl-bar i { display: block; height: 100%; background: var(--cyan); }
+  .tl-row.story .tl-bar { height: 8px; border-color: var(--green-dim); } .tl-row.story .tl-bar i { background: var(--green); }
+  .st-done .tl-bar i { background: var(--green); } .st-review .tl-bar i { background: var(--amber); } .st-blocked .tl-bar { border-color: var(--red); } .st-blocked .tl-bar i { background: var(--red); }
+  .st-in_progress .tl-bar i { background: repeating-linear-gradient(-45deg, var(--cyan) 0 6px, color-mix(in srgb, var(--cyan) 70%, var(--panel)) 6px 12px); background-size: 17px 17px; animation: tl-stripes 1s linear infinite; }
+  @keyframes tl-stripes { to { background-position: 17px 0; } }
+  @media (prefers-reduced-motion: reduce) { .st-in_progress .tl-bar i { animation: none; } #view-body { transition: none; } }
+  .tl-row.crit .tl-bar { box-shadow: 0 0 0 1.5px var(--red); }
+  .tl-pct { position: absolute; top: 50%; transform: translateY(-50%); font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+  .st-blocked .tl-pct { color: var(--red); } .st-done .tl-pct { color: var(--green); }
   .run-main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 10px; align-items: stretch; margin-bottom: 10px; }
   /* The event board takes the view's height (size containment keeps its long list out of the row height). */
   /* The event board fills the row the view sets: its content is positioned over the panel, so a long
@@ -146,17 +196,9 @@
   .viewtabs { display: flex; gap: 4px; }
   .viewtabs button { background: none; border: 1px solid transparent; border-radius: 8px; padding: 5px 12px; cursor: pointer; color: var(--muted); font-weight: 600; }
   .viewtabs button[aria-selected="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
-  .office-host { position: relative; height: min(72vh, 860px); min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--bg); touch-action: none; cursor: grab; }
+  .office-host { position: relative; height: 100%; min-height: 320px; border-radius: 8px; overflow: hidden; background: var(--bg); touch-action: none; cursor: grab; }
   .office-host:active { cursor: grabbing; }
   .office-canvas { display: block; }
-  .graph-host { overflow-x: auto; }
-  .graph .edge { stroke: var(--faint); stroke-linecap: round; }
-  .graph .edge.hot { stroke: var(--cyan); }
-  .graph .node circle { fill: var(--panel-2); stroke: var(--green-dim); stroke-width: 2; }
-  .graph .node circle.ceo { stroke: var(--red); } .graph .node circle.you { fill: var(--red); stroke: var(--red); }
-  .graph .node.off { opacity: .45; }
-  .graph .node { cursor: pointer; } .graph .node:focus { outline: none; } .graph .node:focus circle { stroke: var(--cyan); stroke-width: 3; }
-  .graph text { fill: var(--text); font: 600 12px var(--sans); } .graph .you-label { fill: #fff; font: 700 11px var(--mono); }
   button.card { text-align: left; width: 100%; cursor: pointer; font: inherit; color: inherit; }
   button.card:hover { border-color: var(--green-dim); }
   .banner { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -204,7 +246,7 @@
   .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
   .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
   @media (max-width: 1100px) { .run-main { grid-template-columns: minmax(0, 1fr); } .feed-panel { height: 70vh; min-height: 420px; } }
-  @media (max-width: 640px) { .office-host { height: 360px; } .needs { top: 52px; } }
+  @media (max-width: 640px) { #view-body { height: 62vh; } .needs { top: 52px; } }
   @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
 </style>
 </head>

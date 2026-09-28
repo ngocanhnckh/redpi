@@ -403,16 +403,30 @@ export default function (pi: ExtensionAPI) {
     beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
     let reply = "", forward = "";
     try {
-      const d = await hq("GET", `/api/workers/${WORKER_ID}`);
-      const state = [
-        `Status: ${ctx?.isIdle?.() ? "idle" : "working right now"}. Current activity: ${d.worker.activity?.text || "none"}.`,
-        `Tasks: ${d.tasks.map((t: any) => `${t.id} ${t.title} [${t.status}]${t.note ? ` (${t.note})` : ""}`).join("; ") || "none"}`,
-        `Workspace: ${d.worker.cwd}${d.worker.branch ? ` on ${d.worker.branch}` : ""}`,
-      ].join("\n");
+      let state: string, who: [string, string];
+      if (WORKER_ID) {
+        const d = await hq("GET", `/api/workers/${WORKER_ID}`);
+        who = [d.worker.name, d.worker.role];
+        state = [
+          `Status: ${ctx?.isIdle?.() ? "idle" : "working right now"}. Current activity: ${d.worker.activity?.text || "none"}.`,
+          `Tasks: ${d.tasks.map((t: any) => `${t.id} ${t.title} [${t.status}]${t.note ? ` (${t.note})` : ""}`).join("; ") || "none"}`,
+          `Workspace: ${d.worker.cwd}${d.worker.branch ? ` on ${d.worker.branch}` : ""}`,
+        ].join("\n");
+      } else {
+        // The CEO answers from the whole run: the team, the board and its own session.
+        const d = await hq("GET", `/api/runs/${runId}`);
+        who = ["the CEO", "lead coordinating the team"];
+        const names = Object.fromEntries(d.workers.map((w: any) => [w.id, w.name]));
+        state = [
+          `Run: ${d.run.title} [${d.run.status}]. You are ${ctx?.isIdle?.() ? "idle" : "working right now"}.`,
+          `Team: ${d.workers.map((w: any) => `${w.name} (${w.role}) ${w.alive ? w.status : "offline"}${w.activity?.text ? `: ${w.activity.text}` : ""}`).join("; ") || "nobody yet"}`,
+          `Board: ${d.tasks.map((t: any) => `${t.id} ${t.title} [${t.status}${t.worker_id ? `, ${names[t.worker_id] || t.worker_id}` : ""}]${t.note ? ` (${String(t.note).slice(0, 200)})` : ""}`).join("; ") || "no tasks yet"}`,
+        ].join("\n");
+      }
       const model = ctx?.model;
       if (!model) throw new Error("no model selected in this session");
       const res: any = await ctx.modelRegistry.complete(model, {
-        systemPrompt: ASIDE_PROMPT(d.worker.name, d.worker.role),
+        systemPrompt: ASIDE_PROMPT(...who),
         messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx)}\n\nTHE HUMAN ASKS (by the way):\n${m.body}` }],
       }, { maxTokens: 1500 });
       const text = (res?.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
@@ -428,7 +442,7 @@ export default function (pi: ExtensionAPI) {
       const body = `[RedPlan · instruction from the human via HQ (relayed from a side question)]\n${forward}`;
       if (latestCtx?.isIdle?.()) pi.sendUserMessage(body); else pi.sendUserMessage(body, { deliverAs: "steer" });
     }
-    await hq("POST", `/api/runs/${runId}/messages`, { from: WORKER_ID, to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
+    await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
     beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
   }
 
@@ -441,7 +455,7 @@ export default function (pi: ExtensionAPI) {
       inboxCursor = msgs[msgs.length - 1].id;
       pi.appendEntry("redplan-cursor", { runId, cursor: inboxCursor });
       // Side questions never enter the live session: answer them on the side, one at a time.
-      const asides = WORKER_ID ? msgs.filter((m) => m.kind === "aside") : [];
+      const asides = msgs.filter((m) => m.kind === "aside" && m.sender === "human");
       for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
       msgs = msgs.filter((m) => !asides.includes(m));
       if (!msgs.length) return;

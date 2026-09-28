@@ -185,14 +185,13 @@ if (Math.abs(dTop - 120) > 2) await fail("worker drawer jumped on a live update"
 await page.keyboard.press("Escape");
 await page.setViewportSize({ width: 1400, height: 900 });
 
-// Layout: the event board sits beside the office at the same height; the team and the
-// project charts come below.
+// Layout: the event board sits beside the office at the same height; the team comes below.
 const lay = await page.evaluate(() => {
   const v = document.querySelector(".view-panel").getBoundingClientRect(), f = document.querySelector(".feed-panel").getBoundingClientRect();
-  const t = document.querySelector(".team-panel").getBoundingClientRect(), c = document.querySelector(".charts-section").getBoundingClientRect();
-  return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, chartsBelow: c.top >= t.bottom, overflow: document.documentElement.scrollWidth > innerWidth };
+  const t = document.querySelector(".team-panel").getBoundingClientRect();
+  return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, oldSections: !!document.querySelector(".charts-section, #graph-host"), tabs: [...document.querySelectorAll("[role=tab][data-view]")].map((b) => b.dataset.view).join(","), overflow: document.documentElement.scrollWidth > innerWidth };
 });
-if (!lay.beside || !lay.sameHeight || !lay.teamBelow || !lay.chartsBelow || lay.overflow) await fail("run layout wrong", lay);
+if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,timeline,stats" || lay.overflow) await fail("run layout wrong", lay);
 
 // The page never jumps on live updates: scrolled down with a half-typed message, updates
 // arrive (heartbeats, a new message), and the scroll position, focus and text stay.
@@ -279,6 +278,14 @@ if (!(await page.locator("#feed .msg.reply", { hasText: "login flow goes first" 
 if (shots) await page.screenshot({ path: join(shots, "ceo-drawer.png") });
 const sent = (await api("GET", `/api/runs/${runId}`)).messages.filter((m) => m.sender === "human" && m.recipient === "ceo" && m.kind === "command" && /prioritise the login/.test(m.body));
 if (sent.length !== 1) await fail("message to the CEO not sent once as a command", sent);
+// btw to the CEO: "Ask on the side" sends a side question the CEO answers without stopping.
+await page.fill("#wmsg", "btw, how is the team doing?");
+await page.click("#wask");
+await page.waitForFunction(() => /how is the team doing/.test([...document.querySelectorAll(".drawer #thread .bub.me")].at(-1)?.textContent || ""));
+if (!/answering on the side/.test(await page.textContent(".drawer #thread .bub.pending"))) await fail("no note that the CEO answers the side question on the side");
+if (!(await api("GET", `/api/runs/${runId}`)).messages.some((m) => m.sender === "human" && m.recipient === "ceo" && m.kind === "aside" && /how is the team/.test(m.body))) await fail("btw to the CEO not sent as a side question");
+await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "aside", body: "Fine: Alex is on the login flow." });
+await page.waitForFunction(() => /Alex is on the login flow/.test(document.querySelector(".drawer #thread")?.lastElementChild?.textContent || ""));
 if (Math.abs((await page.evaluate(() => scrollY)) - winY) > 2) await fail("opening the CEO scrolled the page");
 // Details tab: what the CEO is doing and the plan.
 await page.click('[data-ptab="details"]');
@@ -320,7 +327,12 @@ await api("POST", `/api/runs/${run2}/tasks/T4`, { status: "blocked", actor: lee,
 await api("POST", `/api/runs/${run2}/tasks/T3`, { status: "blocked", actor: kim, note: "waiting on Lee to confirm the receipt email template" });
 await api("POST", `/api/workers/${kim}/heartbeat`, { status: "working", events: [{ kind: "tool", text: "bash: pytest -q", ms: 1200, ok: true }, { kind: "tool", text: "bash: npm run build", ms: 900, ok: false }] });
 await page.goto(`${base}/runs/${run2}`);
-await page.waitForSelector(".chart");
+// The charts live in the Stats tab (no scrolling down), and switching views never moves the page.
+await page.waitForSelector(".view-panel #view-body > *");
+const panelH = await page.evaluate(() => document.querySelector(".view-panel").getBoundingClientRect().height);
+await page.click('[data-view="stats"]');
+await page.waitForSelector("#view-body .chart");
+if (Math.abs((await page.evaluate(() => document.querySelector(".view-panel").getBoundingClientRect().height)) - panelH) > 1) await fail("switching to Stats changed the view's height");
 const charts = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".chart")].map((c) => [c.dataset.chart, { sub: c.querySelector(".chart-sub").textContent, svg: !!c.querySelector("svg"), legend: c.querySelector(".chart-legend")?.textContent || "" }])));
 const keys = ["burndown", "flow", "throughput", "cycle", "workload", "status", "activity"];
 if (keys.some((k) => !charts[k]?.svg)) await fail("charts missing", Object.keys(charts));
@@ -355,12 +367,50 @@ await page.keyboard.press("Escape");
 // Live: finishing another task updates the charts without a reload.
 await move("T2", "review", kim, "done"); await move("T2", "done", lee, "checked");
 await page.waitForFunction(() => /5h of 15h left · 2\/4 done/.test(document.querySelector('[data-chart="burndown"] .chart-sub')?.textContent || ""), null, { timeout: 5000 }).catch(async () => fail("charts did not update live", await page.textContent('[data-chart="burndown"] .chart-sub')));
-if (shots) await page.locator(".charts-section").screenshot({ path: join(shots, "charts.png") });
+if (shots) await page.locator(".view-panel").screenshot({ path: join(shots, "charts.png") });
+// Timeline: the plan's Gantt with a progress bar per task and story, and overall progress.
+await page.click('[data-view="timeline"]');
+await page.waitForSelector("#view-body .tl-row.task");
+const tl = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".tl-row.task")].map((r) => [r.dataset.task, { cls: r.className, fill: r.querySelector(".tl-bar i").style.width, pct: r.querySelector(".tl-pct").textContent, left: parseFloat(r.querySelector(".tl-bar").style.left) }])));
+const big = await page.textContent(".tl-big");
+if (Object.keys(tl).join() !== "T1,T2,T3,T4" || tl.T1.fill !== "100%" || tl.T2.fill !== "100%" || tl.T3.fill !== "0%" || !/st-blocked/.test(tl.T4.cls) || tl.T4.pct !== "blocked" || big !== "67%") await fail("timeline wrong", { tl, big });
+if (!(await page.locator(".tl-row.story", { hasText: "2/4 · 67%" }).count())) await fail("story progress missing on the timeline");
+if (shots) await page.locator(".view-panel").screenshot({ path: join(shots, "timeline.png") });
+await page.click('.tl-row[data-task="T4"]');
+await page.waitForSelector('.drawer[aria-label="Task T4"]').catch(() => fail("clicking a timeline row should open the task"));
+await page.keyboard.press("Escape");
+// Board cards stay compact however long the note is; the full note is on hover and in the card's history.
+await page.click('[data-view="board"]');
+const t4card = await page.evaluate(() => { const c = document.querySelector('.card[data-task="T4"]'); return { h: c.getBoundingClientRect().height, title: c.title }; });
+if (t4card.h > 220 || !/END-OF-BLOCKER/.test(t4card.title)) await fail("a long note should not blow up the board card", t4card);
+// Auto-play: fades Office → Board → Timeline → Stats on a timer, holds while the pointer is over
+// the view, and stops when turned off. The choice is remembered.
+await page.goto(`${base}/runs/${run2}?autoplay_ms=1200`);
+await page.waitForSelector("#autoplay");
+await page.click('[data-view="office"]');
+await page.click("#autoplay");
+const cur = () => page.evaluate(() => document.getElementById("view-body").dataset.view);
+await page.waitForTimeout(2000);
+if ((await cur()) !== "office") await fail("auto-play should hold while the pointer is over the view");
+await page.mouse.move(5, 5);
+const seen = [];
+for (let i = 0; i < 40 && seen.length < 4; i++) { const v = await cur(); if (seen.at(-1) !== v) seen.push(v); await page.waitForTimeout(150); }
+if (seen.join() !== "office,board,timeline,stats") await fail("auto-play did not cycle the views in order", seen);
+if ((await page.evaluate(() => localStorage.getItem("redpi-autoplay"))) !== "1") await fail("auto-play choice not remembered");
+await page.click("#autoplay");
+const stopped = await cur();
+await page.mouse.move(5, 5);
+await page.waitForTimeout(2000);
+if ((await cur()) !== stopped || (await page.getAttribute("#autoplay", "aria-pressed")) !== "false") await fail("auto-play kept going after it was turned off");
 if (shots) await page.screenshot({ path: join(shots, "run-page.png"), fullPage: true });
 // Phone: one column, no sideways scroll.
 await page.setViewportSize({ width: 390, height: 800 });
 await page.waitForTimeout(300);
-if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)) await fail("run page scrolls sideways on a phone");
+for (const v of ["office", "board", "timeline", "stats"]) {
+  await page.click(`[role=tab][data-view="${v}"]`); await page.waitForTimeout(200);
+  const wide = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1 && [...document.querySelectorAll("body *")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).slice(0, 5).map((e) => `${e.tagName}.${e.className}`));
+  if (wide) await fail(`run page scrolls sideways on a phone (${v})`, wide);
+}
 await page.setViewportSize({ width: 1400, height: 900 });
 await page.goto(`${base}/runs/${runId}`);
 await page.waitForSelector(".office-host canvas");
@@ -374,16 +424,17 @@ await dark.close();
 // Board: long unbreakable text (paths, package names) wraps inside the card instead of
 // pushing it out of its column.
 const spill = await page.evaluate(() => {
+  const huge = "Starting the adapter; this note keeps going. ".repeat(40);
   const long = "apps/worker/app/deep_agent_runtime_adapter_with_a_very_long_name.py";
   const k = document.createElement("div");
   k.className = "kanban"; k.style.width = "900px";
-  k.innerHTML = ["todo", "in_progress", "review", "blocked", "done"].map((c) => `<div class="col ${c}"><h3>${c}<span>1</span></h3><div class="cards"><button class="card"><div class="id">T1.1 · ${long}</div><div class="tt">Adopt deepagents and remove browser-use</div><div class="note">Starting: ${long} behind ${long}</div></button></div></div>`).join("");
+  k.innerHTML = ["todo", "in_progress", "review", "blocked", "done"].map((c) => `<div class="col ${c}"><h3>${c}<span>1</span></h3><div class="cards"><button class="card"><div class="id">T1.1 · ${long}</div><div class="tt">Adopt deepagents and remove browser-use</div><div class="note">Starting: ${long} behind ${long} ${huge}</div></button></div></div>`).join("");
   document.body.appendChild(k);
-  const out = [...k.querySelectorAll(".col")].map((col) => { const c = col.getBoundingClientRect(), d = col.querySelector(".card").getBoundingClientRect(); return d.right - c.right; });
+  const out = [...k.querySelectorAll(".col")].map((col) => { const c = col.getBoundingClientRect(), d = col.querySelector(".card").getBoundingClientRect(); return d.height > 240 ? 999 : d.right - c.right; });
   k.remove();
   return out;
 });
-if (spill.some((d) => d > 0.5)) await fail("board cards overflow their columns", spill);
+if (spill.some((d) => d > 0.5)) await fail("board cards overflow their columns or grow with long notes", spill);
 
 // No console errors so far.
 if (errors.length) await fail("console errors", errors);
@@ -399,5 +450,5 @@ if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex
 if (errors.length) await fail("console errors", errors);
 
 await browser.close();
-console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts.");
+console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO.");
 process.exit(0);

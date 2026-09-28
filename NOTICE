@@ -13,7 +13,6 @@ Ported (rewritten from TypeScript/Pixi.js to plain JavaScript/Canvas 2D):
   hq/web/office/office.js        from scene/office/Camera.ts, Character.ts, CharacterSprite.ts,
                                  ToolBubble.ts, ThoughtBubble.ts, MessageEnvelope.ts, DeskScreen.ts
   hq/web/office/pathfinding.js   from scene/office/pathfinding.ts
-  hq/web/graph.js                from components/memoryGraph/forceLayout.ts
   hq/web/dashboard.js            tool waterfall idea from components/ToolWaterfall.tsx
 
 Not included: munder-difflin's office tilesets and Tiled maps are LimeZu
