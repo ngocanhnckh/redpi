@@ -100,3 +100,18 @@ Copyright (c) Dietrich Gebert — MIT License
 
 Not bundled: RedPi's installer (and a forced /redpi-update) installs it as a
 separate Pi package with `pi install git:github.com/DietrichGebert/ponytail`.
+
+-------------------------------------------------------------------------------
+SenseNova-Skills — https://github.com/OpenSenseNova/SenseNova-Skills
+Copyright (c) 2026 SenseNova — MIT License
+
+Not bundled: RedPi's installer (and /redpi-update) makes a sparse clone of the
+repository in ~/.pi/agent/vendor/SenseNova-Skills and registers only its office
+skills (sn-ppt-*, sn-da-*, sn-md-to-html-report) in Pi settings.
+
+-------------------------------------------------------------------------------
+frontend-design skill — https://github.com/anthropics/skills (skills/frontend-design)
+Copyright Anthropic, PBC — Apache License 2.0
+
+Bundled unchanged in skills/frontend-design/ (SKILL.md), with its license in
+skills/frontend-design/LICENSE.txt. Taken from commit 8a1541c4a3ff (2026-09-28).

@@ -94,7 +94,8 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | ✳️ | **Claude subscription bridge** | Optional [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) provider: use a signed-in Claude Code subscription in Pi. | `/redpi-claude` |
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
-| 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, and the RedPi Playwright browser skill. | None |
+| 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, Anthropic's frontend-design skill, the RedPi Playwright browser skill, and office skills: [SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) for slide decks, Excel analysis and HTML reports, plus RedPi's `office-files` for reading and writing Word, Excel, PowerPoint and PDF files. | None |
+| 🖼 | **Image size guard** | Big screenshots and photos no longer break a session: before each model request, images over the size budget are recompressed and the oldest are left out so the whole request stays under 4 MB (gateways answer bigger ones with `413 Request Entity Too Large`), without changing the saved session. `redpi_image_compress` writes a smaller copy of an image file. | None |
 | 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Chromium installs with RedPi (opt out with `REDPI_SKIP_BROWSER=1`). | None |
 | ⏳ | **Job watcher** | Long shell commands (builds, Docker, test suites) are moved to the background after 10 minutes instead of being killed or blocking the agent, with a health report (CPU, disk, network, Docker, errors in the log); the agent is told when they finish or look stuck. | None |
 | 🧾 | **Decisions and lessons** | Agents record significant decisions as ADRs (`docs/adr/`) and what cost them time in `docs/lessons-learned.md`; every later session in the project reads both, so each run starts from what the last one learned. | None |
@@ -631,6 +632,19 @@ Builds, Docker, and big test suites used to either hit the 10-minute bash timeou
 
 ---
 
+## 🖼 Image size guard
+
+A conversation full of screenshots can grow past what the model provider accepts in one request (`413 Request Entity Too Large` / `FUNCTION_PAYLOAD_TOO_LARGE`; some gateways stop at 4.5 MB), and from then on every request fails, because the images are still in the history. RedPi checks the images before each model request:
+
+- **Too big**: an image over 700 KB (encoded) or 1,568 px on a side is recompressed, keeping PNG or switching to JPEG, whichever is smaller. Compressed copies are cached, so repeat requests are instant.
+- **Too many**: only the newest images go to the model: at most 8, at most 3 MB of them, and only as much as fits beside the text so the whole request stays under 4 MB; older ones are replaced by a short note saying the agent can read the file again if it still needs it.
+- **The saved session is not changed**: only the outgoing request is. The status bar says when images were compressed or left out.
+- **`redpi_image_compress`** writes a smaller copy of an image file (`shot.png` becomes `shot.small.png` or `.jpg`), for attaching or sharing a large screenshot.
+
+Tune it with `REDPI_IMAGE_MAX_PX`, `REDPI_IMAGE_MAX_KB`, `REDPI_IMAGE_MAX_COUNT`, `REDPI_IMAGE_TOTAL_MB` and `REDPI_REQUEST_MAX_MB`, or turn it off with `REDPI_IMAGES=0`.
+
+---
+
 ## 🧾 Decisions and lessons learned
 
 Every run leaves the project smarter for the next one:
@@ -785,8 +799,27 @@ RedPi adds skills to Pi settings automatically:
 ~/.pi/agent/vendor/mattpocock-skills/skills/productivity
 ~/.pi/agent/vendor/liquid-glass-frontend-skill
 ~/.pi/agent/vendor/superpowers/skills/<name>   (subagent workflow, see below)
+~/.pi/agent/vendor/SenseNova-Skills/skills/<name>   (office skills, see below)
 <redpi package>/skills/redpi-browser   (Playwright browser skill)
+<redpi package>/skills/frontend-design   (Anthropic's frontend-design skill)
+<redpi package>/skills/office-files   (read and write Word, Excel, PowerPoint, PDF)
 ```
+
+**Office work.** From [OpenSenseNova/SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) (MIT), RedPi registers only the office skills (a sparse clone keeps just their folders):
+
+| Skill | For |
+| --- | --- |
+| `sn-ppt-entry` (then `sn-ppt-story`, `sn-ppt-standard`, `sn-ppt-dazzle` or `sn-ppt-creative`) | A slide deck from a request and optional files: outline, designed HTML pages, speaker notes, PPTX export |
+| `sn-ppt-workbench`, `sn-ppt-doctor`, `sn-ppt-tools` | Edit a deck in the browser, check the setup, search and image fallbacks |
+| `sn-da-excel-workflow`, `sn-da-large-file-analysis` | Excel analysis: multi-sheet reads, cleaning, aggregation, exports, files over 10k rows |
+| `sn-da-non-spreadsheet-analysis`, `sn-da-image-caption` | Pull tables and figures out of Word, PDF, PowerPoint and images |
+| `sn-md-to-html-report` | A Markdown report as a designed, self-contained HTML page |
+
+Some of them need extras on first use (Python packages, Playwright Chromium, and for image generation or image captions a SenseNova API key in their `.env`); `/skill:sn-ppt-doctor` checks the deck setup. Their instructions are partly in Chinese; the agent follows them either way. SenseNova's search, deep-research and image skills are not registered.
+
+RedPi's own `office-files` skill covers the quick jobs: read any .docx, .xlsx, .pptx or .pdf as Markdown, write a Word document or a plain PowerPoint from Markdown, turn CSV or JSON into a formatted spreadsheet, merge or split PDFs, and render pages to PNG. It runs through `uv` with open-source libraries (python-docx, openpyxl, python-pptx, pypdf), so nothing is installed into the system Python; LibreOffice, when present, adds Office-to-PDF and formula recalculation.
+
+**Design.** [`frontend-design`](https://github.com/anthropics/skills/tree/main/skills/frontend-design) from Anthropic's skills repository (Apache-2.0) ships with RedPi unchanged, for distinctive, intentional UI work. Anthropic's Word, Excel, PowerPoint and PDF skills are not included: their license does not allow copies outside Anthropic's own products, which is why RedPi uses SenseNova's skills and its own `office-files` instead.
 
 From [obra/superpowers](https://github.com/obra/superpowers) (MIT), RedPi registers only the plan-and-subagent workflow: `subagent-driven-development`, `dispatching-parallel-agents`, `writing-plans`, `executing-plans`, `using-git-worktrees`, `requesting-code-review`, `finishing-a-development-branch`, and `verification-before-completion`. The rest of superpowers (its TDD, debugging, and `using-superpowers` meta-skill) is not registered, to avoid overlapping Matt Pocock's skills.
 
@@ -1048,6 +1081,9 @@ npm pack --dry-run
 Smoke coverage includes:
 
 - automatic first-run provider onboarding
+- image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
+- `office-files` skill: Markdown to Word and PowerPoint and back, CSV to Excel, PDF merge and page pick (through `uv`; skipped without it)
+- only SenseNova's office skills are registered
 - core extension load
 - commands/roles/memory in a real Pi TUI
 - `/redpi-setup` one-shot flow in a real Pi TUI
@@ -1142,6 +1178,8 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 - Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
 - Prompt routing uses [Jev](https://openrouter.ai/blog/insights/what-is-jev/), TypeSafe's decision model; `redpi_jevgrep` runs [Jevgrep](https://github.com/dzhng/jevgrep) (MIT), installed from npm on demand, with usage guidance adapted from its agent skill.
 - [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) by Dietrich Gebert is installed as a companion Pi package for minimal-code mode.
+- Office skills from [SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) (MIT) by SenseNova, installed alongside RedPi.
+- The [frontend-design](https://github.com/anthropics/skills/tree/main/skills/frontend-design) skill by Anthropic (Apache-2.0), shipped unchanged.
 - Plan-and-subagent workflow skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT) and skills from [Matt Pocock](https://github.com/mattpocock/skills).
 
 See [`NOTICE`](./NOTICE) for licenses and details.

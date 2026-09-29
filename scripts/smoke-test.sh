@@ -38,6 +38,11 @@ AGENT_DIR="$(mktemp -d -t redpi-smoke-agent-XXXXXX)"
 trap 'rm -rf "$AGENT_DIR"' EXIT
 mkdir -p "$AGENT_DIR/yitec"
 echo '{ "completed": true, "provider": "manual" }' > "$AGENT_DIR/yitec/onboarding.json"
+# A vendored SenseNova-Skills checkout: only its office skills should be registered.
+for s in sn-ppt-entry sn-da-excel-workflow sn-search-code; do
+  mkdir -p "$AGENT_DIR/vendor/SenseNova-Skills/skills/$s"
+  printf -- '---\nname: %s\ndescription: test skill %s\n---\n' "$s" "$s" > "$AGENT_DIR/vendor/SenseNova-Skills/skills/$s/SKILL.md"
+done
 python3 - "$ROOT" "$PROJECT" "$AGENT_DIR" <<'PY'
 import os, pty, subprocess, time, select, re, sys
 root, cwd, agent_dir = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -74,6 +79,12 @@ if missing:
  print(s[-5000:]); raise SystemExit('Missing smoke checks: '+', '.join(missing))
 print('Yitec smoke passed: real Pi TUI loaded extension, commands, roles, trusted project config, and memory.')
 PY
+node -e '
+const s = JSON.parse(require("fs").readFileSync(process.argv[1] + "/settings.json", "utf8")).skills || [];
+const has = (n) => s.some((p) => p.endsWith("/SenseNova-Skills/skills/" + n));
+if (!has("sn-ppt-entry") || !has("sn-da-excel-workflow") || has("sn-search-code")) { console.error("FAIL: SenseNova office skills should be registered, and only those:", s); process.exit(1); }
+console.log("SenseNova office skills registered (decks, Excel), other SenseNova skills left out.");
+' "$AGENT_DIR"
 
 # A settings.json RedPi cannot parse (half-written or hand-edited) must be left alone, never
 # rebuilt from scratch: that once dropped the user's "packages" list and Pi stopped loading RedPi.

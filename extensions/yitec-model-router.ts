@@ -222,6 +222,16 @@ const SUPERPOWERS_SKILLS = [
   "using-git-worktrees", "requesting-code-review", "finishing-a-development-branch", "verification-before-completion",
 ];
 
+// OpenSenseNova/SenseNova-Skills is MIT-licensed. Only its office skills are registered (decks,
+// Excel/Word/PDF/PPT analysis, Markdown -> HTML reports); a sparse clone keeps just skills/ and the
+// root files, since these skills call their siblings (sn-ppt-tools and friends) through ../ paths.
+const SENSENOVA_DIR = join(AGENT_DIR, "vendor", "SenseNova-Skills");
+const SENSENOVA_REPO = "https://github.com/OpenSenseNova/SenseNova-Skills";
+const SENSENOVA_SKILLS = [
+  "sn-ppt-entry", "sn-ppt-story", "sn-ppt-standard", "sn-ppt-dazzle", "sn-ppt-creative", "sn-ppt-tools", "sn-ppt-doctor", "sn-ppt-workbench",
+  "sn-da-excel-workflow", "sn-da-large-file-analysis", "sn-da-non-spreadsheet-analysis", "sn-da-image-caption", "sn-md-to-html-report",
+];
+
 function repairSkillPaths(skills: string[]): string[] {
   // Matt Pocock moved skills from .agents/skills to skills/<bucket>; older installs
   // point at the removed folder and silently load nothing.
@@ -230,7 +240,8 @@ function repairSkillPaths(skills: string[]): string[] {
   const mattSkills = ["engineering", "productivity"].map((bucket) => join(mattDir, "skills", bucket)).filter((p) => existsSync(p));
   const kept = skills.filter((p) => !String(p).startsWith(mattDir));
   const superpowers = SUPERPOWERS_SKILLS.map((name) => join(SUPERPOWERS_DIR, "skills", name)).filter((p) => existsSync(join(p, "SKILL.md")));
-  return [...new Set([...kept, ...mattSkills, ...(existsSync(join(liquidDir, "SKILL.md")) ? [liquidDir] : []), ...superpowers])];
+  const sensenova = SENSENOVA_SKILLS.map((name) => join(SENSENOVA_DIR, "skills", name)).filter((p) => existsSync(join(p, "SKILL.md")));
+  return [...new Set([...kept, ...mattSkills, ...(existsSync(join(liquidDir, "SKILL.md")) ? [liquidDir] : []), ...superpowers, ...sensenova])];
 }
 
 function subagentSettings(existing: any, cfg: any): any {
@@ -813,7 +824,12 @@ async function updateRedPi(cfg: Config, force = false): Promise<string> {
       lines.push(await run("git", ["clone", "--depth", "1", "https://github.com/obra/superpowers", SUPERPOWERS_DIR]));
       patchPiSettings();
     }
-    for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill"), SUPERPOWERS_DIR]) {
+    if (!existsSync(join(SENSENOVA_DIR, ".git"))) {
+      lines.push(await run("git", ["clone", "--depth", "1", "--filter=blob:none", "--sparse", SENSENOVA_REPO, SENSENOVA_DIR]));
+      lines.push(await run("git", ["sparse-checkout", "set", "skills"], SENSENOVA_DIR));
+      patchPiSettings();
+    }
+    for (const dir of [join(AGENT_DIR, "vendor", "mattpocock-skills"), join(AGENT_DIR, "vendor", "liquid-glass-frontend-skill"), SUPERPOWERS_DIR, SENSENOVA_DIR]) {
       if (existsSync(join(dir, ".git"))) lines.push(await run("git", ["pull", "--ff-only"], dir));
       else lines.push(`Skill repo not found, skipping: ${dir}`);
     }

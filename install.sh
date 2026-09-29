@@ -13,6 +13,7 @@ YITEC_DIR="$AGENT_DIR/yitec"
 MATT_DIR="$AGENT_DIR/vendor/mattpocock-skills"
 LIQUID_DIR="$AGENT_DIR/vendor/liquid-glass-frontend-skill"
 SUPERPOWERS_DIR="$AGENT_DIR/vendor/superpowers"
+SENSENOVA_DIR="$AGENT_DIR/vendor/SenseNova-Skills"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1" >&2; exit 1; }; }
 need_cmd npm
@@ -84,6 +85,16 @@ else
   git clone --depth 1 https://github.com/obra/superpowers "$SUPERPOWERS_DIR"
 fi
 
+echo "Installing SenseNova office skills (OpenSenseNova/SenseNova-Skills, MIT): decks, Excel/Word/PDF analysis, HTML reports..."
+if [ -d "$SENSENOVA_DIR/.git" ]; then
+  git -C "$SENSENOVA_DIR" pull --ff-only
+else
+  rm -rf "$SENSENOVA_DIR"
+  # Sparse: only skills/ and the root files (LICENSE, README), not the docs' sample images.
+  git clone --depth 1 --filter=blob:none --sparse https://github.com/OpenSenseNova/SenseNova-Skills "$SENSENOVA_DIR"
+  git -C "$SENSENOVA_DIR" sparse-checkout set skills
+fi
+
 if [ ! -f "$YITEC_DIR/model-tiers.json" ]; then
   # A fresh RedPi install starts with its stable named routes. The first-run
   # wizard will replace these with the exact live IDs returned by 9Router.
@@ -116,10 +127,10 @@ fi
 SETTINGS="$AGENT_DIR/settings.json"
 # Matt Pocock's promoted skills live under skills/engineering and skills/productivity;
 # Pi discovers SKILL.md directories recursively below each listed path.
-node - "$SETTINGS" "$MATT_DIR" "$LIQUID_DIR" "$SUPERPOWERS_DIR" <<'NODE'
+node - "$SETTINGS" "$MATT_DIR" "$LIQUID_DIR" "$SUPERPOWERS_DIR" "$SENSENOVA_DIR" <<'NODE'
 const fs = require('fs');
 const path = require('path');
-const [settingsPath, mattDir, liquidSkill, superpowersDir] = process.argv.slice(2);
+const [settingsPath, mattDir, liquidSkill, superpowersDir, sensenovaDir] = process.argv.slice(2);
 let s = {};
 try { s = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
 const mattSkills = ['engineering', 'productivity'].map((bucket) => path.join(mattDir, 'skills', bucket));
@@ -129,7 +140,11 @@ const kept = (s.skills || []).filter((p) => !String(p).startsWith(mattDir));
 const superpowersSkills = ['subagent-driven-development', 'dispatching-parallel-agents', 'writing-plans', 'executing-plans',
   'using-git-worktrees', 'requesting-code-review', 'finishing-a-development-branch', 'verification-before-completion']
   .map((name) => path.join(superpowersDir, 'skills', name));
-s.skills = Array.from(new Set([...kept, ...mattSkills, liquidSkill, ...superpowersSkills]));
+// SenseNova's office skills only; keep in sync with SENSENOVA_SKILLS in the extension.
+const sensenovaSkills = ['sn-ppt-entry', 'sn-ppt-story', 'sn-ppt-standard', 'sn-ppt-dazzle', 'sn-ppt-creative', 'sn-ppt-tools', 'sn-ppt-doctor', 'sn-ppt-workbench',
+  'sn-da-excel-workflow', 'sn-da-large-file-analysis', 'sn-da-non-spreadsheet-analysis', 'sn-da-image-caption', 'sn-md-to-html-report']
+  .map((name) => path.join(sensenovaDir, 'skills', name)).filter((p) => fs.existsSync(path.join(p, 'SKILL.md')));
+s.skills = Array.from(new Set([...kept, ...mattSkills, liquidSkill, ...superpowersSkills, ...sensenovaSkills]));
 s.enableSkillCommands = true;
 if (process.env.REDPI_THEME !== '0') s.theme = process.env.REDPI_THEME || 'redpi-matrix';
 s.retry = {
