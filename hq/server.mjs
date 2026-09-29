@@ -175,6 +175,10 @@ const one = (sql, ...a) => db.prepare(sql).get(...a);
 const all = (sql, ...a) => db.prepare(sql).all(...a);
 const run = (sql, ...a) => db.prepare(sql).run(...a);
 const TASK_STATUSES = ["todo", "in_progress", "review", "blocked", "done"];
+
+// Earlier hubs marked every CEO message to the human as needing a reply; only questions do.
+run(`UPDATE messages SET needs_reply = 0 WHERE recipient = 'human' AND sender = 'ceo' AND needs_reply = 1 AND rtrim(body, ' ' || char(9) || char(10) || char(13)) NOT LIKE '%?'`);
+
 const RUN_STATUSES = ["planning", "awaiting_approval", "approved", "executing", "done", "cancelled"];
 
 // ---------- live updates (server-sent events) ----------
@@ -854,7 +858,8 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   const kind = ["chat", "command", "interrupt", "aside", "reply"].includes(b.kind) ? b.kind : "chat";
   const from = String(b.from || "human"), to = String(b.to), body = String(b.body).slice(0, 20000);
   // Does this need an answer? Said explicitly, or a question, or anything from the human or the CEO.
-  const needsReply = b.needsReply !== undefined ? !!b.needsReply : /\?\s*$/.test(body.trim()) || from === "human" || from === "ceo";
+  // (A report to the human is not a question: only a real question, or a sender who says so, waits on them.)
+  const needsReply = b.needsReply !== undefined ? !!b.needsReply : /\?\s*$/.test(body.trim()) || ((from === "human" || from === "ceo") && to !== "human");
   // Teammates going back and forth: warn, then refuse, and point them at the CEO.
   let warning;
   if (from.startsWith("wkr_") && to.startsWith("wkr_") && kind === "chat") {

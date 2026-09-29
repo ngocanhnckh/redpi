@@ -173,9 +173,9 @@ function needsYou() {
     else if (w.needs_human) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_human}` });
     else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
   }
-  // Questions addressed to you that you have not answered yet.
-  // Replies count only when they ask you something back.
-  for (const m of messages.filter((m) => m.recipient === "human" && m.kind !== "system" && m.kind !== "aside" && (m.kind !== "reply" || /\?\s*$/.test(m.body.trim().slice(-300))))) {
+  // Questions addressed to you that you have not answered yet. Only real questions: HQ marks a message as needing a reply when it asks one (or its sender says so);
+  // reports and status updates to you stay on the event board.
+  for (const m of messages.filter((m) => m.recipient === "human" && m.needs_reply && !["system", "aside", "task"].includes(m.kind))) {
     if (!messages.some((r) => r.id > m.id && r.sender === "human" && r.kind !== "system" && r.recipient === m.sender)) items.push({ id: m.sender, level: "amber", text: `${m.senderName} asked you: ${m.body.slice(0, 140)}` });
   }
   return items.slice(0, 8);

@@ -567,6 +567,16 @@ const after = await who(still);
 if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex.tile.x || after.Priya.tile.y !== before.Priya.tile.y) await fail("people moved under reduced motion", { before: before.Alex, after: after.Alex });
 if (errors.length) await fail("console errors", errors);
 
+// (Last, so the extra messages don't change the office scenes above.)
+const qp = await open();
+await qp.waitForSelector("#needs-slot", { state: "attached" });
+// A worker's status report to you is not a question; a question is.
+await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Human: T1 is pushed and back in review, all five findings fixed." });
+await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Should refunds be full-amount only for now?" });
+await qp.waitForFunction(() => /Alex asked you: Should refunds/.test(document.getElementById("needs-slot").textContent));
+if (/Alex asked you: Human: T1 is pushed/.test(await qp.textContent("#needs-slot"))) await fail("a status report should not show as a question in Needs you");
+await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: ids.Alex, body: "Yes, full amount only." });
+await qp.waitForFunction(() => !/Alex asked you/.test(document.getElementById("needs-slot").textContent)).catch(() => fail("answering a question should clear it from Needs you"));
 await browser.close();
 console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO, token use charts, a Screenshots tab with a lightbox, markdown on the event board, tickets from the run page (urgent first, attachments, panel, timeline).");
 process.exit(0);
