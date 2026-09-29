@@ -1,9 +1,10 @@
 // RedPi Office layout generator (original RedPi code, no third-party map data).
 // Builds a room sized for the team: a glass CEO office with a whiteboard, desk pods
 // of four, a files & servers room (where research and builds happen), a glass
-// meeting room (where people talk), a cafeteria, and the entrance with a
-// "needs you" waiting area and the YOU terminal. Returns the furniture list, a
-// walkability grid for pathfinding, and named spots characters walk to.
+// meeting room (where people talk), a cafeteria (where people wait on builds over a
+// coffee), a recreation room (games, gym and reading, for anyone with nothing left to
+// do), and the entrance with a "needs you" waiting area and the YOU terminal. Returns
+// the furniture list, a walkability grid for pathfinding, and named spots.
 
 export const TILE = 16;
 
@@ -13,9 +14,10 @@ export function buildMap(workerCount) {
   const rows = Math.ceil(pods / 3);
   const x0 = 11, y0 = 2;
   const workBottom = y0 + rows * 6;
-  const y1 = Math.max(workBottom + 1, 10);        // lounge (meeting + cafeteria + entrance) starts here
+  const y1 = Math.max(workBottom + 1, 10);        // lounge (meeting + cafeteria) starts here
   const W = Math.max(11 + cols * 8 + 10, 29);     // pods, then the files & servers room on the right
-  const H = y1 + 8;
+  const y2 = y1 + 7;                              // bottom band: entrance on the left, recreation room
+  const H = y2 + 8;
 
   const solid = Array.from({ length: H }, () => new Array(W).fill(false));
   const items = [];
@@ -67,7 +69,7 @@ export function buildMap(workerCount) {
     serverSpots.push({ x: W - 3, y: ry + 2, dir: "up" }, { x: W - 2, y: ry + 2, dir: "up" });
   }
 
-  // Lounge: glass meeting room in the middle, cafeteria on the right, entrance on the left.
+  // Lounge: glass meeting room in the middle, cafeteria on the right.
   const mx = Math.floor(W / 2) - 2, my = y1 + 2;
   // The room leaves the row above the bottom wall open as the corridor to the entrance.
   const meeting = { x: mx - 1, y: y1 + 1, w: 6, h: 4 };
@@ -92,7 +94,30 @@ export function buildMap(workerCount) {
     { x: cx + 1, y: y1 + 2, dir: "down" }, { x: cx + 2, y: y1 + 2, dir: "down" }, { x: cx + 1, y: y1 + 4, dir: "up" },
     { x: cx + 4, y: y1 + 4, dir: "down" }, { x: cx + 5, y: y1 + 4, dir: "down" }, { x: cx + 5, y: y1 + 6, dir: "up" },
   ];
-  add("plant", 1, y1); add("plant", W - 2, H - 2);
+  add("plant", 1, y1); add("plant", W - 2, y2 - 1);
+
+  // Recreation room (bottom band, glass walls): a games corner, a gym and a reading nook.
+  // Everyone with nothing left to do comes here; each spot holds one person.
+  const rx = 10, ry = y2 + 1;
+  const rec = { x: rx, y: ry, w: W - 1 - rx, h: H - 1 - ry };
+  glass("glassH", rx - 1, y2, W - rx, [rx + 4, rx + 10, W - 4]);
+  glass("glassV", rx - 1, ry, H - 1 - ry, [ry + 3]);
+  const gameSpots = [], gymSpots = [], readSpots = [];
+  add("tv", rx + 1, ry, 2, 1);
+  add("couch", rx, ry + 3, 3, 1, { walkable: true });
+  for (let i = 0; i < 3; i++) gameSpots.push({ x: rx + i, y: ry + 3, dir: "up", sit: true, prop: "controller", game: true });
+  for (const tx of [rx + 5, rx + 7]) { add("treadmill", tx, ry + 1, 1, 1, { walkable: true }); gymSpots.push({ x: tx, y: ry + 1, dir: "down", treadmill: true }); }
+  add("weights", rx + 9, ry, 1, 1);
+  for (const tx of [rx + 5, rx + 7]) { add("bench", tx, ry + 4, 1, 1, { walkable: true }); gymSpots.push({ x: tx, y: ry + 4, dir: "down", sit: true, prop: "dumbbell" }); }
+  add("shelf", rx + 11, ry, 3, 1);
+  for (const [dx, dy] of [[11, 2], [13, 2], [12, 4]]) { add("armchair", rx + dx, ry + dy, 1, 1, { walkable: true }); readSpots.push({ x: rx + dx, y: ry + dy, dir: "down", sit: true, prop: "book" }); }
+  // Wider offices get a second couch and more armchairs.
+  for (let ex = rx + 15; ex + 2 < W - 1; ex += 4) {
+    add("armchair", ex + 1, ry + 2, 1, 1, { walkable: true }); readSpots.push({ x: ex + 1, y: ry + 2, dir: "down", sit: true, prop: "book" });
+    add("plant", ex + 2, ry);
+  }
+  add("plant", W - 2, H - 2);
+  const recSpots = [...gameSpots, ...gymSpots, ...readSpots];
   // The YOU terminal: where messages to the human land, next to the entrance.
   add("terminal", 7, H - 3, 1, 1);
   const you = { x: 7, y: H - 3 };
@@ -106,21 +131,21 @@ export function buildMap(workerCount) {
   const inside = (r, x, y) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
   // Wander targets: open floor in the lounge and aisles, away from seats and out of the
   // meeting room, the files room and the "needs you" mat (people go there for a reason).
-  const seatKeys = new Set([...seats, ceoSeat, ...meetingSeats, ...cafeSeats, youSpot].map((s) => `${s.x},${s.y}`));
+  const seatKeys = new Set([...seats, ceoSeat, ...meetingSeats, ...cafeSeats, ...recSpots, youSpot].map((s) => `${s.x},${s.y}`));
   const wander = [];
   for (let y = 2; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
-    if (walkable(x, y) && !seatKeys.has(`${x},${y}`) && (y >= y1 || x >= x0) && !inside(meeting, x, y) && !inside(files, x, y) && !inside(mat, x, y) && x !== W - 9) wander.push({ x, y });
+    if (walkable(x, y) && !seatKeys.has(`${x},${y}`) && (y >= y1 || x >= x0) && !inside(meeting, x, y) && !inside(files, x, y) && !inside(mat, x, y) && !inside(rec, x, y) && x !== W - 9) wander.push({ x, y });
   }
   // Somewhere to stretch the legs near the windows: the aisle row under the top wall.
   const windowSpots = wander.filter((s) => s.y === 2 && s.x < W - 9).map((s) => ({ ...s, dir: "up" }));
 
   return {
     W, H, TILE, items, seats, ceoSeat, meetingSeats, cafeSeats, waitSpots, wander, you, youSpot, door, mat, ceo,
-    files, fileSpots, serverSpots, meeting, windowSpots,
+    files, fileSpots, serverSpots, meeting, windowSpots, rec, recSpots, gameSpots, gymSpots, readSpots,
     coffeeSpot: { x: cx + 6, y: y1 + 1, dir: "up" },
     whiteboard: { x: 2, y: 0, w: 7, h: 2 }, whiteboardSpot: { x: 5, y: 2, dir: "up" },
     entry: { x: door.x, y: H - 2 },
-    lounge: { y: y1 },
+    lounge: { y: y1 }, bottom: { y: y2 },
     width: W, height: H,
     isWalkable: walkable,
   };

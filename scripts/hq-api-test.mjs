@@ -68,7 +68,7 @@ const fakeBin = join(dir, "fakebin");
 mkdirSync(fakeBin);
 writeFileSync(join(fakeBin, "claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n", { mode: 0o755 });
 const PATH_NO_CODEX = [fakeBin, ...(process.env.PATH || "").split(":").filter((d) => !existsSync(join(d, "codex")) && !existsSync(join(d, "opencode")))].join(":");
-proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600" }, stdio: "ignore" });
+proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600", REDPI_HQ_STOP_GRACE_MS: "500", REDPI_HQ_PLAN_NUDGE_MS: "400" }, stdio: "ignore" });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
@@ -149,6 +149,8 @@ if (state.tasks.length !== 4 || state.run.status !== "approved") fail("approval 
 const alex = (await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "backend developer", cwd: "/tmp/demo-project", taskIds: ["T1", "T2"], brief: "Build the API", launchId: "L1" })).body;
 if ((await api("POST", `/api/runs/${runId}/workers`, { name: "Pat", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"] })).status !== 400) fail("a Pi worker was given a Claude Code task");
 const peter = (await api("POST", `/api/runs/${runId}/workers`, { name: "Peter", role: "frontend developer", cwd: "/tmp/demo-project", taskIds: ["T3"], harness: "claude" })).body;
+// Staffing: one person holding most of the critical path is called out to the CEO.
+if (!(peter.warnings || []).some((w) => /Alex owns 2 of 3 critical-path tasks \(10h of 12h\)/.test(w))) fail("critical-path load warning missing", peter.warnings);
 if (peter.harness !== "claude" || peter.harnessName !== "Claude Code") fail("worker harness not stored", peter);
 if ((await api("PUT", `/api/runs/${runId}/harness`, { task: "T3", harness: "pi" })).status !== 409) fail("harness changed after approval");
 if ((await api("POST", `/api/runs/${runId}/workers`, { name: "Alex", role: "x", cwd: "/tmp" })).status !== 409) fail("duplicate worker name allowed");
@@ -224,12 +226,78 @@ if (!(await seen(peter.id, "still own in-progress work")) || !(await seen("ceo",
 await api("POST", `/api/workers/${peter.id}/heartbeat`, { status: "working" });
 if ((await api("GET", `/api/workers/${peter.id}`)).body.worker.parked) fail("activity did not reset the ladder");
 
-for (const id of ["T2", "T3", "T4"]) await api("POST", `/api/runs/${runId}/tasks/${id}`, { status: "done", note: "verified", actor: "ceo" });
+// Independent review can't be skipped: straight to done is refused; through review it closes.
+const skip = await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "done", note: "verified", actor: "ceo" });
+if (skip.status !== 409 || !/move it to review first/.test(skip.body.error)) fail("done without review should be refused", skip);
+for (const id of ["T2", "T3", "T4"]) { await api("POST", `/api/runs/${runId}/tasks/${id}`, { status: "review", note: "ready", actor: "ceo" }); await api("POST", `/api/runs/${runId}/tasks/${id}`, { status: "done", note: "verified", actor: "ceo" }); }
 inbox = (await api("GET", `/api/runs/${runId}/inbox?for=ceo&after=0`)).body;
 if (!inbox.some((m) => m.body.startsWith("All tasks are done"))) fail("CEO not told that all tasks are done");
 
 const list = (await api("GET", "/api/runs")).body;
 if (!list.some((r) => r.id === runId && r.done === 4 && r.workers === 2)) fail("run list counts wrong", list);
+
+// Nothing left: each worker is told once to report and stop.
+if (!(await seen(alex.id, "All your tasks are done")) || !(await seen(peter.id, "All your tasks are done"))) fail("workers with nothing left should be told to report and stop");
+// Reopening a closed task: not by someone who did not close it; the closer or CEO once, with a reason; then only the human.
+let rr = await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "in_progress", actor: alex.id, note: "found a bug" });
+if (rr.status !== 409 || !/closed by CEO\. Only they, the CEO or the human can reopen it/.test(rr.body.error)) fail("the author reopened a task someone else closed", rr);
+if ((await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "in_progress", actor: "ceo" })).status !== 400) fail("reopen without a reason allowed");
+if ((await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "in_progress", actor: "ceo", note: "the retry path is untested" })).status !== 200) fail("the CEO could not reopen once");
+await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "review", note: "retry covered", actor: alex.id }); await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "done", note: "checked", actor: "ceo" });
+rr = await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "review", actor: "ceo", note: "again" });
+if (rr.status !== 409 || !/already been reopened once/.test(rr.body.error)) fail("a second reopen should need the human", rr);
+if ((await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "review", actor: "human", note: "one more look" })).status !== 200) fail("the human could not reopen");
+await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "done", note: "fine", actor: "human" });
+
+// Wake rules: a question needs a reply, a statement does not, unless the sender says so.
+const msg = (body, extra = {}) => api("POST", `/api/runs/${runId}/messages`, { from: alex.id, to: peter.id, body, ...extra });
+const q = (await msg("Which port does the chat UI call?")).body.id, fyi = (await msg("FYI: the API branch is merged.")).body.id, asked = (await msg("Please review my diff.", { needsReply: true })).body.id;
+const flags = Object.fromEntries((await api("GET", `/api/runs/${runId}/inbox?for=${peter.id}&after=0`)).body.filter((m) => [q, fyi, asked].includes(m.id)).map((m) => [m.id, m.needs_reply]));
+if (flags[q] !== 1 || flags[fyi] !== 0 || flags[asked] !== 1) fail("needs_reply flags wrong", flags);
+// Back-and-forth between two teammates: a warning, then refused with a pointer to the CEO.
+let warned = null, refused = null;
+for (let i = 0; i < 40 && !refused; i++) { const r = await msg(`Round ${i}: ok.`); if (r.body.warning && !warned) warned = r.body.warning; if (r.status === 429) refused = r.body.error; }
+if (!/Wrap up/.test(warned || "") || !/send the CEO one message/.test(refused || "")) fail("pair back-and-forth not capped", { warned, refused });
+
+// Token use per model call, from workers and the CEO, summed per person with a timeline.
+await api("POST", `/api/workers/${alex.id}/heartbeat`, { usage: [{ input: 1000, output: 200, cacheRead: 5000, cost: 0.01, model: "m1" }, { input: 10, output: 5 }] });
+await api("POST", `/api/runs/${runId}/ceo-events`, { usage: [{ input: 300, output: 50 }] });
+const uv = (await api("GET", `/api/runs/${runId}`)).body.usage;
+const ua = uv.totals.find((u) => u.worker_id === alex.id), uc = uv.totals.find((u) => u.worker_id === "ceo");
+if (!ua || ua.input !== 1010 || ua.output !== 205 || ua.cacheRead !== 5000 || ua.calls !== 2 || !uc || uc.output !== 50 || !uv.series.length) fail("token usage wrong", uv);
+
+// Screenshots: stored, served to signed-in viewers only, listed, and announced on the event board.
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+const shotId = (await api("POST", `/api/runs/${runId}/screenshots`, { from: peter.id, taskId: "T3", caption: "Chat UI at 390px", data: png })).body.id;
+if (!shotId) fail("screenshot upload failed");
+if ((await api("POST", `/api/runs/${runId}/screenshots`, { from: peter.id, data: Buffer.from("not an image").toString("base64") })).status !== 400) fail("non-image accepted as a screenshot");
+if ((await api("POST", `/api/runs/${runId}/screenshots`, { from: "someone", data: png })).status !== 400) fail("screenshot from outside the run accepted");
+const img = await fetch(`${base}/api/screenshots/${shotId}`, { headers: { authorization: `Bearer ${token}` } });
+if (img.status !== 200 || img.headers.get("content-type") !== "image/png" || Buffer.from(await img.arrayBuffer()).toString("base64") !== png) fail("screenshot not served back");
+if ((await fetch(`${base}/api/screenshots/${shotId}`)).status !== 401) fail("screenshots must need sign-in");
+const sv = (await api("GET", `/api/runs/${runId}`)).body;
+if (sv.screenshots[0]?.caption !== "Chat UI at 390px" || sv.screenshots[0].task_id !== "T3" || !sv.events.some((e) => e.kind === "shot" && /Chat UI at 390px/.test(e.text))) fail("screenshot not listed or announced", sv.screenshots);
+
+// Finishing a run closes the workers: heartbeats answer "stop", and HQ closes any that linger.
+const run3 = (await api("POST", "/api/runs", { projectPath: "/tmp/stop-project", title: "Stop test" })).body.run.id;
+const w3 = (await api("POST", `/api/runs/${run3}/workers`, { name: "Kai", role: "developer", cwd: "/tmp/stop-project", launchId: "K2" })).body;
+const staleHb = (await api("POST", `/api/workers/${w3.id}/heartbeat`, { launchId: "K1", status: "working" })).body;
+if (!staleHb.stale || !/newer launch/.test(staleHb.stop || "")) fail("a stale process should be told to stop", staleHb);
+await api("PATCH", `/api/runs/${run3}`, { status: "done" });
+const hb = (await api("POST", `/api/workers/${w3.id}/heartbeat`, { launchId: "K2", status: "idle" })).body;
+if (!/run is complete/.test(hb.stop || "") || !(await api("GET", `/api/runs/${run3}/inbox?for=${w3.id}&after=0`)).body.some((m) => /Your session is closing/.test(m.body))) fail("workers not asked to close when the run is done", hb);
+let closed = false;
+for (let i = 0; i < 40 && !closed; i++) { await new Promise((r) => setTimeout(r, 150)); const wv = (await api("GET", `/api/workers/${w3.id}`)).body.worker; closed = !wv.alive && wv.status === "stopped"; }
+if (!closed) fail("a worker that did not close was not closed by HQ");
+// Resuming it clears the stop.
+await api("PATCH", `/api/workers/${w3.id}`, { launchId: "K3" });
+if ((await api("POST", `/api/workers/${w3.id}/heartbeat`, { launchId: "K3", status: "working" })).body.stop) fail("a resumed worker was still told to stop");
+
+// A CEO researching too long without a plan gets one nudge.
+const run4 = (await api("POST", "/api/runs", { projectPath: "/tmp/slow-plan", title: "Slow plan" })).body.run.id;
+let nudged = false;
+for (let i = 0; i < 40 && !nudged; i++) { await new Promise((r) => setTimeout(r, 150)); nudged = (await api("GET", `/api/runs/${run4}/inbox?for=ceo&after=0`)).body.filter((m) => /without submitting a plan/.test(m.body)).length === 1; }
+if (!nudged) fail("no planning nudge");
 
 // Home page data: projects with their live team, active ones first.
 await api("POST", "/api/runs", { projectPath: "/tmp/other-project", title: "Other project" });
@@ -282,5 +350,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, projects home, password sign-in, plan review comments, harness per task.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

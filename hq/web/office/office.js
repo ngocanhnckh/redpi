@@ -41,6 +41,15 @@ export function activityKind(act) {
   return "other";
 }
 
+// A tool call still running after this long means the person is waiting on it (a build,
+// docker, a test suite, a background job): they wait in the cafeteria with a coffee.
+const WAIT_AFTER_MS = 20_000;
+export function isWaiting(act, now = Date.now()) {
+  if (!act?.at || act.endedAt || now - act.at < WAIT_AFTER_MS || now - act.at > 6 * 3600_000) return false;
+  const tool = String(act.tool || String(act.text || "").split(":")[0]).toLowerCase();
+  return tool === "bash" || tool === "redpi_job" || /^waiting on/i.test(String(act.text || ""));
+}
+
 function toolIcon(tool) {
   const t = String(tool || "").toLowerCase();
   if (t.startsWith("redplan_")) return "✉";
@@ -165,6 +174,7 @@ class Person {
     this.mood = "ok"; this.glyph = null; this.bubble = new Bubble(); this.cheerT = -1; this.confetti = [];
     this.nextWander = 0; this.mode = null; this.context = null; this.busySince = 0; this.flash = 0;
     this.running = false; this.errand = null; this.claim = null; this.restlessAt = 0; this.dust = []; this.dustT = 0;
+    this.pose = null;   // { prop: "coffee" | "book" | "controller" | "dumbbell", treadmill, game } while at a spot
   }
   goTo(tile, then, { run = false } = {}) {
     this.onArrive = then || null; this.running = run;
@@ -218,7 +228,8 @@ class Person {
     const frames = sceneFrames(this.name, this.role, this.mood);
     const set = this.dir === "up" ? frames.back : frames.front;
     const step = Math.floor(this.frameT * (this.running ? 14 : 8)) % 4;
-    const f = this.walking ? [0, 1, 2, 1][step] : 0;
+    const onTreadmill = this.pose?.treadmill && !this.walking && motionOK();
+    const f = this.walking || onTreadmill ? [0, 1, 2, 1][onTreadmill ? Math.floor(this.frameT * 7) % 4 : step] : 0;
     const hop = this.cheerT >= 0 ? -Math.abs(Math.sin(this.cheerT * 9)) * 5 : this.walking && this.running && step % 2 ? -1 : 0;
     const { x, y } = this.feet();
     const cropH = this.sitting ? SCENE_H - SEAT_CROP : SCENE_H;
@@ -229,7 +240,32 @@ class Person {
     if (this.dir === "left") { ctx.translate(Math.round(x), 0); ctx.scale(-1, 1); ctx.translate(-Math.round(x), 0); }
     ctx.drawImage(set[f], 0, 0, SCENE_W, cropH, Math.round(x - SCENE_W / 2), Math.round(y - SCENE_H + hop), SCENE_W, cropH);
     ctx.restore();
+    if (this.pose?.prop && !this.walking && this.dir !== "up") this.drawProp(ctx, Math.round(x), Math.round(y));
     ctx.globalAlpha = 1;
+  }
+  // What they hold: a coffee (sipped now and then), a book (pages turn), a game
+  // controller (thumbs busy), or dumbbells (curled up and down).
+  drawProp(ctx, x, y) {
+    const t = this.frameT, move = motionOK();
+    const P = (c, px, py, w = 1, h = 1) => { ctx.fillStyle = c; ctx.fillRect(px, py, w, h); };
+    const prop = this.pose.prop;
+    if (prop === "coffee") {
+      const sip = move && (t % 5) > 4.1;
+      const cx = sip ? x + 1 : x + 5, cy = sip ? y - 21 : y - 13;
+      P("#f2ede2", cx, cy, 4, 4); P("#6b3f22", cx, cy, 4, 1); P("#f2ede2", cx + 4, cy + 1, 1, 2);
+      if (!sip && move) { const ph = (t * 0.7) % 1; ctx.globalAlpha *= 0.6 * (1 - ph); P("#d7e2dc", cx + 1 + Math.round(Math.sin(t * 3)), cy - 2 - ph * 5, 1, 2); ctx.globalAlpha = this.alpha; }
+    } else if (prop === "book") {
+      const flip = move && (t % 6) > 5.6;
+      P("#3e7cb8", x - 5, y - 15, 10, 6); P("#f2ede2", x - 4, y - 15, 4, 5); P("#e6dfcf", x, y - 15, 4, 5);
+      P("#9aa39d", x - 3, y - 13, 2, 1); P("#9aa39d", x + 1, y - 13, 2, 1);
+      if (flip) P("#ffffff", x - 1, y - 17, 2, 6);
+    } else if (prop === "controller") {
+      const b = move ? Math.round(Math.sin(t * 9)) : 0;
+      P("#1c1f24", x - 4, y - 13 + b, 8, 3); P("#ff4d5e", x + 2, y - 13 + b, 1, 1); P("#45e3ff", x - 3, y - 12 + b, 1, 1);
+    } else if (prop === "dumbbell") {
+      const up = move ? Math.round((Math.sin(t * 3) + 1) * 4) : 0;
+      for (const sx of [-8, 6]) { P("#8a979e", x + sx, y - 12 - up, 3, 1); P("#111", x + sx - 1, y - 13 - up, 1, 3); P("#111", x + sx + 3, y - 13 - up, 1, 3); }
+    }
   }
   // Name tag, context gauge, status glyph, bubble, confetti: always on top.
   drawOverlay(ctx, t, selected) {
@@ -376,12 +412,13 @@ export class Office {
     this.release(p);
     p.claim = this.claimKey(spot); this.claims.set(p.claim, p.id);
     const e = p.errand = { kind, spot, stay, arrived: false, until: this.t + 40, ...extra };
-    p.sitting = false;
+    p.sitting = false; p.pose = null;
     p.goTo(spot, () => {
       if (p.errand !== e) return;
       e.arrived = true; e.until = this.t + e.stay;
       if (spot.dir) p.dir = spot.dir;
       if (e.sit) p.sit(spot, 0);
+      if (e.pose) p.pose = e.pose;
       e.onArrive?.();
     }, { run: true });
     return true;
@@ -389,17 +426,34 @@ export class Office {
   endErrand(p, goHome = true) {
     const e = p.errand;
     if (!e) return;
-    p.errand = null; this.release(p);
+    p.errand = null; this.release(p); p.pose = null;
     if (e.meeting) e.meeting.members.delete(p.id);
     if (e.partner?.errand?.social && e.partner.errand.social === e.social) this.endErrand(e.partner);
     if (goHome) this.goHome(p);
   }
+  // Hold a spot without an errand (placing people on first load, or with reduced motion),
+  // so nobody else is sent to the same seat.
+  hold(p, spot) {
+    this.release(p);
+    p.claim = this.claimKey(spot); this.claims.set(p.claim, p.id);
+  }
+  // Nothing left to do: the recreation room, a free spot at random (games, gym or a book),
+  // moving on to another now and then. Falls back to the lounge when every spot is taken.
+  goRest(p, fresh = false) {
+    const m = this.map, sp = this.pick(m.recSpots, p);
+    if (!sp) { p.nextWander = this.t + 2 + Math.random() * 4; return; }
+    const pose = { prop: sp.prop, treadmill: !!sp.treadmill, game: !!sp.game };
+    if (this.errand(p, "rec", sp, 25 + Math.random() * 30, { sit: !!sp.sit, pose, onArrive: () => { if (fresh) p.cheer(); } })) return;
+    this.hold(p, sp);
+    p.goTo(sp, () => { p.dir = sp.dir; if (sp.sit) p.sit(sp, 0); p.pose = pose; });
+  }
   // Where a person belongs when not on an errand.
   goHome(p, fresh = false) {
     const m = this.map;
+    if (p.mode !== "rest" && p.claim && !p.errand) this.release(p);
     if (p.id === "ceo") {
       if (p.mode === "board") p.goTo(m.whiteboardSpot, () => { p.dir = "up"; });
-      else if (p.mode === "meeting") p.goTo(m.meetingSeats[0], () => { p.dir = "down"; if (fresh) p.cheer(); });
+      else if (p.mode === "rest") this.goRest(p, fresh);
       else p.goTo(m.ceoSeat, () => { p.sit(m.ceoSeat, 0); p.restlessAt = this.t + 30 + Math.random() * 40; });
       return;
     }
@@ -407,12 +461,20 @@ export class Office {
       const seat = m.seats[p.seatIndex];
       p.goTo(seat, () => { p.sit(seat, 0); p.restlessAt = this.t + 18 + Math.random() * 27; }, { run: !fresh });
     } else if (p.mode === "wait") p.goTo(p.waitSpot, () => { p.dir = "down"; }, { run: true });
+    else if (p.mode === "rest") this.goRest(p, fresh);
     else if (p.mode === "idle") p.nextWander = this.t + 1 + Math.random() * 3;
+  }
+  // Waiting on a long command: a seat in the cafeteria with a coffee until it finishes.
+  goBrew(p) {
+    const sp = this.pick(this.map.cafeSeats, p);
+    if (!sp) return false;
+    const act = p.act;
+    return this.errand(p, "brew", sp, 6 * 3600, { sit: true, pose: { prop: "coffee" }, onArrive: () => p.bubble.show(`☕ waiting on ${String(act?.text || "a command").replace(/^[\w.-]+:\s*/, "").slice(0, 60)}`) });
   }
   // Live tool activity decides where a working person is: the files room while looking
   // things up, the servers while building or testing, their desk while writing code.
   onActivity(p, act) {
-    if (p.errand?.kind === "meeting" || p.errand?.kind === "terminal") return;
+    if (p.errand?.kind === "meeting" || p.errand?.kind === "terminal" || p.errand?.kind === "brew") return;
     const kind = activityKind(act), m = this.map;
     if (kind === "research" || kind === "server") {
       const k = kind === "research" ? "files" : "servers", stay = kind === "research" ? 9 : 8;
@@ -425,7 +487,7 @@ export class Office {
   // Talking happens in the meeting room: the speaker and listeners walk there and sit
   // facing each other, and the speaker's bubble shows the real message.
   meet(sender, listeners, text) {
-    const avail = (p) => p && !p.leaving && ["work", "idle", "desk", "board"].includes(p.mode) && p.errand?.kind !== "terminal";
+    const avail = (p) => p && !p.leaving && ["work", "idle", "rest", "desk", "board"].includes(p.mode) && !["terminal", "brew"].includes(p.errand?.kind);
     if (!avail(sender)) return false;
     const current = sender.errand?.meeting;
     if (current && listeners.every((l) => current.members.has(l.id))) {
@@ -460,7 +522,7 @@ export class Office {
   social() {
     if (this.t < this.nextSocial) return;
     this.nextSocial = this.t + 14 + Math.random() * 20;
-    const idle = [...this.people.values()].filter((p) => p.mode === "idle" && !p.errand && !p.leaving);
+    const idle = [...this.people.values()].filter((p) => p.mode === "idle" && !p.errand && !p.walking && !p.leaving);
     if (idle.length < 2) return;
     const [a, b] = idle.sort(() => Math.random() - 0.5);
     const c = this.map.cafeSeats;
@@ -473,6 +535,12 @@ export class Office {
   // Per frame: finish errands, and don't let anyone sit in one place for too long.
   think(p) {
     const e = p.errand;
+    // Waiting on a long command: off to the cafeteria; back to the desk when it is done.
+    if (p.mode === "work" && p.id !== "ceo") {
+      const waiting = isWaiting(p.act);
+      if (waiting && e?.kind !== "brew" && !["meeting", "terminal"].includes(e?.kind) && !p.walking && motionOK() && !this.placing) { if (this.goBrew(p)) return; }
+      if (!waiting && e?.kind === "brew") { if (p.bubble.state !== "hidden") p.bubble.linger(); this.endErrand(p); return; }
+    }
     if (e) {
       if (this.t >= (e.meeting ? e.meeting.until : e.until)) {
         if (p.bubble.talk) p.bubble.linger();
@@ -482,10 +550,12 @@ export class Office {
     }
     if (p.walking || !motionOK()) return;
     const m = this.map;
-    if (p.mode === "idle" && this.t >= p.nextWander) {
+    if ((p.mode === "idle" || (p.mode === "rest" && !p.claim)) && this.t >= p.nextWander) {
+      if (p.mode === "rest") { this.goRest(p); if (p.errand) return; }
       const r = Math.random();
-      const spot = r < 0.35 ? m.cafeSeats[Math.floor(Math.random() * m.cafeSeats.length)] : r < 0.45 ? m.coffeeSpot : r < 0.55 ? this.pick(m.windowSpots, p) : m.wander[Math.floor(Math.random() * m.wander.length)];
-      if (spot) p.goTo(spot, () => { if (spot.dir) p.dir = spot.dir; });
+      const [list, sit] = r < 0.35 ? [m.cafeSeats, true] : r < 0.45 ? [[m.coffeeSpot], false] : r < 0.55 ? [m.windowSpots, false] : [m.wander, false];
+      const spot = this.pick(list, p);
+      if (spot) this.errand(p, "lounge", spot, 8 + Math.random() * 12, { sit });
       p.nextWander = this.t + 8 + Math.random() * 12;
     }
     // Restless at the desk: a quick trip to the servers, the coffee machine, the
@@ -521,13 +591,13 @@ export class Office {
     // Only people blocked on you queue at the "needs you" mat; blocks on teammates are the team's to clear.
     const blockedBy = new Set(tasks.filter((t) => t.status === "blocked" && (t.blocked_on === "human" || t.blocked_on === undefined)).map((t) => t.worker_id));
 
-    // CEO: whiteboard while planning, desk while leading, meeting table when the run is done.
+    // CEO: whiteboard while planning, desk while leading, the recreation room once the run is done.
     const ceo = this.person("ceo", "CEO", "ceo", m.ceoSeat);
-    const ceoMode = ["planning", "awaiting_approval"].includes(run.status) ? "board" : run.status === "done" ? "meeting" : "desk";
+    const ceoMode = ["planning", "awaiting_approval"].includes(run.status) ? "board" : run.status === "done" ? "rest" : "desk";
     if (ceo.mode !== ceoMode) {
       const was = ceo.mode;
       ceo.mode = ceoMode;
-      if (ceo.errand?.kind !== "meeting") { this.endErrand(ceo, false); this.goHome(ceo, was !== null); }
+      if (ceo.errand?.kind !== "meeting") { this.endErrand(ceo, false); this.goHome(ceo, was !== null && ceoMode === "rest"); }
     }
     ceo.glyph = run.status === "awaiting_approval" ? { text: "?", color: "#ffc94d" } : null;
     if (ceoMode === "board" && run.status === "awaiting_approval") ceo.bubble.show("Plan ready: approve it in HQ", { sticky: true });
@@ -545,7 +615,11 @@ export class Office {
         return;
       }
       const needs = w.needs_human || w.needs_input || w.parked || blockedBy.has(w.id);
-      const mode = needs ? "wait" : w.status === "working" || w.status === "starting" ? "work" : "idle";
+      // Idle with nothing left on the board: the recreation room. Idle with work still open: the lounge.
+      const open = tasks.some((t) => t.worker_id === w.id && t.status !== "done");
+      const rest = run.status === "done" || (tasks.length > 0 && !open);
+      const mode = needs ? "wait" : w.status === "working" || w.status === "starting" ? "work" : rest ? "rest" : "idle";
+      p.act = mode === "work" && w.status === "working" ? w.activity : null;
       if (mode === "work" && w.status === "working" && !p.busySince) p.busySince = now;
       if (mode !== "work" && mode !== "idle") p.busySince = 0;
       p.mood = needs ? "blocked" : mode === "work" ? "working" : "ok";
@@ -565,10 +639,11 @@ export class Office {
         // A meeting in progress finishes first; afterwards they head wherever the new mode says.
         if (p.errand?.kind === "meeting") { /* keep talking */ }
         else if (mode === "work") { this.endErrand(p, false); this.goHome(p, was === null); }
+        else if (mode === "rest") { this.endErrand(p, false); this.goRest(p); }
         else {
           this.endErrand(p, false); p.nextWander = this.t + 4 + Math.random() * 6;
           // Someone already idle when the page opens is found in the lounge, not at the door.
-          if (was === null) { const sp = m.cafeSeats[i % m.cafeSeats.length]; p.goTo(sp, () => { p.dir = sp.dir; }); }
+          if (was === null) { const sp = this.pick(m.cafeSeats, p); if (sp) { this.hold(p, sp); p.goTo(sp, () => { p.dir = sp.dir; p.sit(sp, 0); }); } }
         }
       }
       monitors.set(i, mode === "work" && p.sitting && !p.errand ? "on" : "off");
@@ -659,6 +734,10 @@ export class Office {
           if (atDesk && p.bubble.state === "hidden" && Date.now() - (p.lastActivity || 0) > 8000) p.bubble.show("", { thinking: true });
         }
       }
+      // The TV plays while someone holds a controller; a treadmill runs while someone is on it.
+      const here = [...this.people.values()].filter((p) => p.pose && !p.walking);
+      this.state.gaming = here.some((p) => p.pose.game);
+      this.state.treadmills = new Set(here.filter((p) => p.pose.treadmill).map((p) => `${p.tile.x},${p.tile.y}`));
       this.meetings = this.meetings.filter((mt) => mt.members.size);
       this.state.meetingOn = this.meetings.some((mt) => mt.arrived > 0);
       for (const [id, p] of this.people) if (p.gone) this.people.delete(id);

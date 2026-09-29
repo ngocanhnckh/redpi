@@ -1,6 +1,6 @@
 // Project charts for a RedPlan run, drawn as plain SVG from live HQ data (original
 // RedPi code): burndown with a forecast, cumulative flow, throughput, cycle time,
-// workload per person, status breakdown, and team activity. Everything is rebuilt from
+// workload per person, status breakdown, team activity, and token use (per person and over time). Everything is rebuilt from
 // the task transition log, so the charts are exact and update with every change.
 import { esc } from "/static/hq.js";
 
@@ -265,11 +265,67 @@ function activity(state) {
   return { key: "activity", title: "Team activity", sub, svg: svg(`Team activity: ${sub}`, body, h), legend: "" };
 }
 
+// ---------- token use ----------
+const PEOPLE_COLORS = ["var(--green)", "var(--cyan)", "var(--amber)", "#b995ff", "var(--red)", "#7fd1ae", "#f08bc0", "#9fb3a6"];
+export function tokens(n) { n = Number(n) || 0; return n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)); }
+const PARTS = [["input", "New input", "var(--cyan)"], ["cacheRead", "Cache read", "#b995ff"], ["cacheWrite", "Cache write", "var(--amber)"], ["output", "Output", "var(--green)"]];
+function people(state) {
+  const names = new Map([["ceo", "CEO"], ...state.workers.map((w) => [w.id, w.name])]);
+  return (state.usage?.totals || []).map((u) => ({ ...u, name: names.get(u.worker_id) || u.worker_id, total: u.input + u.output + u.cacheRead + u.cacheWrite })).sort((a, b) => b.total - a.total);
+}
+function tokenUse(state) {
+  const rows = people(state);
+  if (!rows.length) return { key: "tokens", title: "Token use", sub: "Appears as the agents work (reported per model call)", svg: `<div class="chart-empty">No token use reported yet.</div>`, legend: "" };
+  const rowH = 20, L = 76, h = M.t + rows.length * rowH + 8;
+  const x = lin(0, Math.max(1, ...rows.map((r) => r.total)), L, W - M.r - 40);
+  let body = "";
+  rows.forEach((r, i) => {
+    const yy = M.t + i * rowH;
+    body += `<text class="tick" x="${L - 6}" y="${yy + 12}" text-anchor="end">${esc(r.name.length > 11 ? r.name.slice(0, 10) + "…" : r.name)}</text>`;
+    let at = L;
+    for (const [k, label, color] of PARTS) {
+      if (!r[k]) continue;
+      const w = x(r[k]) - L;
+      body += `<rect class="cbar" style="fill:${color}" x="${at}" y="${yy + 3}" width="${Math.max(1, w - 0.5)}" height="${rowH - 7}" rx="2"><title>${esc(r.name)}: ${tokens(r[k])} ${esc(label.toLowerCase())}</title></rect>`;
+      at += w;
+    }
+    body += `<text class="tick" x="${at + 4}" y="${yy + 12}">${tokens(r.total)}</text>`;
+  });
+  const sum = (k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
+  const total = sum("total"), inAll = sum("input") + sum("cacheRead") + sum("cacheWrite"), cost = sum("cost");
+  const sub = `${tokens(total)} tokens in ${sum("calls")} model calls · ${tokens(sum("output"))} output · ${inAll ? Math.round((100 * sum("cacheRead")) / inAll) : 0}% of input from cache${cost > 0 ? ` · $${cost.toFixed(2)}` : ""}`;
+  return { key: "tokens", title: "Token use", sub, svg: svg(`Token use: ${sub}`, body, h), legend: legend(PARTS.map(([k, label, color]) => [label, color, tokens(sum(k))])) };
+}
+function tokenTime(state) {
+  const series = state.usage?.series || [], slot = state.usage?.slot || 5 * MIN;
+  if (!series.length) return { key: "tokens-time", title: "Tokens over time", sub: "Appears as the agents work", svg: `<div class="chart-empty">No token use reported yet.</div>`, legend: "" };
+  const rows = people(state), color = new Map(rows.map((r, i) => [r.worker_id, PEOPLE_COLORS[i % PEOPLE_COLORS.length]]));
+  const now = state.now || Date.now();
+  const t0 = Math.min(...series.map((p) => p.at)), t1 = Math.max(now, t0 + slot);
+  const bySlot = new Map();
+  for (const p of series) { const m = bySlot.get(p.at) || new Map(); m.set(p.worker_id, (m.get(p.worker_id) || 0) + p.tokens); bySlot.set(p.at, m); }
+  const { ticks, max } = yTicks(Math.max(1, ...[...bySlot.values()].map((m) => [...m.values()].reduce((a, b) => a + b, 0))));
+  const x = lin(t0, t1, M.l, W - M.r), y = lin(0, max, H - M.b, M.t);
+  const bw = Math.max(1.5, x(t0 + slot) - x(t0) - 1);
+  let body = frame({ x, y, t0, t1, ticks, yFmt: tokens });
+  for (const [at, m] of bySlot) {
+    let acc = 0;
+    for (const r of rows) {
+      const v = m.get(r.worker_id); if (!v) continue;
+      body += `<rect class="cbar" style="fill:${color.get(r.worker_id)}" x="${x(at)}" y="${y(acc + v)}" width="${bw}" height="${Math.max(0.5, y(acc) - y(acc + v))}"><title>${esc(r.name)}: ${tokens(v)} tokens at ${clock(at, 0)}</title></rect>`;
+      acc += v;
+    }
+  }
+  const last = [...bySlot.entries()].filter(([at]) => now - at < 3600_000).reduce((n, [, m]) => n + [...m.values()].reduce((a, b) => a + b, 0), 0);
+  const sub = `${tokens(last)} tokens in the last hour · ${duration(slot)} bars`;
+  return { key: "tokens-time", title: "Tokens over time", sub, svg: svg(`Tokens over time: ${sub}`, body), legend: legend(rows.map((r) => [r.name, color.get(r.worker_id)])) };
+}
+
 /** Renders every chart into `root` from the run state (call on each live update). */
 export function renderCharts(root, state) {
   if (!state.tasks.length) { root.innerHTML = `<div class="empty">Charts appear once the plan is approved and the board has tasks.</div>`; return; }
   const tl = timeline(state);
-  const charts = [burndown(state, tl), flow(state, tl), throughput(state, tl), cycleTime(state, tl), workload(state), breakdown(state), activity(state)];
+  const charts = [burndown(state, tl), flow(state, tl), throughput(state, tl), cycleTime(state, tl), workload(state), breakdown(state), activity(state), tokenUse(state), tokenTime(state)];
   root.innerHTML = charts.map((c) => `<section class="panel chart" data-chart="${c.key}"><div class="panel-head"><h2>${esc(c.title)}</h2></div>
     <div class="chart-body"><div class="chart-sub">${esc(c.sub)}</div>${c.svg}${c.legend}</div></section>`).join("");
 }

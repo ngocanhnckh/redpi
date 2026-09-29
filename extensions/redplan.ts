@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { secretInput } from "../lib/secret-input.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, networkInterfaces, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -22,8 +22,10 @@ const PROVIDER_STUCK = /rate limit|429|quota|insufficient_quota|weekly limit|ses
 const PKG_ROOT = resolve(typeof __dirname === "string" ? __dirname : process.cwd(), "..");
 const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
-const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run"];
-const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status"];
+const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
+const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status", "redplan_share_screenshot"];
+// Work that has a user interface: those workers check it in a real browser and share screenshots.
+const FRONTEND_RE = /\b(ui|ux|frontend|front-end|web ?app|website|css|html|react|vue|svelte|angular|next\.?js|nuxt|tailwind|page|screen|component|dashboard|layout|visual|browser|mobile|responsive|playwright)\b/i;
 const HARNESS_LIST = ["pi", "claude", "codex", "opencode"];
 const HARNESS_NAME: Record<string, string> = { pi: "Pi", claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 const RUNNER = join(PKG_ROOT, "hq", "runner.mjs");
@@ -231,7 +233,7 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Draw flows: one flowchart per feature the human will use (usually one per story), step by step from the user's action to the result, each step saying where it runs (component and technology), what happens in plain words, and what data moves, with decision steps for the branches that matter (wrong password, not found, timeout, retry). The human reads the flows to confirm the business logic and the tech at each step, so make them concrete and readable: "User types username and password (Browser · Next.js login form)" → "Form posts them over HTTPS to POST /auth/login (NestJS AuthController)" → "Look up the user and compare the password with its bcrypt hash (NestJS AuthService · Postgres users table)" → decision "Match?" → yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'". Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human; finishing the run closes the workers' sessions. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
@@ -240,6 +242,7 @@ async function workerPrompt(): Promise<string> {
   const reviewer = /review|qa|audit/i.test(w.role);
   const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
   const team = d.teammates.map((t: any) => `- ${t.name} (${t.role})${t.current_task ? `: working on ${t.current_task}` : ""}`).join("\n") || "- (just you)";
+  const frontend = FRONTEND_RE.test(`${w.role} ${d.tasks.map((t: any) => t.title).join(" ")} ${d.brief || ""}`);
   const finish = reviewer
     ? "done only after you have checked the exact diff against the task's acceptance criteria and run its tests; otherwise move it back to in_progress and send the author concrete findings."
     : independent
@@ -252,14 +255,17 @@ Teammates:
 ${team}
 How you work:
 1. Move your cards with redplan_update_task: in_progress when you start; ${finish} Blocked needs a note with the reason and what would unblock it, and waitingOn: the teammate who must act (they get the note), "ceo", "external", or "human" only for a decision or access only the human can give. Waiting on a teammate is not the human's problem. If someone else should finish a task, hand it off (handoffTo) with a note on what is done and what is next.
-2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.
+2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Set needsReply when you need an answer or an action; plain updates need none and do not wake a teammate whose work is done. Never send acknowledgements ("thanks", "got it", "agreed") and do not reply to updates that ask nothing. Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.
 3. Messages arrive as user messages starting with [RedPlan …]. Instructions from the human override everything else.
 4. Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge.
 5. Use the exact technologies and APIs in your brief; do not substitute look-alikes.
-6. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
+6. When all your tasks are done, send the CEO one short report (what changed, how you verified it, anything left) and stop: no new work, no re-reviews, no reopening closed tasks. If you think a closed task is wrong, send its reviewer or the CEO the evidence once.
+7. Long commands (docker builds, big test suites, deploys): start them with redpi_job and wait with redpi_job wait, never with sleep loops. If one is slower than expected, investigate (its logs, processes, docker, disk, network) and tell the CEO what you found before waiting more.
 Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why (e.g. "Reading the auth module to see how sessions are stored."), and after it, one sentence on what you found or changed. The human follows these lines live in RedPi HQ.
 
-Team norms: review the exact change, not a description of it. Never close or mark someone else's task on their behalf unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in your task notes or messages so the next person can follow them.`;
+${frontend ? `Frontend work: check what you built in a real browser before moving a card to review. Use Playwright: redpi_browser for quick checks (goto <url>, text, click, console, errors, screenshot <path>) or a Playwright script for whole flows. Load every page your task touches, click through its flows including the failure branches, check the console for errors, and look at it at desktop (1280px) and phone (390px) widths. Take screenshots of the finished result and share them with redplan_share_screenshot (task id and a caption saying what it shows); they appear in HQ's Screenshots tab and the reviewer checks them. redpi_browser screenshots are shared automatically.${reviewer ? " As the reviewer of UI work, look at the shared screenshots and re-check the flows in the browser yourself." : ""}
+
+` : ""}Team norms: review the exact change, not a description of it. Never close or mark someone else's task on their behalf unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in your task notes or messages so the next person can follow them.`;
 }
 
 // Start (or restart) a worker's Pi in tmux. Every launch gets a new launch id so HQ can
@@ -350,6 +356,49 @@ export default function (pi: ExtensionAPI) {
   let openDialogs = 0;
   let beatTimer: NodeJS.Timeout | undefined;
   let beatState: any = {};
+  const pendingUsage: any[] = [];
+  let lastActivity: any = null;
+  const browserShots = new Map<string, string>();   // toolCallId → screenshot path
+  let held: any[] = [];                               // teammate updates waiting for the next busy moment
+  let stopping = false;
+
+  // HQ asked this worker to close (the run is done), or a newer launch replaced it: exit cleanly.
+  function closeWorker(reason: string) {
+    if (stopping || !WORKER_ID) return;
+    stopping = true;
+    latestCtx?.ui?.notify?.(`RedPlan: ${reason} Closing this worker session.`, "info");
+    setTimeout(() => { try { latestCtx?.shutdown?.(); } catch {} setTimeout(() => process.exit(0), 5000).unref?.(); }, 1500);
+  }
+
+  // A worker whose tmux session is gone (closed from outside) exits instead of running on headless.
+  let tmuxWatch: ReturnType<typeof setInterval> | undefined;
+  if (WORKER_ID && process.env.TMUX) {
+    const tmuxArgs = TMUX_SOCKET ? ["-L", TMUX_SOCKET] : [];
+    const name = spawnSync("tmux", [...tmuxArgs, "display-message", "-p", "#{session_name}"], { encoding: "utf8", timeout: 3000 }).stdout?.trim();
+    let misses = 0;
+    if (name) tmuxWatch = setInterval(() => {
+      const ok = spawnSync("tmux", [...tmuxArgs, "has-session", "-t", `=${name}`], { timeout: 3000 }).status === 0;
+      misses = ok ? 0 : misses + 1;
+      if (misses >= 2) closeWorker("This worker's tmux session is gone.");
+    }, 20_000).unref?.();
+  }
+
+  async function shareScreenshot(path: string, taskId: string | undefined, caption: string): Promise<string> {
+    const st = statSync(path);
+    if (!st.isFile()) throw new Error(`${path} is not a file`);
+    if (st.size > 8 * 1024 * 1024) throw new Error("screenshot is larger than 8 MB; take it at a smaller size");
+    const r = await hq("POST", `/api/runs/${runId}/screenshots`, { from: me(), taskId, caption, data: readFileSync(path).toString("base64") });
+    beat({}, { kind: "info", text: `Shared a screenshot${taskId ? ` of ${taskId}` : ""}: ${caption}` });
+    return r.id;
+  }
+
+  // Long commands watched by RedPi (redpi-jobs): alerts and finishes go on the event board, and
+  // while the agent itself waits on a job the office shows it waiting.
+  pi.events.on("redpi:job", (d: any) => {
+    if (!runId || !d?.text) return;
+    if (d.kind === "progress") { if (WORKER_ID && !toolStarts.size && latestCtx?.isIdle?.()) beat({ activity: { text: d.text, tool: "redpi_job", at: d.since || Date.now() } }); return; }
+    beat({}, { kind: "job", text: String(d.text).slice(0, 400) });
+  });
 
   const me = () => (WORKER_ID ? WORKER_ID : "ceo");
   const active = () => !!(runId && (WORKER_ID || runId));
@@ -365,12 +414,12 @@ export default function (pi: ExtensionAPI) {
   function beat(patch: any, event?: { kind: string; text: string; ms?: number; ok?: boolean }) {
     if (!WORKER_ID) {
       // The CEO has no worker record: only its events (tool calls, updates) go to HQ, for the event board.
-      if (!runId || !event) return;
-      pendingEvents.push(event);
+      if (!runId || (!event && !pendingUsage.length)) return;
+      if (event) pendingEvents.push(event);
       if (beatTimer) return;
       beatTimer = setTimeout(async () => {
         beatTimer = undefined;
-        await hq("POST", `/api/runs/${runId}/ceo-events`, { events: pendingEvents.splice(0) }).catch(() => {});
+        await hq("POST", `/api/runs/${runId}/ceo-events`, { events: pendingEvents.splice(0), usage: pendingUsage.splice(0) }).catch(() => {});
       }, 700);
       return;
     }
@@ -379,9 +428,10 @@ export default function (pi: ExtensionAPI) {
     if (beatTimer) return;
     beatTimer = setTimeout(async () => {
       beatTimer = undefined;
-      const body = { ...beatState, launchId: LAUNCH_ID || undefined, events: pendingEvents.splice(0) };
+      const body = { ...beatState, launchId: LAUNCH_ID || undefined, events: pendingEvents.splice(0), usage: pendingUsage.splice(0) };
       beatState = {};
-      await hq("POST", `/api/workers/${WORKER_ID}/heartbeat`, body).catch(() => {});
+      const r = await hq("POST", `/api/workers/${WORKER_ID}/heartbeat`, body).catch(() => null);
+      if (r?.stop) closeWorker(String(r.stop));
     }, 700);
   }
 
@@ -392,7 +442,8 @@ export default function (pi: ExtensionAPI) {
     if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
     if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
     if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
-    return `[RedPlan · message from ${from}]\n${m.body}\n(Reply with redplan_send to "${from === "CEO" ? "ceo" : from}" if needed.)`;
+    if (m.held) return `[RedPlan · update from ${from}, no reply needed]\n${m.body}`;
+    return `[RedPlan · message from ${from}]\n${m.body}\n(${m.needs_reply ? `${from} is waiting for your answer: reply with redplan_send to "${from === "CEO" ? "ceo" : from}".` : `No reply needed unless it changes your work; if it does, reply with redplan_send to "${from === "CEO" ? "ceo" : from}".`})`;
   }
 
   let asideChain: Promise<void> = Promise.resolve();
@@ -458,6 +509,14 @@ export default function (pi: ExtensionAPI) {
       const asides = msgs.filter((m) => m.kind === "aside" && m.sender === "human");
       for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
       msgs = msgs.filter((m) => !asides.includes(m));
+      // Wake rules: everything wakes an idle session except a teammate's update that asks nothing,
+      // sent to a worker whose tasks are all done (it gets those if it has work again).
+      const wakes = (m: any) => m.sender === "human" || m.sender === "ceo" || m.kind !== "chat" || !!m.needs_reply;
+      if (WORKER_ID && latestCtx.isIdle() && !msgs.some(wakes)) {
+        const openWork = await hq("GET", `/api/workers/${WORKER_ID}`).then((d: any) => !!d?.tasks?.some((t: any) => t.status !== "done")).catch(() => true);
+        if (!openWork) { held.push(...msgs.map((m) => ({ ...m, held: true }))); return; }
+      }
+      if (held.length) { msgs = [...held, ...msgs]; held = []; }
       if (!msgs.length) return;
       const urgent = msgs.some((m) => m.kind === "interrupt" || m.sender === "human");
       if (msgs.some((m) => m.kind === "interrupt") && !latestCtx.isIdle()) {
@@ -513,9 +572,11 @@ export default function (pi: ExtensionAPI) {
     if (runId) startPolling();
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event: any) => {
     if (poller) clearInterval(poller);
-    if (WORKER_ID) await hq("POST", `/api/workers/${WORKER_ID}/heartbeat`, { status: "stopped", events: [{ kind: "session", text: "Worker session ended" }] }).catch(() => {});
+    if (tmuxWatch) clearInterval(tmuxWatch);
+    // /reload restarts the extensions in the same live session: the worker is not stopping.
+    if (WORKER_ID && event?.reason !== "reload") await hq("POST", `/api/workers/${WORKER_ID}/heartbeat`, { status: "stopped", events: [{ kind: "session", text: "Worker session ended" }] }).catch(() => {});
   });
 
   pi.on("agent_start", async (_e: any, ctx: any) => { latestCtx = ctx; beat({ status: "working" }); });
@@ -537,6 +598,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", async (event: any) => {
     const m = event.message;
     if (m?.role !== "assistant") return;
+    // Token use per model call, for the Stats tab.
+    const u = m.usage;
+    if (runId && u && (u.input || u.output || u.cacheRead)) { pendingUsage.push({ input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total, model: m.model, at: Date.now() }); beat({}); }
     const said = (Array.isArray(m.content) ? m.content : []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
     if (said) beat({}, { kind: "say", text: said.slice(0, 1500) });
   });
@@ -545,13 +609,22 @@ export default function (pi: ExtensionAPI) {
     const detail = a.command || a.path || a.file_path || a.pattern || a.to || a.taskId || "";
     const line = `${event.toolName}${detail ? `: ${String(detail).split("\n")[0].slice(0, 160)}` : ""}`;
     toolStarts.set(event.toolCallId, { at: Date.now(), line });
-    beat({ activity: { text: line, tool: event.toolName, at: Date.now() } });
+    lastActivity = { text: line, tool: event.toolName, at: Date.now() };
+    beat({ activity: lastActivity });
+    const shot = event.toolName === "redpi_browser" && /^\s*screenshot\s+(\S+)/.exec(String(a.command || ""));
+    if (shot) browserShots.set(event.toolCallId, shot[1].replace(/^["']|["']$/g, ""));
   });
   // One timed event per finished call feeds the dashboard's tool waterfall.
   pi.on("tool_execution_end", async (event: any) => {
     const start = toolStarts.get(event.toolCallId);
     toolStarts.delete(event.toolCallId);
+    // The office shows someone waiting (coffee) only while a long call is still running.
+    if (lastActivity && start && lastActivity.at === start.at) { lastActivity = { ...lastActivity, endedAt: Date.now() }; beat({ activity: lastActivity }); }
     beat({}, { kind: "tool", text: start?.line || event.toolName, ms: start ? Date.now() - start.at : undefined, ok: !event.isError });
+    // Browser screenshots are shared to HQ's Screenshots tab automatically.
+    const shotPath = browserShots.get(event.toolCallId);
+    browserShots.delete(event.toolCallId);
+    if (shotPath && runId && !event.isError) shareScreenshot(resolve(latestCtx?.cwd || process.cwd(), shotPath), undefined, "Browser screenshot").catch(() => {});
   });
   pi.on("turn_end", async (_e: any, ctx: any) => {
     const u = ctx.getContextUsage?.();
@@ -770,7 +843,8 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`tmux failed to start ${name}: ${launched.error}`);
       }
       const attach = `tmux ${TMUX_SOCKET ? `-L ${TMUX_SOCKET} ` : ""}attach -t '=${session}'`;
-      return text(`${name} (${params.role}, ${HARNESS_NAME[harness]}) started on ${params.taskIds.join(", ")} in ${cwd}${branch ? ` [branch ${branch}]` : ""}.\nWatch or join: ${attach}\nDashboard: ${hqUrl(`/runs/${runId}`)}\n${name} receives the brief automatically and will message you with questions and reports.`, { workerId: worker.id, name, session });
+      const warn = (worker.warnings || []).length ? `\nHQ warning: ${worker.warnings.join(" ")}` : "";
+      return text(`${name} (${params.role}, ${HARNESS_NAME[harness]}) started on ${params.taskIds.join(", ")} in ${cwd}${branch ? ` [branch ${branch}]` : ""}.\nWatch or join: ${attach}\nDashboard: ${hqUrl(`/runs/${runId}`)}\n${name} receives the brief automatically and will message you with questions and reports.${warn}`, { workerId: worker.id, name, session });
     },
   } as any);
 
@@ -820,7 +894,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "redplan_send", label: "RedPlan message",
     description: "Send a message to a teammate by name, to the CEO (\"ceo\"), to everyone (\"all\"), or to the human (\"human\", shown in RedPi HQ). It is delivered into their session.",
-    parameters: Type.Object({ to: Type.String({ description: "Teammate name, \"ceo\", \"all\", or \"human\"" }), message: Type.String() }),
+    parameters: Type.Object({
+      to: Type.String({ description: "Teammate name, \"ceo\", \"all\", or \"human\"" }),
+      message: Type.String(),
+      needsReply: Type.Optional(Type.Boolean({ description: "true when you need an answer or an action from them. Plain updates need none: they reach an idle teammate later, without waking them. Questions ending in ? count as needing a reply." })),
+    }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
       const s = await hq("GET", `/api/runs/${runId}`);
@@ -834,8 +912,23 @@ export default function (pi: ExtensionAPI) {
       let to = lower === "ceo" || lower === "all" ? lower : s.workers.find((w: any) => w.name.toLowerCase() === lower || w.id === target)?.id;
       if (!to) throw new Error(`No teammate named "${target}". Team: ${s.workers.map((w: any) => w.name).join(", ") || "(none)"}, or "ceo" / "all".`);
       if (to === me()) throw new Error("That is you.");
-      await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to, kind: "chat", body: params.message });
-      return text(`Sent to ${target}.`);
+      const r = await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to, kind: "chat", body: params.message, ...(params.needsReply !== undefined ? { needsReply: !!params.needsReply } : {}) });
+      return text(`Sent to ${target}.${r?.warning ? `\nHQ: ${r.warning}` : ""}`);
+    },
+  } as any);
+
+  pi.registerTool({
+    name: "redplan_share_screenshot", label: "Share screenshot",
+    description: "Share a screenshot of what you built (a PNG, JPEG or WebP file, e.g. from Playwright or redpi_browser) with the team and the human: it appears in RedPi HQ's Screenshots tab with your caption.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Image file path (relative to your folder or absolute)" }),
+      caption: Type.String({ description: "What it shows, e.g. 'Checkout page at 390px, card declined message'" }),
+      taskId: Type.Optional(Type.String({ description: "The task it belongs to" })),
+    }),
+    async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+      if (!runId) throw new Error("No RedPlan run in this session.");
+      const id = await shareScreenshot(resolve(ctx?.cwd || process.cwd(), params.path), params.taskId, params.caption);
+      return text(`Shared (${id}). It is in HQ's Screenshots tab: ${hqUrl(`/runs/${runId}`)}`);
     },
   } as any);
 

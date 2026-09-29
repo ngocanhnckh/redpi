@@ -96,6 +96,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
 | 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, and the RedPi Playwright browser skill. | None |
 | 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Chromium installs with RedPi (opt out with `REDPI_SKIP_BROWSER=1`). | None |
+| ⏳ | **Job watcher** | Long shell commands (builds, Docker, test suites) are moved to the background after 10 minutes instead of being killed or blocking the agent, with a health report (CPU, disk, network, Docker, errors in the log); the agent is told when they finish or look stuck. | None |
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
@@ -466,7 +467,7 @@ Every task runs on **Pi** by default. On the plan page (Stories & tasks), pick a
 
 - **Pi workers** are full Pi sessions with RedPi, as before.
 - **Claude Code, Codex, and OpenCode workers** run in tmux too, driven by a small RedPi runner through each tool's own headless, resumable mode: `claude -p --resume <session>`, `codex exec resume <thread>`, `opencode run --session <id>`. Each message from HQ becomes one turn of the same session, so HQ always knows whether the worker is busy, and a crashed worker resumes its session. Nothing is written to your Claude, Codex, or OpenCode config.
-- They work with the team through a `redpi-hq` command in their shell (`redpi-hq task T2 in_progress`, `redpi-hq send ceo "…"`, `redpi-hq team`), with the same rules as Pi workers: blocked needs a reason, done needs how it was verified.
+- They work with the team through a `redpi-hq` command in their shell (`redpi-hq task T2 in_progress`, `redpi-hq send ceo "…"`, `redpi-hq send --reply alex "…?"` when an answer is needed, `redpi-hq team`), with the same rules as Pi workers: blocked needs a reason, done needs how it was verified.
 - Everything else is the same: board, team chat, **Ask (btw)** (answered on a fork of the session: `--fork-session`, `codex exec fork`, `opencode run --fork`), **Interrupt + send**, "needs you" on provider trouble, and **Resume**. `tmux attach` shows each turn as it happens, and typing a line there messages the worker. The worker panel also shows the command to open the worker's own session interactively (for example `claude --resume <id>`).
 - They use each tool's own login and default model. Permissions: `REDPI_WORKER_AUTONOMY=full` (default) matches Pi workers (Claude `bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, OpenCode `--auto`); `sandboxed` keeps each tool's rails (Claude `acceptEdits`, Codex `workspace-write`, OpenCode's own rules). Headless runs never stop to ask: anything not allowed fails and the agent adapts.
 
@@ -478,9 +479,9 @@ Every task runs on **Pi** by default. On the plan page (Stories & tasks), pick a
 
 **Home: all projects.** The home page lists every project on the machine as a card: its latest run, progress, blocked tasks, the faces of the workers online, and a red "needs you" count (plans awaiting approval, workers that are stuck or waiting on you). Projects with active runs come first. Switch between **Active** and **All**, or search by name or path. Click a project to see its runs, active first, then open a run.
 
-The run page puts the live view (Office, Board, Timeline or Stats) beside the **event board**, with the team below. It updates in place: the page never jumps while you scroll, and whatever you are typing stays put. The view area keeps one height, so switching views never moves the page.
+The run page puts the live view (Office, Board, Timeline, Stats or Screenshots) beside the **event board**, with the team below. It updates in place: the page never jumps while you scroll, and whatever you are typing stays put. The view area keeps one height, so switching views never moves the page.
 
-Every run has four views. **Auto-play** (the button beside the tabs) fades through them, ten seconds each: handy on a wall screen. It pauses while your pointer is over the view, clicking a tab restarts the ten seconds, and the choice is remembered.
+Every run has five views. **Auto-play** (the button beside the tabs) fades through them, ten seconds each: handy on a wall screen. It pauses while your pointer is over the view, clicking a tab restarts the ten seconds, and the choice is remembered.
 
 **🏢 Office** (default once workers exist): an animated pixel office where the team works.
 
@@ -493,6 +494,8 @@ Every run has four views. **Auto-play** (the button beside the tabs) fades throu
 - Nobody sits still for long: every 20–45 seconds at the desk they take a short trip to the servers, the coffee machine, the window, the files, or a teammate's desk, then go back to typing.
 - Teammates talking meet in the glass **meeting room**. They sit facing each other across the table, the speaker's bubble shows the real message, a reply keeps the meeting going, and the room's screen lights up with the run's progress.
 - Idle people wander the lounge and now and then chat over coffee in pairs. The chat is shown as a `...` bubble, never invented text.
+- Anyone waiting on a long command (a build, Docker, a test suite, a background job) takes a seat in the **café** with a coffee and a "☕ waiting on …" bubble, and goes back to the desk when it finishes.
+- People with nothing left to do (their tasks are done, or the run is finished) head to the **recreation room** at the bottom: the couch and PlayStation, the treadmills and weights, or an armchair with a book. Everyone has their own spot (no two people ever share a seat or a chair, in the meeting room too), and they switch activities now and then.
 - Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`.
 - Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); a worker writing to you walks to the **YOU** terminal to post it.
 - Finishing a task after real work (at least a minute busy) earns confetti.
@@ -512,9 +515,13 @@ Every run has four views. **Auto-play** (the button beside the tabs) fades throu
 - **Workload**: each person's tasks by status
 - **Status**: the board as a donut with % done
 - **Team activity**: tool calls per person in 5-minute cells over the last two hours
+- **Token use**: tokens per person (input, output, cache read, cache write), model calls, the share of input served from cache, and cost when the provider reports it
+- **Tokens over time**: tokens per time slot over the run, by person
+
+**📷 Screenshots**: what the team checked in the browser, newest first, with who took it, the task, and a caption. Workers on frontend tasks are asked to check their pages with Playwright (`redpi_browser`) at desktop (1280 px) and phone (390 px) widths and share what they see (`redplan_share_screenshot`); screenshots from `redpi_browser` are shared automatically, and reviewers re-check the page themselves. Click one to enlarge it, use the arrow keys for the next, Esc to close.
 
 **📣 Event board** (beside the view, same height): everything the team does, live. Filter it:
-- **Updates**: what each agent (and the CEO) says it is doing, in its own words ("Reading the auth module to see how sessions are stored"), plus every task move with who moved it and why. Agents are asked to narrate each meaningful step in one plain sentence.
+- **Updates**: what each agent (and the CEO) says it is doing, in its own words ("Reading the auth module to see how sessions are stored"), plus every task move with who moved it and why, background jobs (⏳ started, finished, looks stuck), and shared screenshots (📷). Agents are asked to narrate each meaningful step in one plain sentence.
 - **Chat**: messages between the team and with you; messages to or from you are marked in red, and agents' answers to you are tagged **reply**.
 - **Tools**: every tool call with its duration; failed calls in red.
 - **All**: everything together.
@@ -541,6 +548,12 @@ The office is drawn on a canvas that pauses when the tab is hidden, respects red
 - **Independent review** (default). Builders move tasks to *review*; a separate reviewer worker checks the exact diff against the acceptance criteria and marks it done or sends it back with findings. Set `"review": "self"` in the plan to let builders close their own tasks.
 - **Parked workers get nudged.** A worker that sits idle while owning in-progress work is nudged after 5 minutes, then the CEO is told, then it lands on your Needs-you strip (`REDPI_HQ_PARK_MS` changes the interval).
 - **Needs input.** Workers report when a rate limit or quota stops them, or when a prompt is waiting in their terminal.
+- **Stop when done.** When a worker's last task is done, HQ tells it to report and stop. When the run is marked done or cancelled, every worker is asked to close; any still running a few minutes later has its tmux session closed (`REDPI_HQ_STOP_GRACE_MS`). A worker whose tmux session is killed exits instead of lingering headless, and a relaunched worker makes the old process stop.
+- **Quiet chat, quick answers.** Messages mark whether they need an answer (`needsReply`, or a message ending in `?`). A teammate's update that asks nothing does not wake a worker whose tasks are all done (it gets it if it has work again); everything else wakes an idle agent at once. Acknowledgements ("thanks", "got it") are discouraged. Two workers messaging each other more than 16 times an hour get a warning; at 30 HQ refuses and asks them to settle it or ask the CEO.
+- **Reviews end.** A task moves to done only from review (the independent reviewer closes it), and a done task can be reopened only by whoever closed it, the CEO, or you, with a note, and only once; after that only you can reopen it.
+- **Staffing warning.** When one person owns more than 60% of the critical path's hours, spawning says so, so the CEO can spread the work.
+- **Planning nudge.** A plan still not submitted 30 minutes into the run gets a nudge to the CEO (`REDPI_HQ_PLAN_NUDGE_MS`).
+- **Long commands don't stall the team.** Workers run builds and Docker through the job watcher (below): nothing blocks for hours, and no one polls with `sleep` loops.
 - **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
 
 **Talk to a worker or the CEO without interrupting them ("btw").** In anyone's panel, **Ask on the side** asks them anything while they keep working: their RedPi answers on the side with a separate call to the same model, reading the live session's conversation, tasks, and current activity (the CEO also reads the whole team and board). The live session never sees the question. If what you write is really an instruction ("please also make it return 202", "use Postgres instead"), the answer says so and passes it into the live session as a steer, without aborting what it is doing. **Send to session** delivers your message into the live session as its next message, and **Interrupt + send** stops the current turn first.
@@ -566,8 +579,32 @@ Workers are real Pi sessions, not subagents: they keep running if the CEO is bus
 | `REDPI_HQ_HOST` | `0.0.0.0` | Interface HQ listens on |
 | `REDPI_HQ_PUBLIC_HOST` | first LAN IPv4 | Host used in printed links |
 | `REDPI_WORKER_ARGS` | (none) | Extra `pi` flags for worker sessions |
+| `REDPI_HQ_STOP_GRACE_MS` | `180000` | How long workers get to close before HQ closes their tmux session |
+| `REDPI_HQ_PLAN_NUDGE_MS` | `1800000` | When to nudge a CEO whose plan is still not submitted |
 
 Requires `tmux` for workers.
+
+---
+
+## ⏳ Long commands: the job watcher
+
+Builds, Docker, and big test suites used to either hit the 10-minute bash timeout (and get killed) or leave the agent sleeping and polling for hours without checking whether anything was still happening. RedPi's `bash` now watches them instead (Linux):
+
+- **Quick commands are unchanged**: same output, same exit codes, and a short `timeout` still kills.
+- **A command still running after 10 minutes, or silent for 5 minutes with nothing happening, is moved to the background, not stopped.** The agent gets the output so far and a health report: elapsed time, the last output and build step, the processes and their CPU and disk I/O, machine CPU, I/O wait, load, memory, free disk (and Docker's disk), network, running containers, error-like lines in the log, and repeated lines. The verdict says whether it looks healthy, slow, or stuck, and what to check next.
+- **The agent is told when it finishes**, or when it starts to look wrong (stuck, errors piling up, out of disk), even while it is doing something else. Nothing is stopped automatically.
+- **`redpi_job`** lets the agent `start` a long command in the background, check `status`, read `logs` (with `grep`), `wait` up to 30 minutes (it returns early when the job finishes or looks wrong), `list` jobs, and `stop` one, which needs a stated reason (what it found in the logs or health).
+- Esc still stops the command and everything it started.
+- In RedPlan, job progress shows on the event board and people waiting on a job sit in the office café.
+
+`/jobs` shows the running jobs with their health reports, and the latest finished ones. Logs are kept in `~/.pi/agent/yitec/jobs/` (the last 40 jobs, up to three days). A new Pi session in the same folder keeps watching jobs an earlier one left running.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REDPI_WATCH` | `1` | `0` turns the watcher off (plain Pi `bash`) |
+| `REDPI_WATCH_CHECKPOINT_SEC` | `600` | When a still-running command moves to the background |
+| `REDPI_WATCH_QUIET_SEC` | `300` | How long a command can be silent with nothing happening before it counts as stuck |
+| `REDPI_JOB_WAKE` | `1` | `0`: finish and warning notices wait for the agent's next turn instead of waking it |
 
 ---
 
@@ -862,6 +899,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 🤖 | `/yitec-agents` | Show subagent/reviewer/planner/executor model policy. |
 | 📚 | `/yitec-memory` | Show local RedPi memory/lessons. |
 | 🕵️ | `/yitec-review` | Run advisor-lite review using reviewer role. |
+| ⏳ | `/jobs` | Background jobs with their health reports. |
 
 ---
 
@@ -987,7 +1025,9 @@ Smoke coverage includes:
 - Office (headless Chromium): real heartbeats and messages move the people. Searching sends a worker to the files room and writing code brings them back to type at the desk; teammates talking meet in the meeting room facing each other, with the real message and reply; messages to you go to the YOU terminal; restless trips from the desk and back; idle coffee chats with no invented text; nobody moves under reduced motion; board cards with long paths stay inside their columns; the event board and worker panel keep your reading place through live updates, with a new-entries button; the event board sits beside the office at the same height with working filters; the page never jumps and keeps half-typed text on updates; the CEO opens from the team list and the office floor and takes messages; the seven project charts show exact numbers from the task history and update live; no sideways scroll on a phone
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
-- HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder
+- HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder; reopen limits, stop when done (and closing workers when the run ends), needs-reply flags and the chat cap between two workers, the critical-path staffing warning, the planning nudge, token use, and screenshots
+- Job watcher (against a stub Pi): quick commands unchanged, short timeouts still kill, long commands move to the background with a report instead of blocking, `wait` returns on finish, finish and stuck messages wake the agent and reach HQ, stop needs a reason, Esc stops the whole job, and errors in the log are called out
+- Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the recreation room, each to their own spot; token use charts; the Screenshots tab with its lightbox
 - Multi-line paste in terminals without bracketed paste: three pasted lines reach the model as one prompt, and a line typed with Enter still submits (real Pi TUI)
 - Decision model (Jev), against a fake Jev and a fake model:
   - `/redpi-decision` setup: the key is masked and saved 0600, and the connection is checked

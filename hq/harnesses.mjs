@@ -76,6 +76,10 @@ export function parseLine(harness, line) {
       if (c.type === "text" && c.text?.trim()) out.push({ text: c.text });
       if (c.type === "tool_use") out.push({ tool: c.name, detail: detailOf(c.input) });
     }
+    // Tokens per model call; the turn's cost comes with the result.
+    const u = e.type === "assistant" && e.message?.usage;
+    if (u) out.push({ usage: { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens, model: e.message?.model } });
+    if (e.type === "result" && Number(e.total_cost_usd) > 0) out.push({ usage: { cost: Number(e.total_cost_usd) } });
     if (e.type === "result") out.push({ done: true, ok: !e.is_error && e.subtype === "success", error: e.is_error || e.subtype !== "success" ? String(e.result || e.subtype || "error") : "", final: typeof e.result === "string" ? e.result : "" });
   } else if (harness === "codex") {
     if (e.type === "thread.started" && e.thread_id) out.push({ session: e.thread_id });
@@ -87,6 +91,7 @@ export function parseLine(harness, line) {
       if (item.type === "mcp_tool_call") out.push({ tool: `${item.server || "mcp"}.${item.tool || "tool"}`, detail: "" });
       if (item.type === "web_search") out.push({ tool: "web_search", detail: item.query || "" });
     }
+    if (e.type === "turn.completed" && e.usage) out.push({ usage: { input: (e.usage.input_tokens || 0) - (e.usage.cached_input_tokens || 0), cacheRead: e.usage.cached_input_tokens, output: e.usage.output_tokens } });
     if (e.type === "turn.completed") out.push({ done: true, ok: true, error: "" });
     if (e.type === "turn.failed") out.push({ done: true, ok: false, error: String(e.error?.message || "turn failed") });
     if (e.type === "error") out.push({ done: true, ok: false, error: String(e.message || "error") });
@@ -94,6 +99,8 @@ export function parseLine(harness, line) {
     if (e.sessionID) out.push({ session: e.sessionID });
     if (e.type === "text" && e.part?.text?.trim()) out.push({ text: e.part.text });
     if (e.type === "tool_use" && e.part?.tool) out.push({ tool: e.part.tool, detail: detailOf(e.part.state?.input) });
+    const tk = e.type === "step_finish" && e.part?.tokens;
+    if (tk) out.push({ usage: { input: tk.input, output: tk.output, cacheRead: tk.cache?.read, cacheWrite: tk.cache?.write, cost: e.part.cost } });
     if (e.type === "error") out.push({ done: true, ok: false, error: String(e.error?.data?.message || e.error?.message || e.error?.name || "error") });
   }
   return out;

@@ -127,6 +127,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS messages_run ON messages (run_id, id);
   CREATE INDEX IF NOT EXISTS transitions_task ON task_transitions (run_id, task_id, id);
   CREATE INDEX IF NOT EXISTS events_worker ON events (worker_id, id);
+  CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, worker_id TEXT NOT NULL, input INTEGER NOT NULL DEFAULT 0,
+    output INTEGER NOT NULL DEFAULT 0, cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, model TEXT, created INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS usage_run ON usage (run_id, created);
+  CREATE TABLE IF NOT EXISTS screenshots (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, worker_id TEXT NOT NULL, task_id TEXT, caption TEXT, file TEXT NOT NULL,
+    mime TEXT NOT NULL, bytes INTEGER NOT NULL, created INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS screenshots_run ON screenshots (run_id, created);
 `);
 
 // Columns added after the first release: ALTER only when missing, so existing hubs upgrade in place.
@@ -136,6 +142,9 @@ for (const [table, col, type] of [
   ["events", "ms", "INTEGER"], ["events", "ok", "INTEGER"],
   ["workers", "harness", "TEXT NOT NULL DEFAULT 'pi'"], ["tasks", "harness", "TEXT NOT NULL DEFAULT 'pi'"],
   ["tasks", "blocked_on", "TEXT"],
+  ["messages", "needs_reply", "INTEGER NOT NULL DEFAULT 0"],
+  ["workers", "stop_requested", "TEXT"], ["workers", "stop_at", "INTEGER"],
+  ["runs", "plan_nudged", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -143,6 +152,13 @@ for (const [table, col, type] of [
 
 // Parked = alive, idle, owns in_progress work, and silent this long. Each ladder step waits this long again.
 const PARK_MS = Number(process.env.REDPI_HQ_PARK_MS || 5 * 60 * 1000);
+// A CEO still researching this long without a plan gets one nudge to submit what it has.
+const PLAN_NUDGE_MS = Number(process.env.REDPI_HQ_PLAN_NUDGE_MS || 30 * 60 * 1000);
+// Workers asked to stop (run done) close themselves; after this long HQ closes their tmux session.
+const STOP_GRACE_MS = Number(process.env.REDPI_HQ_STOP_GRACE_MS || 3 * 60 * 1000);
+// Teammate back-and-forth per pair per hour: a warning at the first number, refused at the second.
+const PAIR_WARN = 16, PAIR_MAX = 30;
+const SHOTS_DIR = join(HQ_DIR, "screenshots");
 
 const now = () => Date.now();
 const shortId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
@@ -175,8 +191,8 @@ function participantName(runId, id) {
   return one("SELECT name FROM workers WHERE id = ? AND run_id = ?", id, runId)?.name || id;
 }
 
-function addMessage(runId, sender, recipient, kind, body) {
-  const r = run("INSERT INTO messages (run_id, sender, recipient, kind, body, created) VALUES (?, ?, ?, ?, ?, ?)", runId, sender, recipient, kind, String(body), now());
+function addMessage(runId, sender, recipient, kind, body, needsReply = false) {
+  const r = run("INSERT INTO messages (run_id, sender, recipient, kind, body, needs_reply, created) VALUES (?, ?, ?, ?, ?, ?, ?)", runId, sender, recipient, kind, String(body), needsReply ? 1 : 0, now());
   touchRun(runId);
   notify(runId, "message");
   return Number(r.lastInsertRowid);
@@ -210,13 +226,20 @@ function runView(runId) {
   // busy tool use never crowds out what people said. The CEO's events use the id "ceo:<run>".
   const who = `(e.worker_id IN (SELECT id FROM workers WHERE run_id = ?) OR e.worker_id = ?)`;
   const events = all(`SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e WHERE ${who} AND e.kind IN ('tool', 'error') ORDER BY e.id DESC LIMIT 250)
-    UNION ALL SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e WHERE ${who} AND e.kind = 'say' ORDER BY e.id DESC LIMIT 200)
+    UNION ALL SELECT * FROM (SELECT e.id, e.worker_id, e.kind, e.text, e.ms, e.ok, e.created FROM events e WHERE ${who} AND e.kind IN ('say', 'job', 'shot') ORDER BY e.id DESC LIMIT 200)
     ORDER BY id`, runId, `ceo:${runId}`, runId, `ceo:${runId}`).map((e) => (e.worker_id === `ceo:${runId}` ? { ...e, worker_id: "ceo" } : e));
   const since = now() - 2 * 3600_000, bucket = 5 * 60_000;
   const activity = all(`SELECT e.worker_id, (e.created / ${bucket}) * ${bucket} AS at, COUNT(*) AS n FROM events e JOIN workers w ON w.id = e.worker_id
     WHERE w.run_id = ? AND e.kind = 'tool' AND e.created >= ? GROUP BY e.worker_id, at ORDER BY at`, runId, since);
   const approvedAt = one("SELECT decided FROM plans WHERE run_id = ? AND status = 'approved' ORDER BY version DESC LIMIT 1", runId)?.decided || null;
-  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, now: now() };
+  // Token use: totals per person, and a timeline in about 120 slots over the run so far.
+  const usageTotals = all(`SELECT worker_id, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cacheRead, SUM(cache_write) AS cacheWrite,
+    SUM(cost) AS cost, COUNT(*) AS calls, MIN(created) AS first, MAX(created) AS last FROM usage WHERE run_id = ? GROUP BY worker_id`, runId);
+  const slot = Math.max(60_000, Math.ceil((now() - r.created) / 120 / 60_000) * 60_000);
+  const usageSeries = all(`SELECT worker_id, (created / ${slot}) * ${slot} AS at, SUM(input + output + cache_read + cache_write) AS tokens, SUM(output) AS output, SUM(cost) AS cost
+    FROM usage WHERE run_id = ? GROUP BY worker_id, at ORDER BY at`, runId);
+  const screenshots = all("SELECT id, worker_id, task_id, caption, mime, bytes, created FROM screenshots WHERE run_id = ? ORDER BY created DESC LIMIT 200", runId);
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, now: now() };
 }
 
 function workerView(w) {
@@ -272,6 +295,34 @@ for (const t of all("SELECT * FROM tasks WHERE status = 'blocked' AND blocked_on
   try { run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", whoMustAct(t.run_id, t, null, t.note), t.run_id, t.id); } catch {}
 }
 
+// Token use per model call, from worker heartbeats and the CEO's events.
+function recordUsage(runId, workerId, list) {
+  for (const u of (Array.isArray(list) ? list : []).slice(0, 100)) {
+    const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
+    run("INSERT INTO usage (run_id, worker_id, input, output, cache_read, cache_write, cost, model, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      runId, workerId, n(u.input), n(u.output), n(u.cacheRead), n(u.cacheWrite), Number.isFinite(Number(u.cost)) ? Number(u.cost) : 0, u.model ? String(u.model).slice(0, 120) : null, Number(u.at) || now());
+  }
+}
+
+// Every worker's own tasks are done: tell it once to report and stop (it is woken again only if asked something).
+function maybeReleaseWorker(runId, workerId) {
+  const w = one("SELECT * FROM workers WHERE id = ? AND run_id = ?", workerId, runId);
+  if (!w || !w.alive) return;
+  const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND worker_id = ? AND status != 'done'", runId, workerId).n;
+  const reviewer = /review|qa|audit/i.test(w.role) && one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status IN ('review', 'in_progress', 'todo', 'blocked')", runId).n > 0;
+  if (open || reviewer) return;
+  addMessage(runId, "human", workerId, "system", "All your tasks are done. If you have not yet, send the CEO a short final report (what changed, how you verified it, anything left), then stop: do not start new work, do not reopen tasks, and do not reply to status updates. You will be woken if someone asks you something.");
+}
+
+// The run is done (or cancelled): ask every worker to close; HQ closes any still open after a grace period.
+function stopWorkers(runId, reason) {
+  for (const w of all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId)) {
+    run("UPDATE workers SET stop_requested = ?, stop_at = ? WHERE id = ?", reason, now(), w.id);
+    addMessage(runId, "human", w.id, "system", `${reason} Your session is closing now. Do not reply to this.`);
+  }
+  notify(runId, "worker");
+}
+
 // ---------- tmux liveness ----------
 function refreshAlive() {
   const workers = all("SELECT id, run_id, tmux, alive FROM workers WHERE tmux IS NOT NULL AND status != 'finished'");
@@ -286,6 +337,27 @@ function refreshAlive() {
   }
 }
 setInterval(refreshAlive, 10000).unref();
+
+// Workers asked to stop that are still open after the grace period: close their tmux session.
+function sweepStops() {
+  for (const w of all("SELECT * FROM workers WHERE alive = 1 AND stop_requested IS NOT NULL AND stop_at < ?", now() - STOP_GRACE_MS)) {
+    if (w.tmux) execFile("tmux", [...TMUX, "kill-session", "-t", `=${w.tmux}`], { timeout: 3000 }, () => {});
+    run("UPDATE workers SET alive = 0, status = 'stopped', updated = ? WHERE id = ?", now(), w.id);
+    notify(w.run_id, "worker");
+  }
+}
+setInterval(sweepStops, Math.min(15000, Math.max(500, STOP_GRACE_MS / 4))).unref();
+
+// A CEO researching for a long time without a plan: one nudge to submit what it has.
+function sweepPlanning() {
+  for (const r of all("SELECT * FROM runs WHERE status = 'planning' AND plan_nudged IS NULL AND created < ?", now() - PLAN_NUDGE_MS)) {
+    if (one("SELECT id FROM plans WHERE run_id = ? LIMIT 1", r.id)) { run("UPDATE runs SET plan_nudged = ? WHERE id = ?", now(), r.id); continue; }
+    const mins = Math.round((now() - r.created) / 60000);
+    addMessage(r.id, "human", "ceo", "system", `You have been researching for ${mins} minutes without submitting a plan. Submit the plan now with what you know (redplan_submit_plan); put open questions under risks, and keep researching only what the plan truly depends on.`);
+    run("UPDATE runs SET plan_nudged = ? WHERE id = ?", now(), r.id);
+  }
+}
+setInterval(sweepPlanning, Math.min(60000, Math.max(500, PLAN_NUDGE_MS / 4))).unref();
 
 // Wake ladder for parked workers: nudge the worker, then tell the CEO, then flag the human.
 function sweepParked() {
@@ -337,10 +409,10 @@ async function whoIs(req, url) {
 const sessionCookie = (value, maxAge) => `redpi_hq_s=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 const safeNext = (n) => (typeof n === "string" && /^\/(?!\/)[\w\-./?=&%]*$/.test(n) ? n : "/");
 
-async function readBody(req) {
+async function readBody(req, limit = 5 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
-  for await (const c of req) { size += c.length; if (size > 5 * 1024 * 1024) throw new Error("body too large"); chunks.push(c); }
+  for await (const c of req) { size += c.length; if (size > limit) throw Object.assign(new Error("body too large"), { status: 413 }); chunks.push(c); }
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
 }
@@ -414,6 +486,7 @@ route("PATCH", "/api/runs/:id", (b, p) => {
   if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
   if (b.status && !RUN_STATUSES.includes(b.status)) throw httpError(400, `status must be one of ${RUN_STATUSES.join(", ")}`);
   if (b.status) touchRun(p.id, b.status);
+  if (b.status === "done" || b.status === "cancelled") stopWorkers(p.id, b.status === "done" ? "The run is complete: all work is finished." : "The run was cancelled.");
   notify(p.id, "run");
   return runView(p.id);
 });
@@ -591,15 +664,32 @@ route("POST", "/api/runs/:id/workers", (b, p) => {
   if (b.brief) addMessage(p.id, "ceo", id, "brief", b.brief);
   touchRun(p.id, "executing");
   notify(p.id, "worker");
-  return workerView(one("SELECT * FROM workers WHERE id = ?", id));
+  return { ...workerView(one("SELECT * FROM workers WHERE id = ?", id)), warnings: loadWarnings(p.id) };
 });
+
+// One person owning most of the critical path makes the whole run wait on them: say so when staffing.
+function loadWarnings(runId) {
+  const plan = planView(one("SELECT * FROM plans WHERE run_id = ? AND status = 'approved' ORDER BY version DESC LIMIT 1", runId));
+  const crit = plan?.schedule?.criticalPath || [];
+  if (crit.length < 3) return [];
+  const hours = (id) => plan.schedule.tasks?.[id]?.hours || 0;
+  const total = crit.reduce((n, id) => n + hours(id), 0) || 1;
+  const owners = new Map();
+  for (const t of all("SELECT id, worker_id FROM tasks WHERE run_id = ?", runId)) if (crit.includes(t.id) && t.worker_id) owners.set(t.worker_id, [...(owners.get(t.worker_id) || []), t.id]);
+  const team = all("SELECT id, name FROM workers WHERE run_id = ?", runId);
+  if (team.length < 2) return [];
+  return [...owners].filter(([, ids]) => ids.reduce((n, id) => n + hours(id), 0) / total > 0.6).map(([wid, ids]) => {
+    const name = team.find((w) => w.id === wid)?.name || wid, h = ids.reduce((n, id) => n + hours(id), 0);
+    return `${name} owns ${ids.length} of ${crit.length} critical-path tasks (${Math.round(h)}h of ${Math.round(total)}h): the run finishes only as fast as ${name} does. Keep ${name} on those alone, give everything else to others, and split any large critical task that has independent parts.`;
+  });
+}
 
 route("PATCH", "/api/workers/:id", (b, p) => {
   const w = one("SELECT * FROM workers WHERE id = ?", p.id);
   if (!w) return notFound();
   if (b.tmux !== undefined) run("UPDATE workers SET tmux = ?, alive = 1, updated = ? WHERE id = ?", b.tmux, now(), p.id);
   // A relaunch gets a new launch id; heartbeats from the previous process are ignored from now on.
-  if (b.launchId) run("UPDATE workers SET launch_id = ?, alive = 1, parked_level = 0, needs_human = NULL, needs_input = NULL, updated = ? WHERE id = ?", String(b.launchId), now(), p.id);
+  if (b.launchId) run("UPDATE workers SET launch_id = ?, alive = 1, parked_level = 0, needs_human = NULL, needs_input = NULL, stop_requested = NULL, stop_at = NULL, status = CASE WHEN status = 'stopped' THEN 'starting' ELSE status END, updated = ? WHERE id = ?", String(b.launchId), now(), p.id);
   if (b.status) run("UPDATE workers SET status = ?, updated = ? WHERE id = ?", String(b.status), now(), p.id);
   notify(w.run_id, "worker");
   return workerView(one("SELECT * FROM workers WHERE id = ?", p.id));
@@ -620,7 +710,7 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   const w = one("SELECT * FROM workers WHERE id = ?", p.id);
   if (!w) return notFound();
   // A heartbeat from an earlier launch (a leftover process) must not make the new launch look alive or idle.
-  if (b.launchId && w.launch_id && b.launchId !== w.launch_id) return { ok: false, stale: true };
+  if (b.launchId && w.launch_id && b.launchId !== w.launch_id) return { ok: false, stale: true, stop: `A newer launch of ${w.name} replaced this process.` };
   run(`UPDATE workers SET status = COALESCE(?, status), current_task = COALESCE(?, current_task), last_message = COALESCE(?, last_message), activity = COALESCE(?, activity),
     session_file = COALESCE(?, session_file), context = COALESCE(?, context), alive = 1, parked_level = 0, parked_at = NULL, needs_human = NULL, updated = ? WHERE id = ?`,
     b.status ?? null, b.currentTask ?? null, b.lastMessage != null ? String(b.lastMessage).slice(0, 8000) : null, b.activity ? JSON.stringify(b.activity) : null,
@@ -630,8 +720,9 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   for (const e of (b.events || []).slice(0, 50)) run("INSERT INTO events (worker_id, kind, text, ms, ok, created) VALUES (?, ?, ?, ?, ?, ?)",
     p.id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", p.id, p.id);
+  recordUsage(w.run_id, p.id, b.usage);
   notify(w.run_id, "worker");
-  return { ok: true };
+  return w.stop_requested ? { ok: true, stop: w.stop_requested } : { ok: true };
 });
 
 // The CEO session's activity: its tool calls and plain-language updates, for the event board.
@@ -641,6 +732,7 @@ route("POST", "/api/runs/:id/ceo-events", (b, p) => {
   for (const e of (b.events || []).slice(0, 50)) run("INSERT INTO events (worker_id, kind, text, ms, ok, created) VALUES (?, ?, ?, ?, ?, ?)",
     id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", id, id);
+  recordUsage(p.id, "ceo", b.usage);
   notify(p.id, "worker");
   return { ok: true };
 });
@@ -672,6 +764,19 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   if (b.status === "blocked" && !note) throw httpError(400, "blocked needs a note with the reason and what would unblock it");
   const blockedOn = b.status === "blocked" ? whoMustAct(p.id, t, b.waitingOn, note) : null;
   if (b.status === "done" && !note) throw httpError(400, "done needs a note saying how the work was verified (tests, build, review)");
+  // Reopening a closed task: only whoever closed it, the CEO, or the human, with a reason, and only once
+  // (after that the human decides). This stops tasks bouncing between done and review.
+  if (t.status === "done" && b.status && b.status !== "done" && actor !== "human") {
+    const closer = one("SELECT actor FROM task_transitions WHERE run_id = ? AND task_id = ? AND to_status = 'done' ORDER BY id DESC LIMIT 1", p.id, p.task)?.actor;
+    if (actor !== "ceo" && actor !== closer) throw httpError(409, `${p.task} was closed by ${participantName(p.id, closer || "ceo")}. Only they, the CEO or the human can reopen it. If something is wrong, send them your evidence (redplan_send) instead.`);
+    if (!note) throw httpError(400, "reopening a closed task needs a note: what is wrong and how you know");
+    const reopened = one("SELECT COUNT(*) AS n FROM task_transitions WHERE run_id = ? AND task_id = ? AND from_status = 'done'", p.id, p.task).n;
+    if (reopened >= 1) throw httpError(409, `${p.task} has already been reopened once. Leave it closed and tell the CEO what is still wrong; the human decides whether it is worth reopening.`);
+  }
+  // Independent review cannot be skipped: work reaches done from review, unless the human decides otherwise.
+  if (b.status === "done" && t.status !== "review" && t.status !== "done" && actor !== "human" && planReview(p.id) === "independent") {
+    throw httpError(409, `${p.task} is ${t.status}: move it to review first; the independent reviewer (or the CEO) marks it done after checking the change`);
+  }
   // Independent review: the author moves work to review; someone else marks it done.
   if (b.status === "done" && t.worker_id && actor === t.worker_id && planReview(p.id) === "independent") {
     throw httpError(409, "this plan uses independent review: move the task to review; the reviewer (or the CEO) marks it done");
@@ -690,7 +795,12 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   }
   if (b.status === "in_progress" && actor.startsWith("wkr_")) run("UPDATE workers SET current_task = ?, updated = ? WHERE id = ?", p.task, now(), actor);
   const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status != 'done'", p.id).n;
-  if (!open && b.status === "done") addMessage(p.id, "human", "ceo", "system", "All tasks are done. Integrate the work (merge worktrees), run the full verification, do a final review, then report to the human.");
+  if (!open && b.status === "done") addMessage(p.id, "human", "ceo", "system", "All tasks are done. Integrate the work (merge worktrees), run the full verification, do a final review, then report to the human and finish the run (redplan_finish_run), which closes the workers' sessions.");
+  if (b.status === "done" && t.status !== "done") {
+    if (t.worker_id) maybeReleaseWorker(p.id, t.worker_id);
+    // A reviewer with nothing left to review is done too.
+    for (const r of all("SELECT id FROM workers WHERE run_id = ? AND id != ?", p.id, t.worker_id || "")) maybeReleaseWorker(p.id, r.id);
+  }
   notify(p.id, "task");
   return one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
 });
@@ -713,8 +823,19 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   // aside: a "btw" side question answered by the worker without touching its live session.
   // reply: an agent's answer to the human's message, posted back when its turn ends.
   const kind = ["chat", "command", "interrupt", "aside", "reply"].includes(b.kind) ? b.kind : "chat";
-  const id = addMessage(p.id, String(b.from || "human"), String(b.to), kind, String(b.body).slice(0, 20000));
-  return { id };
+  const from = String(b.from || "human"), to = String(b.to), body = String(b.body).slice(0, 20000);
+  // Does this need an answer? Said explicitly, or a question, or anything from the human or the CEO.
+  const needsReply = b.needsReply !== undefined ? !!b.needsReply : /\?\s*$/.test(body.trim()) || from === "human" || from === "ceo";
+  // Teammates going back and forth: warn, then refuse, and point them at the CEO.
+  let warning;
+  if (from.startsWith("wkr_") && to.startsWith("wkr_") && kind === "chat") {
+    const n = one(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND kind = 'chat' AND created > ? AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`, p.id, now() - 3600_000, from, to, to, from).n;
+    const other = participantName(p.id, to);
+    if (n >= PAIR_MAX) throw httpError(429, `You and ${other} have exchanged ${n} messages in the last hour. Stop the back-and-forth: send the CEO one message with what you agree on and what is still open, and let the CEO decide.`);
+    if (n >= PAIR_WARN) warning = `You and ${other} have exchanged ${n} messages in the last hour. Wrap up: settle it in this message, or ask the CEO to decide. Do not reply to acknowledgements.`;
+  }
+  const id = addMessage(p.id, from, to, kind, body, needsReply);
+  return warning ? { id, warning } : { id };
 });
 
 route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
@@ -723,6 +844,41 @@ route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
   if (!who) throw httpError(400, "for is required");
   return all(`SELECT * FROM messages WHERE run_id = ? AND id > ? AND sender != ? AND (recipient = ? OR recipient = 'all') AND kind != 'task' ORDER BY id LIMIT 100`, p.id, after, who, who)
     .map((m) => ({ ...m, senderName: participantName(p.id, m.sender) }));
+});
+
+// Screenshots agents take of what they built (the Screenshots tab). PNG, JPEG or WebP, up to 8 MB.
+const SHOT_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp" };
+function sniffImage(buf) {
+  if (buf.length > 8 && buf[0] === 0x89 && buf.toString("ascii", 1, 4) === "PNG") return "png";
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "jpg";
+  if (buf.length > 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "webp";
+  return null;
+}
+route("POST", "/api/runs/:id/screenshots", (b, p) => {
+  if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
+  const from = String(b.from || "");
+  if (from !== "ceo" && !one("SELECT id FROM workers WHERE id = ? AND run_id = ?", from, p.id)) throw httpError(400, "from must be a worker of this run or the CEO");
+  const data = Buffer.from(String(b.data || ""), "base64");
+  const ext = sniffImage(data);
+  if (!ext) throw httpError(400, "data must be a base64 PNG, JPEG or WebP image");
+  if (data.length > 8 * 1024 * 1024) throw httpError(413, "screenshot too large (8 MB max)");
+  const id = shortId("shot");
+  mkdirSync(SHOTS_DIR, { recursive: true, mode: 0o700 });
+  const file = `${id}.${ext}`;
+  writeFileSync(join(SHOTS_DIR, file), data, { mode: 0o600 });
+  const caption = b.caption ? String(b.caption).slice(0, 300) : null, taskId = b.taskId ? String(b.taskId).slice(0, 40) : null;
+  run("INSERT INTO screenshots (id, run_id, worker_id, task_id, caption, file, mime, bytes, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", id, p.id, from, taskId, caption, file, SHOT_TYPES[ext], data.length, now());
+  run("INSERT INTO events (worker_id, kind, text, created) VALUES (?, 'shot', ?, ?)", from === "ceo" ? `ceo:${p.id}` : from, `Shared a screenshot${taskId ? ` of ${taskId}` : ""}${caption ? `: ${caption}` : ""}`, now());
+  notify(p.id, "screenshot");
+  return { id };
+});
+route("GET", "/api/screenshots/:id", (_b, p, res) => {
+  const row = one("SELECT * FROM screenshots WHERE id = ?", p.id);
+  if (!row) return notFound();
+  let data;
+  try { data = readFileSync(join(SHOTS_DIR, basename(row.file))); } catch { return notFound(); }
+  res.writeHead(200, { "content-type": row.mime, "cache-control": "private, max-age=86400", "content-length": data.length });
+  res.end(data);
 });
 
 function httpError(status, message, extra) { const e = new Error(message); e.status = status; e.extra = extra; return e; }
@@ -780,7 +936,7 @@ const server = createServer(async (req, res) => {
       if (r.method !== req.method) continue;
       const m = r.re.exec(url.pathname);
       if (!m) continue;
-      const body = req.method === "GET" ? {} : await readBody(req);
+      const body = req.method === "GET" ? {} : await readBody(req, url.pathname.endsWith("/screenshots") ? 12 * 1024 * 1024 : undefined);
       const out = await r.handler(body, m.groups || {}, res, url);
       if (out !== undefined) send(res, 200, out);
       return;

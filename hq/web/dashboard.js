@@ -12,10 +12,10 @@ let renderedPanel = null;
 let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-const VIEWS = [["office", "Office"], ["board", "Board"], ["timeline", "Timeline"], ["stats", "Stats"]];
+const VIEWS = [["office", "Office"], ["board", "Board"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
 let view = { graph: "stats" }[store.get(`redpi-view-${runId}`)] || store.get(`redpi-view-${runId}`);
 if (view && !VIEWS.some(([k]) => k === view)) view = null;
-// Auto-play: the view fades through Office, Board, Timeline and Stats (10 s each; ?autoplay_ms= for tests).
+// Auto-play: the view fades through Office, Board, Timeline, Stats and Screenshots (10 s each; ?autoplay_ms= for tests).
 const AUTOPLAY_MS = Number(new URLSearchParams(location.search).get("autoplay_ms")) || 10_000;
 let autoplay = store.get("redpi-autoplay") === "1", apTimer = null, apHover = false;
 const viewScroll = {};
@@ -208,7 +208,7 @@ function buildRun() {
         <div class="panel-head"><div class="viewtabs" role="tablist">
           ${VIEWS.map(([k, l]) => `<button role="tab" data-view="${k}">${l}</button>`).join("")}
         </div><span class="muted" id="view-hint" style="font-size:12px"></span>
-        <button type="button" class="autoplay" id="autoplay" aria-pressed="false" title="Fade through Office, Board, Timeline and Stats every ${AUTOPLAY_MS / 1000} seconds (pauses while the pointer is over the view)">Auto-play</button></div>
+        <button type="button" class="autoplay" id="autoplay" aria-pressed="false" title="Fade through Office, Board, Timeline, Stats and Screenshots every ${AUTOPLAY_MS / 1000} seconds (pauses while the pointer is over the view)">Auto-play</button></div>
         <div class="ap-bar" id="ap-bar" hidden><i></i></div>
         <div class="panel-body" id="view-body"></div>
       </div>
@@ -252,8 +252,9 @@ function buildRun() {
   $("draft").onkeydown = (e) => { if (e.key === "Enter") sendDraft(); };
   // One click handler for every region, since regions are re-rendered in place.
   app.onclick = (e) => {
-    const el = e.target.closest("[data-view],[data-filter],[data-person],[data-task],[data-open]");
+    const el = e.target.closest("[data-shot],[data-view],[data-filter],[data-person],[data-task],[data-open]");
     if (!el || !app.contains(el)) return;
+    if (el.dataset.shot) return openShot(el.dataset.shot);
     if (el.dataset.view) { switchView(el.dataset.view, false); scheduleAutoplay(); }
     else if (el.dataset.filter) { feedFilter = el.dataset.filter; store.set("redpi-feed-filter", feedFilter); applyFilter(); feed.scrollTop = feed.scrollHeight; }
     else if (el.dataset.person) select(el.dataset.person);
@@ -270,7 +271,7 @@ function applyFilter() {
 
 function updateTabs() {
   app.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : "live project charts";
+  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : "live project charts";
 }
 
 function renderRun() {
@@ -339,6 +340,7 @@ function bindAutoplay() {
 
 function renderView() {
   const body = $("view-body");
+  if (view !== "shots") delete body.dataset.shotsKey;
   if (view === "office") {
     if (!officeHost) {
       officeHost = document.createElement("div");
@@ -352,11 +354,12 @@ function renderView() {
     return;
   }
   office?.setActive(false);
-  // Board, Timeline and Stats scroll inside the view; each keeps its own place.
+  // Board, Timeline, Stats and Screenshots scroll inside the view; each keeps its own place.
   const top = body.dataset.view === view ? body.scrollTop : viewScroll[view] || 0;
   body.dataset.view = view;
   if (view === "stats") { body.innerHTML = `<div class="charts" id="charts"></div>`; renderCharts($("charts"), state); body.scrollTop = top; return; }
   if (view === "timeline") { renderTimeline(body, state); body.scrollTop = top; return; }
+  if (view === "shots") { renderShots(body); body.scrollTop = top; return; }
   const { tasks, workers, plan } = state;
   const byId = Object.fromEntries(workers.map((w) => [w.id, w]));
   const titles = plan ? Object.fromEntries(plan.plan.stories.flatMap((s) => s.tasks.map((t) => [t.id, { story: s, task: t }]))) : {};
@@ -374,6 +377,69 @@ function renderView() {
   body.scrollTop = top;
 }
 
+// ---------- screenshots: what agents checked in the browser, newest first ----------
+function shotCaption(s) {
+  return `<figcaption><div class="shot-who">${avatar(nameOf(s.worker_id), s.worker_id, "sm")}<button class="linkish" data-person="${esc(s.worker_id)}">${esc(nameOf(s.worker_id))}</button>${s.task_id ? `<button class="linkish mono" data-task="${esc(s.task_id)}">${esc(s.task_id)}</button>` : ""}<span class="when" data-t="${s.created}">${ago(s.created)}</span></div>${s.caption ? `<div class="shot-cap">${esc(s.caption)}</div>` : ""}</figcaption>`;
+}
+function renderShots(body) {
+  const shots = state.screenshots || [];
+  // Only rebuild when the list changes, so images never reload on every update.
+  const key = shots.map((s) => s.id).join(",") + "|" + state.workers.map((w) => w.name).join(",");
+  if (body.dataset.shotsKey === key && body.querySelector(".shots, .empty")) {
+    body.querySelectorAll(".when[data-t]").forEach((w) => { w.textContent = ago(Number(w.dataset.t)); });
+    return;
+  }
+  body.dataset.shotsKey = key;
+  body.innerHTML = shots.length ? `<div class="shots">${shots.map((s) => `<figure class="shot">
+      <button class="shot-img" data-shot="${esc(s.id)}" aria-label="Enlarge screenshot${s.caption ? `: ${esc(s.caption)}` : ""}"><img loading="lazy" decoding="async" alt="${esc(s.caption || `Screenshot by ${nameOf(s.worker_id)}`)}" src="/api/screenshots/${encodeURIComponent(s.id)}"></button>
+      ${shotCaption(s)}</figure>`).join("")}</div>`
+    : `<div class="empty">No screenshots yet. Agents on frontend work check their pages in a browser and share what they see here.</div>`;
+}
+// Lightbox: click to enlarge, arrows for the next and previous one, Esc to close.
+let shotOpen = null;
+function openShot(id) {
+  const shots = state.screenshots || [];
+  const i = shots.findIndex((s) => s.id === id);
+  if (i < 0) return closeShot();
+  const s = shots[i];
+  let lb = document.getElementById("lightbox");
+  if (!lb) {
+    lb = document.createElement("div");
+    lb.id = "lightbox"; lb.className = "lightbox"; lb.setAttribute("role", "dialog"); lb.setAttribute("aria-modal", "true");
+    document.body.append(lb);
+    lb.onclick = (e) => {
+      const b = e.target.closest("[data-nav],[data-person],[data-task],.lb-close");
+      if (b?.dataset.nav) return openShot(b.dataset.nav);
+      if (b?.dataset.person) { closeShot(); return select(b.dataset.person); }
+      if (b?.dataset.task) { closeShot(); openPanel = { task: b.dataset.task }; return renderPanel(); }
+      if (b || e.target === lb) closeShot();
+    };
+  }
+  const prev = shots[i + 1], next = shots[i - 1];
+  shotOpen = id;
+  lb.setAttribute("aria-label", `Screenshot by ${nameOf(s.worker_id)}`);
+  lb.innerHTML = `<figure><img alt="${esc(s.caption || `Screenshot by ${nameOf(s.worker_id)}`)}" src="/api/screenshots/${encodeURIComponent(s.id)}">${shotCaption(s)}</figure>
+    <button class="lb-close btn" aria-label="Close">✕</button>
+    ${prev ? `<button class="lb-nav prev btn" data-nav="${esc(prev.id)}" aria-label="Older screenshot">‹</button>` : ""}${next ? `<button class="lb-nav next btn" data-nav="${esc(next.id)}" aria-label="Newer screenshot">›</button>` : ""}
+    <div class="lb-count faint">${shots.length - i} of ${shots.length}</div>`;
+  lb.querySelector(".lb-close").focus();
+}
+function closeShot() {
+  const lb = document.getElementById("lightbox");
+  if (lb) lb.remove();
+  const back = shotOpen && document.querySelector(`[data-shot="${CSS.escape(shotOpen)}"]`);
+  shotOpen = null;
+  back?.focus();
+}
+document.addEventListener("keydown", (e) => {
+  if (!shotOpen) return;
+  if (e.key === "Escape") { e.stopImmediatePropagation(); closeShot(); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    const b = document.querySelector(`#lightbox .lb-nav.${e.key === "ArrowLeft" ? "prev" : "next"}`);
+    if (b) { e.preventDefault(); openShot(b.dataset.nav); }
+  }
+}, true);
+
 // ---------- event board: chat and actions in one live feed ----------
 function feedItems() {
   const { messages, events = [], transitions = [] } = state;
@@ -383,6 +449,7 @@ function feedItems() {
   for (const tr of transitions) items.push({ key: `t${tr.id}`, t: tr.created, kind: "updates", html: () => moveView(tr) });
   for (const e of events) {
     if (e.kind === "say") items.push({ key: `e${e.id}`, t: e.created, kind: "updates", html: () => sayView(e) });
+    else if (e.kind === "job" || e.kind === "shot") items.push({ key: `e${e.id}`, t: e.created, kind: "updates", html: () => noticeView(e) });
     else if (e.kind === "tool" || e.kind === "error") items.push({ key: `e${e.id}`, t: e.created, kind: "tools", html: () => eventView(e) });
   }
   return items.sort((a, b) => a.t - b.t);
@@ -401,6 +468,16 @@ function sayView(e) {
   const text = String(e.text).replace(/\s+\n/g, "\n").trim();
   return `<div class="upd"><div class="upd-hdr">${avatar(nameOf(e.worker_id), e.worker_id, "sm")}<button class="linkish" data-person="${esc(e.worker_id)}">${esc(nameOf(e.worker_id))}</button><span class="when" data-t="${e.created}">${ago(e.created)}</span></div>
     <div class="upd-body">${esc(text.length > 700 ? text.slice(0, 700) + "…" : text)}</div></div>`;
+}
+
+// Background jobs (long builds, docker) and shared screenshots, as one-line updates.
+function noticeView(e) {
+  const text = String(e.text);
+  const shot = e.kind === "shot" && (state.screenshots || []).find((s) => s.worker_id === e.worker_id && Math.abs(s.created - e.created) < 5000);
+  const bad = e.kind === "job" && /stuck|looks wrong|failed|exit code [1-9]|error/i.test(text);
+  return `<div class="act notice${bad ? " bad" : ""}"><span class="act-icon">${e.kind === "shot" ? "📷" : "⏳"}</span>
+    <span class="act-text"><button class="linkish" data-person="${esc(e.worker_id)}">${esc(nameOf(e.worker_id))}</button> ${esc(text.length > 400 ? text.slice(0, 400) + "…" : text)}${shot ? ` <button class="linkish" data-shot="${esc(shot.id)}">view</button>` : ""}</span>
+    <span class="when" data-t="${e.created}">${ago(e.created)}</span></div>`;
 }
 
 // The latest thing someone said about their work (for team cards and panels).

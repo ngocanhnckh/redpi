@@ -19,6 +19,7 @@ const PALETTES = {
     table: "#4a3626", tableTop: "#5c4330", counter: "#26312c", counterTop: "#33413a", machine: "#2a2f33",
     board: "#dfe9e2", boardFrame: "#6f8a78", ink: "#0e1f15",
     terminal: "#0f1813", mat: "#3a1116", matEdge: "#ff4d5e", text: "#d9f7e3", shadow: "rgba(0,0,0,0.35)",
+    rec: ["#221a2c", "#1d1726"], couch: "#6a2f3a", couchHi: "#86404c", rug: "#2c2140", gym: "#2a3136", gymHi: "#4a5760", metal: "#8a979e", cushion: "#3d5a78", cushionHi: "#4f7396",
   },
   light: {
     wood: ["#e7ddcb", "#e1d5c0", "#d6c8b0"], carpet: ["#dfe8e1", "#d6e1d9"], cafe: ["#eef1ec", "#e3e8e1"],
@@ -34,6 +35,7 @@ const PALETTES = {
     table: "#9b7650", tableTop: "#b08860", counter: "#8fa397", counterTop: "#a9bcb0", machine: "#4a5258",
     board: "#ffffff", boardFrame: "#8aa596", ink: "#102218",
     terminal: "#26302b", mat: "#f3d4d7", matEdge: "#d9303f", text: "#102218", shadow: "rgba(0,0,0,0.18)",
+    rec: ["#efe6f3", "#e8ddee"], couch: "#b8505f", couchHi: "#d06a78", rug: "#dccfe8", gym: "#5b666d", gymHi: "#7d8a92", metal: "#aab5bb", cushion: "#5e86ad", cushionHi: "#7aa1c6",
   },
 };
 
@@ -54,6 +56,9 @@ function floorTile(ctx, pal, kind, tx, ty) {
     px(ctx, pal.archive[0], x, y, TILE, TILE);
     px(ctx, pal.archive[1], x, y, TILE, 1); px(ctx, pal.archive[1], x, y, 1, TILE);
     px(ctx, pal.archive[1], x + 8, y + 8, 1, 1);
+  } else if (kind === "rec") {
+    px(ctx, pal.rec[(tx + ty) % 2], x, y, TILE, TILE);
+    px(ctx, pal.rec[1], x, y + 15, TILE, 1);
   } else if (kind === "meet") {
     px(ctx, pal.meet[0], x, y, TILE, TILE);
     for (let i = 0; i < TILE; i += 4) px(ctx, pal.meet[1], x + ((i / 4) % 2 ? 2 : 0), y + i, TILE - 2, 1);
@@ -73,7 +78,8 @@ export function paintStatic(map, pal) {
   for (let ty = 0; ty < map.H; ty++) for (let tx = 0; tx < map.W; tx++) {
     const cafe = ty >= map.lounge.y && tx >= map.W - 10;
     const work = ty < map.lounge.y && tx >= 11;
-    const kind = inside(map.files, tx, ty) ? "archive" : inside(map.meeting, tx, ty) ? "meet" : cafe ? "cafe" : work ? "carpet" : "wood";
+    const cafe2 = cafe && ty < (map.bottom?.y ?? map.H);
+    const kind = inside(map.files, tx, ty) ? "archive" : inside(map.meeting, tx, ty) ? "meet" : map.rec && inside(map.rec, tx, ty) ? "rec" : cafe2 ? "cafe" : work ? "carpet" : "wood";
     floorTile(ctx, pal, kind, tx, ty);
   }
   // "Needs you" mat by the entrance.
@@ -106,6 +112,12 @@ export function paintStatic(map, pal) {
   ctx.font = "bold 6px monospace"; ctx.textAlign = "center"; ctx.fillStyle = pal.sign;
   ctx.fillText("FILES · SERVERS", (map.files.x + map.files.w / 2) * TILE, 15);
   ctx.fillText("MEETING", (map.meeting.x + map.meeting.w / 2) * TILE, (map.meeting.y + map.meeting.h) * TILE + 15);
+  if (map.rec) {
+    // A rug in front of the TV, and the room's sign on its top glass wall.
+    const g = map.gameSpots;
+    if (g?.length) px(ctx, pal.rug, g[0].x * TILE - 2, (g[0].y - 2) * TILE + 4, g.length * TILE + 4, TILE * 2 - 4);
+    ctx.fillStyle = pal.sign; ctx.fillText("RECREATION", (map.rec.x + map.rec.w - 5) * TILE, map.rec.y * TILE - 5);
+  }
 
   // Flat things characters never walk behind: chairs, glass walls, whiteboard frame.
   for (const it of map.items) {
@@ -119,6 +131,25 @@ export function paintStatic(map, pal) {
       px(ctx, pal.chair, x + 4, y + 2, 8, 9);
       px(ctx, pal.chairSeat, x + 4, y + 9, 8, 4);
       px(ctx, pal.chair, x + 5, y + 13, 1, 2); px(ctx, pal.chair, x + 10, y + 13, 1, 2);
+    } else if (it.type === "couch") {
+      // Seen from behind (people sit facing the TV): cushions, then the backrest toward the viewer.
+      px(ctx, pal.shadow, x + 1, y + 14, w - 2, 2);
+      px(ctx, pal.couchHi, x + 1, y + 3, w - 2, 5);
+      for (let i = 1; i < it.w; i++) px(ctx, pal.couch, x + i * TILE, y + 3, 1, 5);
+      px(ctx, pal.couch, x, y + 7, w, 7);
+      px(ctx, pal.couchHi, x, y + 7, w, 1);
+      px(ctx, pal.couch, x - 1, y + 2, 3, 12); px(ctx, pal.couch, x + w - 2, y + 2, 3, 12);
+    } else if (it.type === "armchair") {
+      px(ctx, pal.shadow, x + 2, y + 13, 12, 3);
+      px(ctx, pal.cushion, x + 2, y, 12, 9);
+      px(ctx, pal.cushionHi, x + 3, y + 1, 10, 2);
+      px(ctx, pal.cushionHi, x + 3, y + 9, 10, 4);
+      px(ctx, pal.cushion, x + 1, y + 5, 3, 9); px(ctx, pal.cushion, x + 12, y + 5, 3, 9);
+    } else if (it.type === "bench") {
+      px(ctx, pal.shadow, x + 2, y + 13, 12, 3);
+      px(ctx, pal.gymHi, x + 2, y + 7, 12, 4);
+      px(ctx, pal.gym, x + 2, y + 11, 12, 1);
+      px(ctx, pal.metal, x + 4, y + 12, 1, 3); px(ctx, pal.metal, x + 11, y + 12, 1, 3);
     } else if (it.type === "glassV" || it.type === "glassH") {
       const v = it.type === "glassV";
       for (let i = 0; i < Math.max(it.w, it.h); i++) {
@@ -178,7 +209,7 @@ export function drawDynamic(ctx, map, pal, t, s) {
 }
 
 /** Furniture characters can stand behind: drawn depth-sorted with the people. */
-export const SORTED = new Set(["desk", "table", "cafeTable", "plant", "rack", "terminal", "coffee", "counter", "shelf", "screen"]);
+export const SORTED = new Set(["desk", "table", "cafeTable", "plant", "rack", "terminal", "coffee", "counter", "shelf", "screen", "tv", "treadmill", "weights"]);
 
 export function drawItem(ctx, pal, it, t, s) {
   const x = it.x * TILE, y = it.y * TILE, w = it.w * TILE, h = it.h * TILE;
@@ -259,6 +290,33 @@ export function drawItem(ctx, pal, it, t, s) {
       px(ctx, "#d7e2dc", x + 7 + Math.round(Math.sin((t + i) * 3)), y + 6 - ph * 10, 2, 2);
       ctx.globalAlpha = 1;
     }
+  } else if (it.type === "tv") {
+    // A TV on a low stand with a console; a game plays while someone holds a controller.
+    px(ctx, pal.shadow, x + 1, y + 13, w - 2, 3);
+    px(ctx, pal.deskEdge, x + 2, y + 9, w - 4, 5);
+    px(ctx, pal.bezel, x + 10, y + 10, 8, 3); px(ctx, pal.ledG, x + 16, y + 11, 1, 1);
+    px(ctx, pal.bezel, x, y - 8, w, 16);
+    const on = s.gaming;
+    px(ctx, on ? "#0a1830" : pal.screenOff, x + 1, y - 7, w - 2, 13);
+    if (on) {
+      const f = Math.floor(t * 6);
+      px(ctx, "#3dff8f", x + 3, y + 2, w - 6, 1);                                   // ground
+      px(ctx, "#ffc94d", x + 4 + (f % 18), y - 1 - (f % 6 < 3 ? f % 3 : 3 - (f % 3)), 3, 3);   // the player, jumping
+      px(ctx, "#ff4d5e", x + w - 6 - ((f * 2) % 20), y - 1, 2, 3);                 // an enemy
+      for (let i = 0; i < 3; i++) px(ctx, "#45e3ff", x + 3 + ((i * 11 + f) % (w - 6)), y - 5 + i, 1, 1);
+    }
+  } else if (it.type === "treadmill") {
+    px(ctx, pal.shadow, x + 1, y + 13, 14, 3);
+    px(ctx, pal.gym, x + 2, y + 2, 12, 12);                                          // deck
+    px(ctx, "#111", x + 3, y + 3, 10, 10);                                           // belt
+    const run = s.treadmills?.has(`${it.x},${it.y}`);
+    for (let i = 0; i < 3; i++) px(ctx, pal.gymHi, x + 3, y + 3 + ((i * 4 + (run ? Math.floor(t * 12) : 0)) % 10), 10, 1);
+    px(ctx, pal.metal, x + 2, y - 8, 1, 11); px(ctx, pal.metal, x + 13, y - 8, 1, 11);   // rails
+    px(ctx, pal.gym, x + 3, y - 10, 10, 4); px(ctx, run ? pal.ledG : pal.screenOff, x + 6, y - 9, 4, 2);   // console
+  } else if (it.type === "weights") {
+    px(ctx, pal.shadow, x + 1, y + 13, 14, 3);
+    px(ctx, pal.gym, x + 2, y - 6, 12, 20);
+    for (let i = 0; i < 3; i++) { px(ctx, pal.metal, x + 3, y - 3 + i * 6, 10, 1); px(ctx, "#111", x + 3, y - 5 + i * 6, 3, 3); px(ctx, "#111", x + 10, y - 5 + i * 6, 3, 3); }
   } else if (it.type === "terminal") {
     px(ctx, pal.shadow, x + 2, y + 13, 12, 3);
     px(ctx, pal.terminal, x + 3, y + 1, 10, 13);

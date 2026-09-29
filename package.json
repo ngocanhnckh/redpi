@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "smoke": "node scripts/hq-api-test.mjs && node scripts/plan-review-ui-test.mjs && node scripts/office-ui-test.mjs && node scripts/harness-runner-test.mjs && node --no-warnings scripts/paste-burst-test.mjs && node --no-warnings scripts/jev-test.mjs && ./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh && ./scripts/redplan-smoke-test.sh",
+    "smoke": "node scripts/hq-api-test.mjs && node scripts/plan-review-ui-test.mjs && node scripts/office-ui-test.mjs && node scripts/harness-runner-test.mjs && node --no-warnings scripts/paste-burst-test.mjs && node --no-warnings scripts/jev-test.mjs && node --no-warnings scripts/jobs-test.mjs && ./scripts/smoke-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh && ./scripts/redplan-smoke-test.sh",
     "smoke:hq": "node scripts/hq-api-test.mjs",
     "smoke:review": "node scripts/plan-review-ui-test.mjs",
     "smoke:office": "node scripts/office-ui-test.mjs",
@@ -27,7 +27,7 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions/yitec-model-router.ts", "./extensions/redplan.ts"],
+    "extensions": ["./extensions/yitec-model-router.ts", "./extensions/redplan.ts", "./extensions/redpi-jobs.ts"],
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]

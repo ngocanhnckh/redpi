@@ -20,7 +20,9 @@ const USAGE = `redpi-hq — your RedPlan board and team chat
   redpi-hq task <id> blocked --on <who> <note> who must act: a teammate's name, ceo, external, or human
         blocked needs a note (reason); done needs a note (how you verified it)
   redpi-hq task <id> --handoff <name> <note>   hand a task to a teammate
-  redpi-hq send <name|ceo|all> <message>       message a teammate, the CEO, or everyone`;
+  redpi-hq send <name|ceo|all> [--reply] <message>
+                                               message a teammate, the CEO, or everyone (--reply: you need an answer;
+                                               plain updates do not wake an idle teammate)`;
 
 function die(msg) { console.error(msg); process.exit(1); }
 
@@ -67,14 +69,15 @@ if (cmd === "status") {
   const t = await hq("POST", `/api/runs/${RUN}/tasks/${encodeURIComponent(id)}`, { status, note: note || undefined, handoffTo, waitingOn, actor: ME, ...(status === "in_progress" ? { workerId: ME } : {}) });
   console.log(handoffTo ? `${t.id} handed to ${handoffTo}.` : `${t.id} is now ${t.status}.`);
 } else if (cmd === "send") {
-  const [to, ...words] = rest;
-  const message = words.join(" ").trim();
+  const [to, ...words0] = rest;
+  const needsReply = words0[0] === "--reply" ? true : undefined;
+  const message = (needsReply ? words0.slice(1) : words0).join(" ").trim();
   if (!to || !message) die("redpi-hq: send <name|ceo|all> <message>");
   const s = await hq("GET", `/api/runs/${RUN}`);
   const lower = to.toLowerCase();
   const target = lower === "ceo" || lower === "all" ? lower : s.workers.find((w) => w.name.toLowerCase() === lower || w.id === to)?.id;
   if (!target) die(`redpi-hq: no teammate named "${to}". Team: ${s.workers.map((w) => w.name).join(", ")}, or "ceo" / "all".`);
   if (target === ME) die("redpi-hq: that is you.");
-  await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: target, kind: "chat", body: message });
-  console.log(`Sent to ${to}.`);
+  const r = await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: target, kind: "chat", body: message, ...(needsReply ? { needsReply } : {}) });
+  console.log(`Sent to ${to}.${r.warning ? `\nHQ: ${r.warning}` : ""}`);
 } else die(USAGE);

@@ -57,17 +57,18 @@ async function hq(method, path, body) {
   if (!res.ok) throw new Error(data.error || `HQ ${res.status}`);
   return data;
 }
-let beatState = {}, beatEvents = [], beatTimer;
+let beatState = {}, beatEvents = [], beatUsage = [], beatTimer, lastActivity = null;
 function beat(patch, event) {
   beatState = { ...beatState, ...patch };
   if (event) beatEvents.push(event);
   if (beatTimer) return;
   beatTimer = setTimeout(async () => {
     beatTimer = undefined;
-    const body = { ...beatState, launchId: LAUNCH, events: beatEvents.splice(0) };
+    const body = { ...beatState, launchId: LAUNCH, events: beatEvents.splice(0), usage: beatUsage.splice(0) };
     beatState = {};
     const r = await hq("POST", `/api/workers/${ME}/heartbeat`, body).catch(() => null);
     if (r?.stale) { say(dim("A newer launch of this worker took over; exiting.")); shutdown(0); }
+    else if (r?.stop) { say(dim(`${r.stop} Closing this worker.`)); shutdown(0); }
   }, 400);
 }
 
@@ -94,9 +95,9 @@ ${d.teammates.map((t) => `- ${t.name} (${t.role})`).join("\n") || "- (just you)"
 Use the \`redpi-hq\` command in your shell to work with the team (run \`redpi-hq help\`):
 - \`redpi-hq task <id> in_progress\` when you start a task; \`redpi-hq task <id> ${reviewer ? "done" : independent ? "review" : "done"} "<how you verified it>"\` — ${finish}.
 - \`redpi-hq task <id> blocked --on <teammate|ceo|external|human> "<reason and what would unblock it>"\` (the blocker goes to whoever must act; use human only for a decision or access only the human can give); \`redpi-hq task <id> --handoff <name> "<what is done, what is next>"\`.
-- \`redpi-hq send <name> "<message>"\` to talk to a teammate, \`redpi-hq send ceo "<message>"\` for decisions outside your tasks or when blocked. \`redpi-hq team\` / \`redpi-hq status\` show the team and board.
+- \`redpi-hq send <name> "<message>"\` to talk to a teammate (add \`--reply\` when you need an answer; plain updates need none, and never send acknowledgements or reply to updates that ask nothing), \`redpi-hq send ceo "<message>"\` for decisions outside your tasks or when blocked. \`redpi-hq team\` / \`redpi-hq status\` show the team and board.
 Messages from the CEO, teammates, and the human arrive as your next prompt, starting with [RedPlan …]. Instructions from the human override everything else.
-Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge. Use the exact technologies and APIs in your brief. When all your tasks are done, send the CEO a short report (what changed, how you verified it, anything left) and stop.
+Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge. Use the exact technologies and APIs in your brief. When all your tasks are done, send the CEO one short report (what changed, how you verified it, anything left) and stop: no new work, no re-reviews, no reopening closed tasks. Run long commands (docker builds, big test suites) in the background and check their logs and progress; never wait on them with sleep loops.
 Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why, and after it what you found or changed. The human follows these lines live in RedPi HQ.
 Team norms: review the exact change, not a description of it. Never mark someone else's task unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in task notes or messages.`;
 }
@@ -107,7 +108,7 @@ function format(m) {
   if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
   if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
   if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
-  return `[RedPlan · message from ${from}]\n${m.body}\n(Reply with: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>")`;
+  return `[RedPlan · message from ${from}]\n${m.body}\n(${m.needs_reply ? `${from} is waiting for your answer: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>"` : `No reply needed unless it changes your work (then: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>")`})`;
 }
 
 const ASIDE = (name) => `[Side question from the human, answered on a copy of your session: your live work does not see this exchange.]
@@ -171,10 +172,16 @@ async function startTurn(msgs) {
     onEvent(ev) {
       if (ev.session && ev.session !== state.session) { state.session = ev.session; save(); beat({ sessionFile: ev.session }); }
       if (ev.session && !state.started) { state.started = true; save(); beat({ sessionFile: state.session }); }
+      if (ev.usage) { beatUsage.push({ ...ev.usage, at: Date.now() }); beat({}); }
       if (ev.tool) {
         const line = `${ev.tool}${ev.detail ? `: ${ev.detail.slice(0, 160)}` : ""}`;
         say(`  ${green("▸")} ${line}`);
-        beat({ activity: { text: line, tool: ev.tool, at: Date.now() } }, { kind: "tool", text: line });
+        lastActivity = { text: line, tool: /^(shell|bash)$/i.test(ev.tool) ? "bash" : ev.tool, at: Date.now() };
+        beat({ activity: lastActivity }, { kind: "tool", text: line });
+      } else if ((ev.text || ev.done) && lastActivity && !lastActivity.endedAt) {
+        // Anything after a tool call means it has finished (the office stops showing a wait).
+        lastActivity = { ...lastActivity, endedAt: Date.now() };
+        beat({ activity: lastActivity });
       }
       if (ev.text) { say(ev.text); beat({}, { kind: "say", text: ev.text.trim().slice(0, 1500) }); }
     },
