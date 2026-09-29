@@ -50,6 +50,8 @@ const legend = (items) => `<div class="chart-legend">${items.map(([label, color,
 function sizes(state) {
   const est = new Map();
   for (const s of state.plan?.plan?.stories || []) for (const t of s.tasks || []) if (Number(t.estimateHours) > 0) est.set(t.id, Number(t.estimateHours));
+  // Tickets: their own estimate, or an hour when the human gave none (so burndown stays in hours).
+  for (const t of state.tasks) if (t.kind === "ticket") est.set(t.id, Number(t.hours) > 0 ? Number(t.hours) : 1);
   const hours = state.tasks.length > 0 && state.tasks.every((t) => est.has(t.id));
   return { hours, of: (id) => (hours ? est.get(id) : 1) };
 }

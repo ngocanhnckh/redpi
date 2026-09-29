@@ -22,7 +22,7 @@ const PROVIDER_STUCK = /rate limit|429|quota|insufficient_quota|weekly limit|ses
 const PKG_ROOT = resolve(typeof __dirname === "string" ? __dirname : process.cwd(), "..");
 const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
-const CEO_TOOLS = ["redplan_submit_plan", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
+const CEO_TOOLS = ["redplan_submit_plan", "redplan_add_ticket", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
 const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status", "redplan_share_screenshot"];
 // Work that has a user interface: those workers check it in a real browser and share screenshots.
 const FRONTEND_RE = /\b(ui|ux|frontend|front-end|web ?app|website|css|html|react|vue|svelte|angular|next\.?js|nuxt|tailwind|page|screen|component|dashboard|layout|visual|browser|mobile|responsive|playwright)\b/i;
@@ -227,7 +227,11 @@ const PlanSchema = Type.Object({
 // ---------- prompts ----------
 const CEO_PROTOCOL = `RedPlan mode is ON. You are the CEO session: you plan with the human, get the plan approved in RedPi HQ, then lead a team of named worker sessions.
 
-Phase 1 — Intake. Judge whether the request is deterministic: a clear spec or prototype with the users, scope, constraints, key technologies, and success criteria decided. If it is, say so in one line and skip to Phase 2. If not, load the grill-me skill and follow it: ask the human one focused question at a time until those decisions are made. Never guess a decision the human should make.
+Two kinds of work come to you:
+- A /redplan request (the human typed /redplan): follow Phases 1–4 below.
+- Everything else is a quick ticket: any new request the human types here without /redplan, sends you as a message in HQ, or files as a ticket in HQ. A ticket needs no plan, no approval, no plan review and no interview. Put a request typed here or sent as a message on the board with redplan_add_ticket (tickets filed in HQ are already there, with the human's description and attachments), then get it done at once: give it to a free worker (redplan_update_task assignTo, with a brief), spawn a new worker for it if nobody is free (redplan_spawn_worker with the ticket id; allowed without an approved plan), or do it yourself if it is small and you are free. Urgent tickets come before everything else: act immediately, pull in a free worker, and spawn another worker rather than wait. Make reasonable assumptions and state them; ask the human only if the work truly cannot be done otherwise. Tell the human in one line who is on it. Comments on a plan that is still under review are plan feedback, not tickets. Tickets follow the same review and done rules as plan tasks, and a new ticket reopens a finished run.
+
+Phase 1 — Intake (only for a /redplan request). Judge whether the request is deterministic: a clear spec or prototype with the users, scope, constraints, key technologies, and success criteria decided. If it is, say so in one line and skip to Phase 2. If not, load the grill-me skill and follow it: ask the human one focused question at a time until those decisions are made. Never guess a decision the human should make.
 
 Phase 2 — Verify technology. For every library, framework, model, or service the human named or you choose, confirm the exact package and API from a primary source before planning with it: official docs, the package registry (e.g. \`curl -s https://pypi.org/pypi/<pkg>/json\`, \`npm view <pkg> version description\`), or the repository README (redpi_browser or curl). Record the package, what you will use from it, the source URL, and the fact you confirmed. Take names literally: "Deep Agents from LangChain" is the \`deepagents\` package and its create_deep_agent API, not an agent that thinks deeply; never substitute a similar-sounding concept. If you cannot verify something, set verified=false and add it to risks.
 
@@ -240,7 +244,7 @@ async function workerPrompt(): Promise<string> {
   const w = d.worker;
   const independent = d.review !== "self";
   const reviewer = /review|qa|audit/i.test(w.role);
-  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
+  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]${t.kind === "ticket" ? ` (ticket from the human, ${t.priority === "urgent" ? "URGENT: before anything else" : `${t.priority || "normal"} priority`})` : ""}`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
   const team = d.teammates.map((t: any) => `- ${t.name} (${t.role})${t.current_task ? `: working on ${t.current_task}` : ""}`).join("\n") || "- (just you)";
   const frontend = FRONTEND_RE.test(`${w.role} ${d.tasks.map((t: any) => t.title).join(" ")} ${d.brief || ""}`);
   const finish = reviewer
@@ -441,6 +445,7 @@ export default function (pi: ExtensionAPI) {
     if (m.kind === "brief") return `[RedPlan brief from the CEO]\n\n${m.body}`;
     if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
     if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
+    if (m.kind === "ticket") return `[RedPlan · new ticket from the human via HQ]\n${m.body}\n(When this turn ends, your final reply is posted back to the human in HQ: say who is on it.)`;
     if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
     if (m.held) return `[RedPlan · update from ${from}, no reply needed]\n${m.body}`;
     return `[RedPlan · message from ${from}]\n${m.body}\n(${m.needs_reply ? `${from} is waiting for your answer: reply with redplan_send to "${from === "CEO" ? "ceo" : from}".` : `No reply needed unless it changes your work; if it does, reply with redplan_send to "${from === "CEO" ? "ceo" : from}".`})`;
@@ -645,7 +650,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const s = await hq("GET", `/api/runs/${runId}`);
       const done = s.tasks.filter((t: any) => t.status === "done").length;
-      where = `\nCurrent run: "${s.run.title}" status=${s.run.status}${s.plan ? `, plan v${s.plan.version} ${s.plan.status}` : ", no plan yet"}${s.tasks.length ? `, tasks ${done}/${s.tasks.length} done` : ""}, workers: ${s.workers.map((w: any) => `${w.name} (${w.role}, ${w.alive ? w.status : "offline"})`).join(", ") || "none"}. Dashboard: ${hqUrl(`/runs/${runId}`)}`;
+      where = `\nCurrent run: "${s.run.title}" status=${s.run.status}${s.plan ? `, plan v${s.plan.version} ${s.plan.status}` : ", no plan yet"}${s.tasks.length ? `, tasks ${done}/${s.tasks.length} done` : ""}, workers: ${s.workers.map((w: any) => { const open = s.tasks.filter((t: any) => t.worker_id === w.id && t.status !== "done").length; return `${w.name} (${w.role}, ${w.alive ? `${w.status}, ${open ? `${open} open task${open === 1 ? "" : "s"}` : "free"}` : "offline"})`; }).join(", ") || "none"}${s.tasks.some((t: any) => t.kind === "ticket" && t.status !== "done") ? `; open tickets: ${s.tasks.filter((t: any) => t.kind === "ticket" && t.status !== "done").map((t: any) => `${t.id} ${t.priority}${t.worker_id ? "" : " UNASSIGNED"} [${t.status}]`).join(", ")}` : ""}. Dashboard: ${hqUrl(`/runs/${runId}`)}`;
     } catch {}
     return { systemPrompt: `${event.systemPrompt}\n\n${CEO_PROTOCOL}${where}` };
   });
@@ -794,7 +799,9 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
       const state = await hq("GET", `/api/runs/${runId}`);
-      if (!state.plan || state.plan.status !== "approved") throw new Error("The plan is not approved yet. Wait for the human's approval.");
+      // Tickets need no plan: a worker for tickets only can start any time.
+      const ticketsOnly = params.taskIds.length > 0 && params.taskIds.every((id: string) => state.tasks.some((t: any) => t.id === id && t.kind === "ticket"));
+      if (!ticketsOnly && (!state.plan || state.plan.status !== "approved")) throw new Error("The plan is not approved yet. Wait for the human's approval (workers for tickets can start any time).");
       const known = new Set(state.tasks.map((t: any) => t.id));
       const unknown = params.taskIds.filter((t: string) => !known.has(t));
       if (unknown.length) throw new Error(`Unknown task ids: ${unknown.join(", ")}`);
@@ -933,6 +940,24 @@ export default function (pi: ExtensionAPI) {
   } as any);
 
   pi.registerTool({
+    name: "redplan_add_ticket", label: "Add RedPlan ticket",
+    description: "Put a new request from the human on the board as a ticket (no plan or approval needed), then get it done right away: assign it (redplan_update_task assignTo), spawn a worker for it, or do it yourself.",
+    parameters: Type.Object({
+      title: Type.String({ description: "Short title of the work" }),
+      description: Type.Optional(Type.String({ description: "What the human asked for, in their words, plus acceptance criteria" })),
+      priority: Type.Optional(Type.Union(["urgent", "high", "normal", "low"].map((s) => Type.Literal(s)), { description: "urgent: do it now, before other work. Default normal." })),
+      hours: Type.Optional(Type.Number({ description: "Estimated hours (for the timeline)" })),
+    }),
+    async execute(_id: string, params: any) {
+      if (!runId) throw new Error("No RedPlan run in this session.");
+      const t = await hq("POST", `/api/runs/${runId}/tickets`, { from: "ceo", ...params });
+      const s = await hq("GET", `/api/runs/${runId}`);
+      const free = s.workers.filter((w: any) => w.alive && !s.tasks.some((x: any) => x.worker_id === w.id && x.status !== "done")).map((w: any) => w.name);
+      return text(`${t.id} is on the board (${t.priority}). Now get it done: ${free.length ? `free workers: ${free.join(", ")} (redplan_update_task assignTo with a brief)` : "nobody is free: spawn a worker for it (redplan_spawn_worker taskIds [\"" + t.id + "\"])"}, or do it yourself if it is small.`, { id: t.id });
+    },
+  } as any);
+
+  pi.registerTool({
     name: "redplan_update_task", label: "Update RedPlan task",
     description: "Move a task card on the RedPlan board (todo, in_progress, review, blocked, done), or hand it to a teammate. Blocked needs a note with the reason; done needs a note with how it was verified; a handoff needs a note with what is done and what is next.",
     parameters: Type.Object({
@@ -940,12 +965,17 @@ export default function (pi: ExtensionAPI) {
       status: Type.Optional(Type.Union(["todo", "in_progress", "review", "blocked", "done"].map((s) => Type.Literal(s)))),
       note: Type.Optional(Type.String({ description: "Required for blocked (reason), done (how verified), and handoffs (state and next step)" })),
       handoffTo: Type.Optional(Type.String({ description: "Teammate name to hand this task to" })),
+      ...(WORKER_ID ? {} : { assignTo: Type.Optional(Type.String({ description: "CEO: give an unowned task (e.g. a new ticket) to this worker now; note is the brief (what to do, acceptance criteria, how to verify). The ticket's description and attachments are added for you." })) }),
       waitingOn: Type.Optional(Type.String({ description: "For blocked: who must act to unblock it — a teammate's name, \"ceo\", \"external\", or \"human\" (only for a decision or access only the human can give). The blocker is sent to them; only \"human\" asks the human." })),
     }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
-      if (!params.status && !params.handoffTo) throw new Error("Give a status or handoffTo.");
+      if (!params.status && !params.handoffTo && !params.assignTo) throw new Error("Give a status, handoffTo or assignTo.");
       try {
+        if (params.assignTo) {
+          await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { assignTo: params.assignTo, note: params.note, actor: me() });
+          return text(`${params.taskId} assigned to ${params.assignTo}; they have the brief and start now.`);
+        }
         const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, handoffTo: params.handoffTo, waitingOn: params.waitingOn, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
         return text(params.handoffTo ? `${t.id} handed to ${params.handoffTo}.` : `${t.id} is now ${t.status}.`);
       } catch (e: any) { throw new Error(e.message); }

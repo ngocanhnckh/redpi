@@ -434,6 +434,23 @@ The Pi session you type this into becomes the **CEO**. It works in four phases:
 3. **Plan.** User stories with acceptance criteria, human-readable tasks with estimates and real dependencies, the architecture, and a proposed team. HQ validates it and computes the schedule, **critical path**, and what can run **in parallel**.
 4. **Execute** (only after you approve). The CEO starts one **worker** per parallel lane: a full Pi session in tmux with a name and a role ("Alex, backend developer", "Peter, full-stack developer"). Each works in the shared folder or in its own git worktree and branch, whichever avoids collisions.
 
+**Only `/redplan` plans.** Everything else is a **quick ticket**, done right away with no plan, no approval and no interview:
+
+- In a RedPlan CEO session, a new request you type without `/redplan`, or send the CEO from HQ, goes on the board as a ticket (`redplan_add_ticket`). The CEO then gives it to a free worker, spawns a new worker for it, or does it itself if it is small.
+- In any other RedPi session, a request is simply done: the agent makes reasonable assumptions, says them in one line, and carries the work through to a verified result. It asks only when it truly cannot go on (missing access, or a choice that would be costly to undo).
+
+### Tickets
+
+Add your own work to a run from HQ: **+ New ticket** on the run page takes a title, a description (Markdown), a priority (**Urgent**, High, Normal, Low), an optional estimate in hours, and attachments (up to 10 files of 10 MB each: choose files, drop them, or paste a screenshot). The ticket goes straight onto the board and the timeline as `TK-1`, `TK-2`… and the CEO gets it at once:
+
+- **Urgent** tickets come before everything else. The CEO acts right away: it assigns the ticket to someone free, and if nobody is free it spawns another worker rather than wait.
+- Other tickets go to the first free person, or to a new worker when they shouldn't wait.
+- The CEO tells you in one line who is on it. The worker gets your description and the attachments' file paths (images included), so it can open them.
+- A ticket on a finished run reopens the run.
+- Tickets follow the same review and done rules as planned tasks.
+
+Board cards show the priority (urgent cards in red, first in their column) and a 📎 for attachments. The task panel shows the description, image previews, and downloads. Images open in the browser; other files always download, never render.
+
 ### The plan page
 
 RedPi prints a link like `http://<this-machine>:47291/plans/<id>`. It shows:
@@ -502,9 +519,9 @@ Every run has five views. **Auto-play** (the button beside the tabs) fades throu
 - Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
 - The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
 
-**📋 Board**: the live Kanban (to do, in progress, review, blocked, done). Cards stay compact: long titles and notes are cut to a few lines, with the full text on hover. Click a card for its full history: who moved it, when, and why.
+**📋 Board**: the live Kanban (to do, in progress, review, blocked, done), with your tickets marked by priority. Cards stay compact: long titles and notes are cut to a few lines, with the full text on hover. Click a card for its full history: who moved it, when, and why.
 
-**📅 Timeline**: the approved plan as a Gantt chart with live progress. Each story and task sits where the plan scheduled it (hours from the start, critical path outlined in red), and its bar fills as the work moves: done 100%, in review 90%, not started 0%, and in-progress work estimated from how long finished tasks really took against their estimates (the team's pace), capped at 85% until it is done. The top shows overall progress by estimated hours. Click a row for the task's history.
+**📅 Timeline**: the approved plan as a Gantt chart with live progress, and your tickets in their own group, placed when they were filed (or started). Each story and task sits where the plan scheduled it (hours from the start, critical path outlined in red), and its bar fills as the work moves: done 100%, in review 90%, not started 0%, and in-progress work estimated from how long finished tasks really took against their estimates (the team's pace), capped at 85% until it is done. The top shows overall progress by estimated hours. Click a row for the task's history.
 
 **📈 Stats**: the project charts, live from the task history:
 
@@ -523,6 +540,8 @@ Every run has five views. **Auto-play** (the button beside the tabs) fades throu
 **📣 Event board** (beside the view, same height): everything the team does, live. Filter it:
 - **Updates**: what each agent (and the CEO) says it is doing, in its own words ("Reading the auth module to see how sessions are stored"), plus every task move with who moved it and why, background jobs (⏳ started, finished, looks stuck), and shared screenshots (📷). Agents are asked to narrate each meaningful step in one plain sentence.
 - **Chat**: messages between the team and with you; messages to or from you are marked in red, and agents' answers to you are tagged **reply**.
+
+Messages and updates are rendered as Markdown (headings, lists, code, tables, links) on the event board, in chats, and in panels. Links open in a new tab, and only web and mail links are allowed.
 - **Tools**: every tool call with its duration; failed calls in red.
 - **All**: everything together.
 
@@ -1027,6 +1046,7 @@ Smoke coverage includes:
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder; reopen limits, stop when done (and closing workers when the run ends), needs-reply flags and the chat cap between two workers, the critical-path staffing warning, the planning nudge, token use, and screenshots
 - Job watcher (against a stub Pi): quick commands unchanged, short timeouts still kill, long commands move to the background with a report instead of blocking, `wait` returns on finish, finish and stuck messages wake the agent and reach HQ, stop needs a reason, Esc stops the whole job, and errors in the log are called out
+- Tickets: validation, attachments (stored privately, images inline, everything else downloads with a sandbox), the CEO told to act at once on urgent ones with who is free, assigning with a brief that carries the whole ticket, a worker spawned for a ticket without a plan, a ticket reopening a finished run; in the browser, filing one with an attachment (urgent first on the board, panel, timeline), Markdown rendered safely on the event board, and the form at phone width
 - Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the recreation room, each to their own spot; token use charts; the Screenshots tab with its lightbox
 - Multi-line paste in terminals without bracketed paste: three pasted lines reach the model as one prompt, and a line typed with Enter still submits (real Pi TUI)
 - Decision model (Jev), against a fake Jev and a fake model:

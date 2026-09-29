@@ -133,6 +133,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS screenshots (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, worker_id TEXT NOT NULL, task_id TEXT, caption TEXT, file TEXT NOT NULL,
     mime TEXT NOT NULL, bytes INTEGER NOT NULL, created INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS screenshots_run ON screenshots (run_id, created);
+  CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
+    bytes INTEGER NOT NULL, file TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS attachments_task ON attachments (run_id, task_id);
 `);
 
 // Columns added after the first release: ALTER only when missing, so existing hubs upgrade in place.
@@ -145,6 +148,8 @@ for (const [table, col, type] of [
   ["messages", "needs_reply", "INTEGER NOT NULL DEFAULT 0"],
   ["workers", "stop_requested", "TEXT"], ["workers", "stop_at", "INTEGER"],
   ["runs", "plan_nudged", "INTEGER"],
+  // Tickets: tasks the human (or the CEO, for a request typed in its terminal) adds without a plan.
+  ["tasks", "kind", "TEXT"], ["tasks", "priority", "TEXT"], ["tasks", "description", "TEXT"], ["tasks", "hours", "REAL"], ["tasks", "created", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -159,6 +164,8 @@ const STOP_GRACE_MS = Number(process.env.REDPI_HQ_STOP_GRACE_MS || 3 * 60 * 1000
 // Teammate back-and-forth per pair per hour: a warning at the first number, refused at the second.
 const PAIR_WARN = 16, PAIR_MAX = 30;
 const SHOTS_DIR = join(HQ_DIR, "screenshots");
+const FILES_DIR = join(HQ_DIR, "attachments");
+const PRIORITIES = ["urgent", "high", "normal", "low"];
 
 const now = () => Date.now();
 const shortId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
@@ -239,7 +246,8 @@ function runView(runId) {
   const usageSeries = all(`SELECT worker_id, (created / ${slot}) * ${slot} AS at, SUM(input + output + cache_read + cache_write) AS tokens, SUM(output) AS output, SUM(cost) AS cost
     FROM usage WHERE run_id = ? GROUP BY worker_id, at ORDER BY at`, runId);
   const screenshots = all("SELECT id, worker_id, task_id, caption, mime, bytes, created FROM screenshots WHERE run_id = ? ORDER BY created DESC LIMIT 200", runId);
-  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, now: now() };
+  const attachments = all("SELECT id, task_id, name, mime, bytes, created FROM attachments WHERE run_id = ? ORDER BY created", runId);
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, now: now() };
 }
 
 function workerView(w) {
@@ -661,7 +669,9 @@ route("POST", "/api/runs/:id/workers", (b, p) => {
   run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated, harness) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)`,
     id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now(), harness);
   for (const t of b.taskIds || []) run("UPDATE tasks SET worker_id = ?, updated = ? WHERE run_id = ? AND id = ?", id, now(), p.id, String(t));
-  if (b.brief) addMessage(p.id, "ceo", id, "brief", b.brief);
+  // Tickets carry the human's own description and attachments: the brief always includes them.
+  const tickets = (b.taskIds || []).map((t) => one("SELECT * FROM tasks WHERE run_id = ? AND id = ? AND kind = 'ticket'", p.id, String(t))).filter(Boolean);
+  if (b.brief) addMessage(p.id, "ceo", id, "brief", tickets.length ? `${b.brief}\n\n${tickets.map((t) => ticketText(p.id, t)).join("\n\n")}` : b.brief);
   touchRun(p.id, "executing");
   notify(p.id, "worker");
   return { ...workerView(one("SELECT * FROM workers WHERE id = ?", id)), warnings: loadWarnings(p.id) };
@@ -743,6 +753,21 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   if (b.status && !TASK_STATUSES.includes(b.status)) throw httpError(400, `status must be one of ${TASK_STATUSES.join(", ")}`);
   const actor = String(b.actor || "ceo");
   const note = b.note != null ? String(b.note).trim().slice(0, 2000) : "";
+
+  // Assign an unowned task (a new ticket, usually) to a teammate with a brief: it becomes their work now.
+  if (b.assignTo) {
+    const target = one("SELECT * FROM workers WHERE run_id = ? AND (id = ? OR lower(name) = lower(?))", p.id, String(b.assignTo), String(b.assignTo));
+    if (!target) throw httpError(400, `no worker ${b.assignTo} in this run`);
+    if (t.worker_id && t.worker_id !== target.id && actor !== "ceo" && actor !== "human") throw httpError(409, `${p.task} belongs to ${participantName(p.id, t.worker_id)}: hand it off instead (handoffTo, with a note)`);
+    if (!note) throw httpError(400, "assigning needs a note: the brief (what to do, acceptance criteria, how to verify)");
+    run("UPDATE tasks SET worker_id = ?, status = CASE WHEN status = 'done' THEN status ELSE 'todo' END, updated = ? WHERE run_id = ? AND id = ?", target.id, now(), p.id, p.task);
+    run("UPDATE workers SET stop_requested = NULL, stop_at = NULL WHERE id = ?", target.id);
+    recordTransition(p.id, p.task, t.status, t.status === "done" ? "done" : "todo", actor, `Assigned to ${target.name}`, target.id);
+    addMessage(p.id, actor, target.id, "brief", `${ticketText(p.id, one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task), "You now own")}\n\nBrief: ${note}\n\nStart now${t.priority === "urgent" ? " (URGENT: put it before anything else)" : ""}: move it to in_progress, do it, verify it, then move it to review with how you verified it.`, true);
+    addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: assigned to ${target.name}`);
+    notify(p.id, "task");
+    return one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task);
+  }
 
   // Handoff: reassign and record in one transaction, so work is never silently dropped.
   if (b.handoffTo) {
@@ -846,6 +871,84 @@ route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
     .map((m) => ({ ...m, senderName: participantName(p.id, m.sender) }));
 });
 
+// ---------- tickets: work the human adds straight to the board, no plan or approval ----------
+function ticketText(runId, t, lead = "Ticket") {
+  const files = all("SELECT * FROM attachments WHERE run_id = ? AND task_id = ? ORDER BY created", runId, t.id);
+  return [`${lead} ${t.id}${t.kind === "ticket" ? ` · ${String(t.priority || "normal").toUpperCase()} priority` : ""}${t.hours ? ` · about ${t.hours}h` : ""}`,
+    `Title: ${t.title}`,
+    t.description ? `Description:\n${t.description}` : "",
+    files.length ? `Attachments (local files; open them with read, images included):\n${files.map((f) => `- ${f.name} (${f.mime}, ${Math.max(1, Math.round(f.bytes / 1024))} KB): ${join(FILES_DIR, f.file)}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n");
+}
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+function sniffFile(buf) {
+  const img = sniffImage(buf);
+  if (img) return IMAGE_TYPES[img];
+  if (buf.length > 6 && /^GIF8[79]a$/.test(buf.toString("ascii", 0, 6))) return IMAGE_TYPES.gif;
+  if (buf.length > 4 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  // Text if it decodes as UTF-8 without control characters (other than tabs and newlines).
+  const head = buf.subarray(0, 4096).toString("utf8");
+  if (!/[\u0000-\u0008\u000e-\u001f\ufffd]/.test(head)) return "text/plain";
+  return "application/octet-stream";
+}
+const safeName = (n) => basename(String(n || "file")).replace(/[^\w.\- ()]+/g, "_").slice(0, 120) || "file";
+route("POST", "/api/runs/:id/tickets", (b, p) => {
+  const r = one("SELECT * FROM runs WHERE id = ?", p.id);
+  if (!r) return notFound();
+  const from = String(b.from || "human");
+  if (from !== "human" && from !== "ceo") throw httpError(400, "tickets come from the human or the CEO");
+  const title = String(b.title || "").trim().slice(0, 200);
+  if (!title) throw httpError(400, "a ticket needs a title");
+  const priority = b.priority ? String(b.priority).toLowerCase() : "normal";
+  if (!PRIORITIES.includes(priority)) throw httpError(400, `priority must be one of ${PRIORITIES.join(", ")}`);
+  const description = b.description ? String(b.description).trim().slice(0, 20000) || null : null;
+  const hours = Number(b.hours) > 0 ? Math.min(1000, Math.round(Number(b.hours) * 10) / 10) : null;
+  const files = (Array.isArray(b.attachments) ? b.attachments : []).map((a) => ({ name: safeName(a?.name), data: Buffer.from(String(a?.data || ""), "base64") }));
+  if (files.length > 10) throw httpError(400, "up to 10 attachments per ticket");
+  if (files.some((f) => !f.data.length)) throw httpError(400, "an attachment is empty");
+  if (files.some((f) => f.data.length > 10 * 1024 * 1024)) throw httpError(413, "each attachment can be up to 10 MB");
+  if (files.reduce((n, f) => n + f.data.length, 0) > 25 * 1024 * 1024) throw httpError(413, "attachments can be up to 25 MB per ticket");
+  const n = 1 + all("SELECT id FROM tasks WHERE run_id = ? AND kind = 'ticket'", p.id).reduce((m, t) => Math.max(m, Number(/^TK-(\d+)$/.exec(t.id)?.[1] || 0)), 0);
+  const id = `TK-${n}`;
+  run("INSERT INTO tasks (run_id, id, story_id, title, status, worker_id, note, updated, harness, kind, priority, description, hours, created) VALUES (?, ?, 'tickets', ?, 'todo', NULL, NULL, ?, ?, 'ticket', ?, ?, ?, ?)",
+    p.id, id, title, now(), DEFAULT_HARNESS, priority, description, hours, now());
+  if (files.length) mkdirSync(FILES_DIR, { recursive: true, mode: 0o700 });
+  for (const f of files) {
+    const aid = shortId("att");
+    const file = `${aid}-${f.name.replace(/ /g, "_")}`;
+    writeFileSync(join(FILES_DIR, file), f.data, { mode: 0o600 });
+    run("INSERT INTO attachments (id, run_id, task_id, name, mime, bytes, file, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", aid, p.id, id, f.name, sniffFile(f.data), f.data.length, file, now());
+  }
+  recordTransition(p.id, id, null, "todo", from, `New ${priority} ticket`, null);
+  // A finished run takes new work again: it is running, and workers that were closing stay.
+  if (r.status === "done" || r.status === "cancelled") {
+    touchRun(p.id, "executing");
+    run("UPDATE workers SET stop_requested = NULL, stop_at = NULL WHERE run_id = ? AND alive = 1", p.id);
+  } else touchRun(p.id);
+  const t = one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, id);
+  if (from === "human") {
+    const idle = all("SELECT w.name, (SELECT COUNT(*) FROM tasks t WHERE t.run_id = w.run_id AND t.worker_id = w.id AND t.status != 'done') AS open FROM workers w WHERE w.run_id = ? AND w.alive = 1 AND w.stop_requested IS NULL", p.id)
+      .filter((w) => !w.open).map((w) => w.name);
+    addMessage(p.id, "human", "ceo", "ticket", `${ticketText(p.id, t, "New ticket")}\n\nIt is on the board (to do, unassigned) and on the timeline. A ticket needs no plan and no approval: get it done now, without asking questions unless it truly cannot be done otherwise.${priority === "urgent"
+      ? ` URGENT: act on it right away, before other work. Assign it to someone free${idle.length ? ` (free now: ${idle.join(", ")})` : ""} with redplan_update_task assignTo and a brief, or spawn a new worker for it with redplan_spawn_worker if nobody is free; if it is small, you may do it yourself.`
+      : ` Assign it to someone free${idle.length ? ` (free now: ${idle.join(", ")})` : ""} with redplan_update_task assignTo and a brief, spawn a worker for it if nobody is free and it should not wait, or do it yourself if it is small.`} Then tell the human in one line who is on it.`, true);
+  }
+  notify(p.id, "task");
+  return t;
+});
+route("GET", "/api/attachments/:id", (_b, p, res) => {
+  const row = one("SELECT * FROM attachments WHERE id = ?", p.id);
+  if (!row) return notFound();
+  let data;
+  try { data = readFileSync(join(FILES_DIR, basename(row.file))); } catch { return notFound(); }
+  // Images show inline; everything else downloads, never rendered as a page.
+  const inline = row.mime.startsWith("image/");
+  res.writeHead(200, { "content-type": inline ? row.mime : row.mime === "text/plain" ? "text/plain; charset=utf-8" : "application/octet-stream", "x-content-type-options": "nosniff",
+    "content-disposition": `${inline ? "inline" : "attachment"}; filename="${row.name.replace(/"/g, "")}"`, "cache-control": "private, max-age=86400", "content-length": data.length,
+    "content-security-policy": "default-src 'none'; sandbox" });
+  res.end(data);
+});
+
 // Screenshots agents take of what they built (the Screenshots tab). PNG, JPEG or WebP, up to 8 MB.
 const SHOT_TYPES = { png: "image/png", jpg: "image/jpeg", webp: "image/webp" };
 function sniffImage(buf) {
@@ -936,7 +1039,7 @@ const server = createServer(async (req, res) => {
       if (r.method !== req.method) continue;
       const m = r.re.exec(url.pathname);
       if (!m) continue;
-      const body = req.method === "GET" ? {} : await readBody(req, url.pathname.endsWith("/screenshots") ? 12 * 1024 * 1024 : undefined);
+      const body = req.method === "GET" ? {} : await readBody(req, url.pathname.endsWith("/screenshots") ? 12 * 1024 * 1024 : url.pathname.endsWith("/tickets") ? 36 * 1024 * 1024 : undefined);
       const out = await r.handler(body, m.groups || {}, res, url);
       if (out !== undefined) send(res, 200, out);
       return;

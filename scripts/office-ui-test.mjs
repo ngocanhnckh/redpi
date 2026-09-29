@@ -387,6 +387,53 @@ await page.click('[data-view="stats"]');
 // Moves show on the event board as actions, with the failed tool call in red; no duplicate task echoes.
 const feed2 = await page.evaluate(() => ({ moves: [...document.querySelectorAll("#feed .act.move")].map((e) => e.textContent.replace(/\s+/g, " ")), bad: document.querySelectorAll("#feed .act.tool.bad").length, echoes: document.querySelectorAll("#feed .msg.task").length }));
 if (feed2.moves.length !== 6 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked, waiting on you · needs the payments API/.test(m)) || !feed2.moves.some((m) => /Kim moved T3 Receipts: to do → blocked, waiting on Lee/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
+// Markdown in messages renders (bold, code, lists, links) and stays safe.
+await api("POST", `/api/runs/${run2}/messages`, { from: kim, to: "ceo", body: "**Status:** tests pass\n\n- fixed `checkout.ts`\n- see [the PR](https://example.com/pr/1)\n\n<img src=x onerror=alert(1)>" });
+await page.waitForSelector("#feed .msg .body.md strong");
+const mdv = await page.evaluate(() => { const b = [...document.querySelectorAll("#feed .msg .body.md")].at(-1); return { strong: b.querySelector("strong")?.textContent, code: b.querySelector("code")?.textContent, li: b.querySelectorAll("li").length, href: b.querySelector("a")?.getAttribute("href"), img: !!b.querySelector("img"), raw: /\*\*/.test(b.textContent) }; });
+if (mdv.strong !== "Status:" || mdv.code !== "checkout.ts" || mdv.li !== 2 || mdv.href !== "https://example.com/pr/1" || mdv.img || mdv.raw) await fail("markdown not rendered (or not safe) on the event board", mdv);
+// Tickets: the human files one from the run page with a priority and an attachment; it lands on
+// the board (urgent first), in the task panel with its description and files, and on the timeline.
+// (On a run of their own with no plan: tickets need none, and later checks count run2's tasks.)
+const runT = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Fixes" })).run.id;
+await page.goto(`${base}/runs/${runT}`);
+await page.waitForSelector("[data-new-ticket]");
+await page.click('[data-view="board"]');
+await page.click("[data-new-ticket]");
+await page.waitForSelector("#ticket-form #tk-title");
+if ((await page.evaluate(() => document.activeElement?.id)) !== "tk-title") await fail("the ticket form should focus the title");
+await page.click("#tk-go");
+if (!/title/i.test(await page.textContent("#tk-err"))) await fail("a ticket without a title should say so");
+await page.fill("#tk-title", "Receipt email shows the wrong total");
+await page.fill("#tk-desc", "The total **excludes tax**.\n\n1. Buy anything\n2. Open the receipt email");
+await page.click(".prio-pick .p-urgent span");
+if (!/right away/.test(await page.textContent("#tk-hint"))) await fail("urgent hint missing");
+await page.setInputFiles("#tk-files", [{ name: "receipt.png", mimeType: "image/png", buffer: Buffer.from(PNG, "base64") }, { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("total 10.00 vs 10.80") }]);
+if ((await page.$$eval("#tk-list li", (l) => l.length)) !== 2) await fail("chosen attachments not listed");
+await page.click("#tk-list [data-rm='1']");
+if ((await page.$$eval("#tk-list li", (l) => l.length)) !== 1) await fail("removing an attachment did not work");
+if (shots) await page.screenshot({ path: join(shots, "ticket-form.png") });
+await page.keyboard.press("Control+Enter");
+await page.waitForSelector("#ticket-form", { state: "detached" });
+await page.waitForSelector('.col.todo .card.ticket.p-urgent[data-task="TK-1"]');
+const firstTodo = await page.$eval(".col.todo .cards .card", (c) => c.dataset.task);
+if (firstTodo !== "TK-1") await fail("an urgent ticket should be first in its column", firstTodo);
+const ceoGot = (await api("GET", `/api/runs/${runT}/inbox?for=ceo&after=0`)).find((m) => m.kind === "ticket");
+if (!ceoGot || !/URGENT/.test(ceoGot.body) || !/receipt\.png/.test(ceoGot.body)) await fail("the CEO did not get the ticket", ceoGot);
+await page.click('.card[data-task="TK-1"]');
+await page.waitForSelector(".drawer .tk-desc strong");
+await page.waitForFunction(() => { const i = document.querySelector(".drawer .att.img img"); return i && i.complete && i.naturalWidth > 0; });
+const dr = await page.evaluate(() => ({ prio: document.querySelector(".drawer .prio")?.textContent, ol: document.querySelectorAll(".drawer .tk-desc ol li").length, owner: /Not assigned/.test(document.querySelector(".drawer").textContent) }));
+if (dr.prio !== "Urgent" || dr.ol !== 2 || !dr.owner) await fail("ticket panel wrong", dr);
+await page.click("#close");
+await page.click('[data-view="timeline"]');
+await page.waitForSelector('.tl-row.story.tickets');
+if (!(await page.$('.tl-row.task[data-task="TK-1"] .prio.p-urgent'))) await fail("the ticket should be on the timeline");
+if (shots) { await page.click('[data-view="board"]'); await page.locator(".view-panel").screenshot({ path: join(shots, "ticket-board.png") }); }
+await page.goto(`${base}/runs/${run2}`);
+await page.waitForSelector('[data-view="stats"]');
+await page.click('[data-view="stats"]');
+await page.waitForSelector("#view-body .chart");
 // A blocker is readable in full: the Needs you item opens the person with the whole reason at the
 // top of their chat, and "Reply about T4" starts your answer.
 if (await page.locator(".needs-item", { hasText: "T3 blocked" }).count()) await fail("a blocker waiting on a teammate should not be under Needs you");
@@ -468,6 +515,12 @@ for (const v of ["office", "board", "timeline", "stats", "shots"]) {
   const wide = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1 && [...document.querySelectorAll("body *")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).slice(0, 5).map((e) => `${e.tagName}.${e.className}`));
   if (wide) await fail(`run page scrolls sideways on a phone (${v})`, wide);
 }
+await page.click("[data-new-ticket]");
+await page.waitForSelector("#ticket-form");
+const formWide = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1 || document.getElementById("ticket-form").getBoundingClientRect().right > innerWidth + 1);
+if (formWide) await fail("the ticket form is wider than a phone");
+await page.keyboard.press("Escape");
+if (await page.$("#ticket-form")) await fail("Esc should close the ticket form");
 await page.setViewportSize({ width: 1400, height: 900 });
 await page.goto(`${base}/runs/${runId}`);
 await page.waitForSelector(".office-host canvas");
@@ -507,5 +560,5 @@ if (after.Alex.errand || after.Priya.errand || after.Alex.tile.x !== before.Alex
 if (errors.length) await fail("console errors", errors);
 
 await browser.close();
-console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO, token use charts, a Screenshots tab with a lightbox.");
+console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO, token use charts, a Screenshots tab with a lightbox, markdown on the event board, tickets from the run page (urgent first, attachments, panel, timeline).");
 process.exit(0);

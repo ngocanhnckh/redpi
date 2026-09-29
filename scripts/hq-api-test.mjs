@@ -2,7 +2,7 @@
 // RedPi HQ API test: runs a private hub (temp dir, random port) and exercises the plan,
 // approval, worker, task, message, and auth flows. Never touches ~/.pi/agent.
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -299,6 +299,44 @@ let nudged = false;
 for (let i = 0; i < 40 && !nudged; i++) { await new Promise((r) => setTimeout(r, 150)); nudged = (await api("GET", `/api/runs/${run4}/inbox?for=ceo&after=0`)).body.filter((m) => /without submitting a plan/.test(m.body)).length === 1; }
 if (!nudged) fail("no planning nudge");
 
+// Tickets: the human adds work straight to the board (no plan), with attachments; the CEO is told to
+// get it done now; a ticket reopens a finished run; assigning gives the worker the full ticket.
+const PNG1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGNQOJAARAwQCgAiDgUBwxGaiQAAAABJRU5ErkJggg==", "base64");
+if ((await api("POST", `/api/runs/${run3}/tickets`, { title: " " })).status !== 400) fail("a ticket without a title should be refused");
+if ((await api("POST", `/api/runs/${run3}/tickets`, { title: "x", priority: "asap" })).status !== 400) fail("an unknown priority should be refused");
+if ((await api("POST", `/api/runs/${run3}/tickets`, { title: "x", attachments: [{ name: "big.bin", data: Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64") }] })).status !== 413) fail("an attachment over 10 MB should be refused");
+const tk = await api("POST", `/api/runs/${run3}/tickets`, { title: "Checkout button does nothing on Safari", description: "Steps:\n1. Open /checkout\n2. Click **Pay**", priority: "urgent", hours: 2,
+  attachments: [{ name: "safari.png", data: PNG1.toString("base64") }, { name: "../../console log.txt", data: Buffer.from("TypeError: x is undefined\n").toString("base64") }, { name: "page.html", data: Buffer.from("<script>alert(1)</script>").toString("base64") }] });
+if (tk.status !== 200 || tk.body.id !== "TK-1" || tk.body.kind !== "ticket" || tk.body.priority !== "urgent" || tk.body.status !== "todo" || tk.body.hours !== 2) fail("ticket not created", tk);
+const rv3 = (await api("GET", `/api/runs/${run3}`)).body;
+if (rv3.run.status !== "executing") fail("a ticket should reopen a finished run", rv3.run.status);
+const atts = rv3.attachments.filter((a) => a.task_id === "TK-1");
+if (atts.length !== 3 || atts[0].mime !== "image/png" || atts[1].name !== "console log.txt" || atts[1].mime !== "text/plain") fail("attachments not stored with safe names and types", atts);
+if (!rv3.transitions.some((t) => t.task_id === "TK-1" && t.to_status === "todo" && t.actor === "human")) fail("a new ticket should be in the task history");
+const ceoTicket = (await api("GET", `/api/runs/${run3}/inbox?for=ceo&after=0`)).body.find((m) => m.kind === "ticket");
+if (!ceoTicket || !/TK-1 · URGENT/.test(ceoTicket.body) || !/act on it right away/.test(ceoTicket.body) || !/free now: Kai/.test(ceoTicket.body) || !/Click \*\*Pay\*\*/.test(ceoTicket.body) || !ceoTicket.needs_reply) fail("the CEO was not told to act on the urgent ticket", ceoTicket);
+const paths = [...ceoTicket.body.matchAll(/: (\/\S+)$/gm)].map((m) => m[1]);
+if (paths.length !== 3 || !paths.every((f) => f.startsWith(join(dir, "attachments")) && existsSync(f) && (statSync(f).mode & 0o077) === 0)) fail("attachment paths for the agents missing or not private", paths);
+const attImg = await fetch(`${base}/api/attachments/${atts[0].id}`, { headers: { authorization: `Bearer ${token}` } });
+if (attImg.status !== 200 || attImg.headers.get("content-type") !== "image/png" || !/^inline/.test(attImg.headers.get("content-disposition"))) fail("image attachment should show inline");
+const html = await fetch(`${base}/api/attachments/${atts[2].id}`, { headers: { authorization: `Bearer ${token}` } });
+if (!/^attachment/.test(html.headers.get("content-disposition")) || /html/.test(html.headers.get("content-type")) || !/sandbox/.test(html.headers.get("content-security-policy"))) fail("non-image attachments must download, never render", Object.fromEntries(html.headers));
+if ((await fetch(`${base}/api/attachments/${atts[0].id}`)).status !== 401) fail("attachments need sign-in");
+// The CEO assigns it: a brief is required; the worker gets the whole ticket and the card is theirs.
+if ((await api("POST", `/api/runs/${run3}/tasks/TK-1`, { assignTo: "Kai", actor: "ceo" })).status !== 400) fail("assigning without a brief should be refused");
+const asg = await api("POST", `/api/runs/${run3}/tasks/TK-1`, { assignTo: "Kai", actor: "ceo", note: "Reproduce in WebKit, fix the handler, add a test." });
+if (asg.status !== 200 || asg.body.worker_id !== w3.id) fail("assign failed", asg);
+const brief = (await api("GET", `/api/runs/${run3}/inbox?for=${w3.id}&after=0`)).body.find((m) => m.kind === "brief" && /TK-1/.test(m.body));
+if (!brief || !/You now own TK-1 · URGENT/.test(brief.body) || !/Reproduce in WebKit/.test(brief.body) || !/safari\.png/.test(brief.body) || !/URGENT: put it before anything else/.test(brief.body)) fail("assigned worker did not get the full ticket", brief);
+// A ticket from the CEO (a request typed in its terminal) goes on the board without a message back to it.
+const tk2 = await api("POST", `/api/runs/${run3}/tickets`, { from: "ceo", title: "Add a dark mode toggle" });
+if (tk2.body.id !== "TK-2" || tk2.body.priority !== "normal" || (await api("GET", `/api/runs/${run3}/inbox?for=ceo&after=0`)).body.filter((m) => m.kind === "ticket").length !== 1) fail("CEO ticket wrong", tk2);
+if ((await api("POST", `/api/runs/${run3}/tickets`, { from: w3.id, title: "x" })).status !== 400) fail("workers cannot file tickets");
+// A worker spawned for a ticket gets the ticket in its brief.
+const w5 = (await api("POST", `/api/runs/${run3}/workers`, { name: "Zoe", role: "frontend developer", cwd: "/tmp/stop-project", taskIds: ["TK-2"], brief: "Build the toggle." })).body;
+const zb = (await api("GET", `/api/runs/${run3}/inbox?for=${w5.id}&after=0`)).body.find((m) => m.kind === "brief");
+if (!zb || !/Build the toggle\./.test(zb.body) || !/Ticket TK-2 · NORMAL priority/.test(zb.body)) fail("spawned worker's brief lacks the ticket", zb);
+
 // Home page data: projects with their live team, active ones first.
 await api("POST", "/api/runs", { projectPath: "/tmp/other-project", title: "Other project" });
 await api("PATCH", `/api/runs/${runId}`, { status: "executing" });
@@ -350,5 +388,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, projects home, password sign-in, plan review comments, harness per task.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();
