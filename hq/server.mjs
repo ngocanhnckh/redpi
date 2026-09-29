@@ -855,7 +855,8 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   if (!b.body || !b.to) throw httpError(400, "to and body are required");
   // aside: a "btw" side question answered by the worker without touching its live session.
   // reply: an agent's answer to the human's message, posted back when its turn ends.
-  const kind = ["chat", "command", "interrupt", "aside", "reply"].includes(b.kind) ? b.kind : "chat";
+  // quick: the instant answer to it, posted within seconds while the live session takes the message in.
+  const kind = ["chat", "command", "interrupt", "aside", "reply", "quick"].includes(b.kind) ? b.kind : "chat";
   const from = String(b.from || "human"), to = String(b.to), body = String(b.body).slice(0, 20000);
   // Does this need an answer? Said explicitly, or a question, or anything from the human or the CEO.
   // (A report to the human is not a question: only a real question, or a sender who says so, waits on them.)

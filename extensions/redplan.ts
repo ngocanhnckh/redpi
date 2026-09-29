@@ -350,6 +350,13 @@ const ASIDE_PROMPT = (name: string, role: string) => `You are the side channel o
 Answer from the session transcript and state below: what you are doing, why, what you found, what is left, where things are. Be concise and concrete, first person, as ${name}. If the transcript does not contain the answer, say so plainly; never invent progress.
 If the human's message is an instruction or change for the live work (e.g. "also add X", "stop doing Y", "use Z instead", "tell him to..."), begin your reply with one line "FORWARD: <the instruction, rewritten clearly for your live session>", then on the next lines confirm briefly to the human that you passed it on. Only forward when the human clearly wants the live work to change; questions are never forwarded.`;
 
+// The instant answer to a message the human sent: the message itself goes into the live session,
+// which answers thoroughly when its turn ends; this says right away what the human needs to know.
+const QUICK_PROMPT = (name: string, role: string) => `You are ${name}, a ${role} in a RedPlan team. The human just sent you the message below in RedPi HQ. It is being delivered to your live session right now, which will act on it and post a full answer when it finishes what it is doing. Your job is the instant answer, in first person as ${name}:
+- If the transcript and state already answer it (a status question, "what's going on", "why is it slow"), answer it directly and concretely: what you are doing, what is done, what is left, what is in the way.
+- If it is a request or instruction, confirm in one line what you will do and when (e.g. "right after the test run that is going now"), and anything that changes because of it.
+- At most 4 short sentences or bullets. Never claim work is done that the transcript does not show, and never invent progress. No greetings.`;
+
 // ---------- extension ----------
 export default function (pi: ExtensionAPI) {
   let runId = WORKER_RUN || "";
@@ -455,10 +462,12 @@ export default function (pi: ExtensionAPI) {
 
   let asideChain: Promise<void> = Promise.resolve();
   let owedReply = false;
-  async function answerAside(m: any) {
+  let quickChain: Promise<void> = Promise.resolve();
+  async function answerAside(m: any, mode: "aside" | "quick" = "aside") {
     const ctx = latestCtx;
     const started = Date.now();
-    beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
+    const quick = mode === "quick";
+    if (!quick) beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
     let reply = "", forward = "";
     try {
       let state: string, who: [string, string];
@@ -484,16 +493,23 @@ export default function (pi: ExtensionAPI) {
       const model = ctx?.model;
       if (!model) throw new Error("no model selected in this session");
       const res: any = await ctx.modelRegistry.complete(model, {
-        systemPrompt: ASIDE_PROMPT(...who),
-        messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx)}\n\nTHE HUMAN ASKS (by the way):\n${m.body}` }],
-      }, { maxTokens: 1500 });
+        systemPrompt: quick ? QUICK_PROMPT(...who) : ASIDE_PROMPT(...who),
+        messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx, quick ? 24000 : 60000)}\n\n${quick ? "THE HUMAN'S MESSAGE" : "THE HUMAN ASKS (by the way)"}:\n${m.body}` }],
+      }, { maxTokens: quick ? 500 : 1500 });
       const text = (res?.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
       if (res?.stopReason === "error" || !text) throw new Error(res?.errorMessage || "empty answer");
-      const fw = /^\s*FORWARD:\s*(.+)$/m.exec(text.split("\n")[0] || "");
+      const fw = quick ? null : /^\s*FORWARD:\s*(.+)$/m.exec(text.split("\n")[0] || "");
       if (fw) { forward = fw[1].trim(); reply = text.split("\n").slice(1).join("\n").trim() || `Passed on to my live session: ${forward}`; }
       else reply = text;
     } catch (e: any) {
+      // The live session still has the message; only the instant answer failed.
+      if (quick) { beat({}, { kind: "error", text: `Quick answer failed: ${String(e.message).slice(0, 200)}` }); return; }
       reply = `(I couldn't answer that on the side: ${e.message}. Use "Send to session" to ask my live session directly.)`;
+    }
+    if (quick) {
+      await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: "quick", body: reply }).catch(() => {});
+      beat({}, { kind: "btw", text: `Answered you instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
+      return;
     }
     // Relay a real instruction into the live session without aborting it.
     if (forward) {
@@ -515,6 +531,9 @@ export default function (pi: ExtensionAPI) {
       // Side questions never enter the live session: answer them on the side, one at a time.
       const asides = msgs.filter((m) => m.kind === "aside" && m.sender === "human");
       for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
+      // Anything else the human sends gets an instant answer too, while the live session takes it in.
+      for (const q of msgs.filter((x) => x.sender === "human" && x.recipient === me() && ["chat", "command", "interrupt", "ticket"].includes(x.kind)))
+        quickChain = quickChain.then(() => answerAside(q, "quick")).catch(() => {});
       msgs = msgs.filter((m) => !asides.includes(m));
       // Wake rules: everything wakes an idle session except a teammate's update that asks nothing,
       // sent to a worker whose tasks are all done (it gets those if it has work again).

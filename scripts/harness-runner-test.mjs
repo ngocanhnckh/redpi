@@ -93,11 +93,18 @@ for (const [harness, w] of Object.entries(workers)) {
 // Follow-up messages continue the same session.
 for (const [harness, w] of Object.entries(workers)) await api("POST", `/api/runs/${run}/messages`, { from: "human", to: w.id, kind: "command", body: "second message" });
 for (const [harness, w] of Object.entries(workers)) {
-  const c = await wait(`${harness}: second turn`, () => calls().find((c) => c.worker === w.id && c.prompt.includes("second message")));
+  const c = await wait(`${harness}: second turn`, () => calls().find((c) => c.worker === w.id && !c.fork && c.prompt.includes("second message")));
   if (!c.resumed || c.session !== w.session) fail(`${harness}: second turn did not continue session ${w.session}: ${JSON.stringify(c.args)}`);
   await wait(`${harness}: second reply`, async () => (await api("GET", `/api/workers/${w.id}`)).worker.last_message?.includes("same session"));
   // The human wrote from HQ, so the answer is posted back to them there.
   await wait(`${harness}: reply posted to the human in HQ`, async () => (await api("GET", `/api/runs/${run}`)).messages.find((m) => m.kind === "reply" && m.sender === w.id && m.recipient === "human" && m.body.includes("same session")));
+}
+
+// Every message from the human also gets an instant answer, from a fork of the session.
+for (const [harness, w] of Object.entries(workers)) {
+  const q = await wait(`${harness}: instant answer`, async () => (await api("GET", `/api/runs/${run}`)).messages.find((m) => m.kind === "quick" && m.sender === w.id));
+  const f = calls().find((c) => c.worker === w.id && c.fork && c.prompt.includes("Instant answer") && c.prompt.includes("second message"));
+  if (q.recipient !== "human" || !q.body.trim() || !f) fail(`${harness}: no instant answer from a fork`, { q, f: !!f });
 }
 
 // Side questions run on a fork while the live turn keeps going; an interrupt stops the stuck turn.
@@ -107,12 +114,12 @@ await wait("Cora busy", async () => (await api("GET", `/api/workers/${cora.id}`)
 await api("POST", `/api/runs/${run}/messages`, { from: "human", to: cora.id, kind: "aside", body: "btw, how far along are you?" });
 const side = await wait("side answer", async () => (await api("GET", `/api/runs/${run}`)).messages.find((m) => m.kind === "aside" && m.sender === cora.id));
 if (!side.body.includes("halfway through") || side.recipient !== "human") fail(`bad side answer: ${side.body}`);
-const forkCall = calls().find((c) => c.worker === cora.id && c.fork);
+const forkCall = calls().find((c) => c.worker === cora.id && c.fork && c.prompt.includes("Side question"));
 if (!forkCall.args.includes("--fork-session") || !forkCall.args.includes(cora.session)) fail(`side question did not fork the session: ${forkCall.args}`);
 if ((await api("GET", `/api/workers/${cora.id}`)).worker.status !== "working") fail("the side question disturbed the live turn");
 const t0 = Date.now();
 await api("POST", `/api/runs/${run}/messages`, { from: "human", to: cora.id, kind: "interrupt", body: "INTERRUPTED-NOW: stop and fix the test" });
-await wait("interrupt delivered", () => calls().find((c) => c.worker === cora.id && c.prompt.includes("INTERRUPTED-NOW")), 15000);
+await wait("interrupt delivered", () => calls().find((c) => c.worker === cora.id && !c.fork && c.prompt.includes("INTERRUPTED-NOW")), 15000);
 if (Date.now() - t0 > 12000) fail("interrupt did not stop the running turn");
 await wait("interrupt reported", async () => (await api("GET", `/api/workers/${cora.id}`)).events.some((e) => e.kind === "interrupt"));
 
@@ -139,7 +146,7 @@ const relaunch = randomUUID();
 await api("PATCH", `/api/workers/${olive.id}`, { launchId: relaunch, status: "starting", tmux: olive.tmux });
 launch(olive, relaunch);
 await api("POST", `/api/runs/${run}/messages`, { from: "human", to: olive.id, kind: "command", body: "after the crash" });
-const back = await wait("resumed turn", () => calls().find((c) => c.worker === olive.id && c.prompt.includes("after the crash")));
+const back = await wait("resumed turn", () => calls().find((c) => c.worker === olive.id && !c.fork && c.prompt.includes("after the crash")));
 if (!back.resumed || back.session !== olive.session) fail("resumed worker did not continue its session");
 if (calls().filter((c) => c.worker === olive.id && c.prompt.includes("[RedPlan brief")).length !== 1) fail("the brief was delivered again after resume");
 if (!pane(olive.tmux).includes("resuming session")) fail("pane does not say it resumed");
@@ -148,6 +155,6 @@ if (!pane(olive.tmux).includes("resuming session")) fail("pane does not say it r
 const cli = spawnSync(process.execPath, [join(root, "hq", "cli.mjs"), "task", "T1", "blocked"], { env: { ...env, REDPI_HQ_WORKER: cora.id, REDPI_HQ_RUN: run }, encoding: "utf8" });
 if (cli.status === 0 || !/reason|note/i.test(cli.stderr)) fail(`redpi-hq accepted blocked without a reason: ${cli.stderr}`);
 
-console.log("Harness runner test passed: Claude Code, Codex, and OpenCode workers take the brief, move cards and message the CEO via redpi-hq, continue their session every turn, answer side questions on a fork (and relay instructions), stop on interrupt, flag provider trouble, and resume after a crash.");
+console.log("Harness runner test passed: Claude Code, Codex, and OpenCode workers take the brief, move cards and message the CEO via redpi-hq, continue their session every turn, answer every message instantly from a fork, answer side questions on a fork (and relay instructions), stop on interrupt, flag provider trouble, and resume after a crash.");
 cleanup();
 process.exit(0);

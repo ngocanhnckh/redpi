@@ -280,14 +280,19 @@ await page.keyboard.press("Enter");
 await page.waitForFunction(() => /Please prioritise the login flow/.test([...document.querySelectorAll(".drawer #thread .bub.me")].at(-1)?.textContent || ""));
 // You can see where the answer will come: a waiting note in the same conversation.
 await page.waitForSelector(".drawer #thread .bub.pending");
-if (!/CEO has your message\. Their reply appears here/.test(await page.textContent(".drawer #thread .bub.pending"))) await fail("no note saying where the reply will appear");
+if (!/CEO has your message: a quick answer comes in a few seconds, the full one when they finish/.test(await page.textContent(".drawer #thread .bub.pending"))) await fail("no note saying where the reply will appear");
 // While you type the next message, live updates must not touch the box.
 await page.click("#wmsg"); await page.keyboard.type("draft in progress");
 for (let i = 0; i < 3; i++) { await beat("Sam", { status: "working", events: [{ kind: "tool", text: `read: x${i}.ts`, ms: 5 }] }); await page.waitForTimeout(250); }
 const draftState = await page.evaluate(() => { const t = document.querySelector("#wmsg"); return { v: t.value, f: document.activeElement === t, caret: t.selectionStart }; });
 if (draftState.v !== "draft in progress" || !draftState.f || draftState.caret !== draftState.v.length) await fail("typing in the CEO chat was disturbed by live updates", draftState);
 await page.fill("#wmsg", "");
-// The CEO answers (the extension posts its reply when its turn ends): it lands in the same conversation.
+// The instant answer arrives within seconds; the note then says the full answer is still coming.
+await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "quick", body: "Got it: login flow first. Moving Alex onto it as soon as his test run ends." });
+await page.waitForFunction(() => /login flow first/.test(document.querySelector(".drawer #thread .bub.them:not(.pending)")?.parentElement?.textContent || ""));
+await page.waitForFunction(() => /full answer follows/.test(document.querySelector(".drawer #thread .bub.pending")?.textContent || "")).catch(() => fail("after a quick answer, the note should say the full answer is coming"));
+if (!/quick answer/.test(await page.textContent(".drawer #thread"))) await fail("the instant answer should be tagged as a quick answer");
+// The CEO answers in full (the extension posts its reply when its turn ends): it lands in the same conversation.
 await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "reply", body: "On it: the login flow goes first, Alex starts now." });
 await page.waitForFunction(() => /login flow goes first/.test(document.querySelector(".drawer #thread")?.lastElementChild?.textContent || ""));
 if (await page.locator(".drawer #thread .bub.pending").count()) await fail("waiting note should go once the reply arrives");

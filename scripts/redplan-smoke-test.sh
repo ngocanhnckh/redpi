@@ -314,6 +314,8 @@ try:
     # Crash + resume: kill Alex's tmux session, ask the CEO to resume, and prove the saved session continued.
     subprocess.run(["tmux", "-L", sock, "kill-session", "-t", f"={names['Alex']['tmux']}"], check=True)
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "command", "body": "RESUME-ALEX: his session crashed."})
+    # Every message from the human gets an instant answer first (a separate call), then the full reply.
+    wait("CEO's instant answer", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "quick" and m["sender"] == "ceo" and m["recipient"] == "human"), None), 40)
     wait("CEO's reply posted to the human in HQ", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "reply" and m["sender"] == "ceo" and m["recipient"] == "human"), None), 40)
     wait("Alex relaunched in tmux", lambda: subprocess.run(["tmux", "-L", sock, "has-session", "-t", f"={names['Alex']['tmux']}"], capture_output=True).returncode == 0, 40)
     time.sleep(3)

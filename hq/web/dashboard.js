@@ -678,7 +678,7 @@ function msgView(m) {
   if (m.kind === "system" && m.sender === "human") m = { ...m, sender: "hq", senderName: "HQ" };
   const from = m.sender === "human" || m.sender === "hq" ? `<span class="from">${esc(m.senderName)}</span>` : `<button class="from linkish" data-person="${esc(m.sender)}">${esc(m.senderName)}</button>`;
   const to = m.recipient === "human" || m.recipient === "all" ? esc(m.recipientName) : `<button class="linkish to-link" data-person="${esc(m.recipient)}">${esc(m.recipientName)}</button>`;
-  return `<div class="msg ${esc(m.kind)}${m.sender === "human" || m.recipient === "human" ? " with-you" : ""}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}${from}${m.kind !== "task" ? `<span class="to">→ ${to}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : m.kind === "aside" ? `<span class="pill violet">btw</span>` : m.kind === "reply" ? `<span class="pill green">reply</span>` : m.kind === "ticket" ? `<span class="pill amber">ticket</span>` : ""}<span class="when" data-t="${m.created}">${ago(m.created)}</span></div>
+  return `<div class="msg ${esc(m.kind)}${m.sender === "human" || m.recipient === "human" ? " with-you" : ""}"><div class="hdr">${avatar(m.senderName, m.sender, "sm")}${from}${m.kind !== "task" ? `<span class="to">→ ${to}</span>` : ""}${m.kind === "interrupt" ? `<span class="pill cyan">interrupt</span>` : m.kind === "brief" ? `<span class="pill">brief</span>` : m.kind === "decision" ? `<span class="pill amber">decision</span>` : m.kind === "aside" ? `<span class="pill violet">btw</span>` : m.kind === "reply" ? `<span class="pill green">reply</span>` : m.kind === "ticket" ? `<span class="pill amber">ticket</span>` : m.kind === "quick" ? `<span class="pill cyan">quick answer</span>` : ""}<span class="when" data-t="${m.created}">${ago(m.created)}</span></div>
     ${m.kind === "task" ? `<div class="body">${esc(m.body)}</div>` : `<div class="body md">${md(m.kind === "brief" && m.body.length > 600 ? m.body.slice(0, 600) + "…" : m.body)}</div>`}</div>`;
 }
 
@@ -708,20 +708,26 @@ function conversation(id) {
 
 function bubble(m) {
   const mine = m.sender === "human";
-  const tag = m.kind === "aside" ? "btw" : m.kind === "interrupt" ? "interrupt" : m.kind === "decision" ? "plan decision" : m.kind === "reply" ? "reply" : m.kind === "ticket" ? "ticket" : m.recipient === "all" ? "to everyone" : "";
+  const tag = m.kind === "aside" ? "btw" : m.kind === "interrupt" ? "interrupt" : m.kind === "decision" ? "plan decision" : m.kind === "reply" ? "full answer" : m.kind === "quick" ? "quick answer" : m.kind === "ticket" ? "ticket" : m.recipient === "all" ? "to everyone" : "";
   const body = m.body.length > 6000 ? m.body.slice(0, 6000) + "…" : m.body;
   return `<div class="bub ${mine ? "me" : "them"}${m.kind === "interrupt" ? " int" : ""}"><div class="bub-meta">${esc(mine ? "You" : m.senderName)}${tag ? ` · ${esc(tag)}` : ""} · <span class="when" data-t="${m.created}">${ago(m.created)}</span></div><div class="bub-body${mine ? "" : " md"}">${mine ? esc(body) : md(body)}</div></div>`;
 }
 
 function pendingNote(id, name, msgs) {
   const lastMine = [...msgs].reverse().find((m) => m.sender === "human");
-  if (!lastMine || msgs.some((m) => m.id > lastMine.id && m.sender === id)) return "";
+  const after = lastMine ? msgs.filter((m) => m.id > lastMine.id && m.sender === id) : [];
+  // The instant answer came; the full one follows when their live session finishes the turn.
+  if (lastMine && lastMine.kind !== "aside" && after.length && after.every((m) => m.kind === "quick")) {
+    if (Date.now() - lastMine.created > 45 * 60_000) return "";
+    return `<div class="bub them pending"><div class="bub-body">${esc(`${name}'s full answer follows when they finish what they're doing`)}<span class="dots">…</span></div></div>`;
+  }
+  if (!lastMine || after.length) return "";
   const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
   const link = id === "ceo" ? ceoLink() : { ok: true };
   const text = w && !w.alive ? `${name} is offline. Your message waits in their inbox until they are back.`
     : !link.ok ? link.text
     : lastMine.kind === "aside" ? (Date.now() - lastMine.created > 3 * 60_000 ? `${name} has not answered on the side after ${ago(lastMine.created).replace(/ ago$/, "")}. The model may be slow or failing; check ${name}'s terminal.` : `${name} is answering on the side…`)
-      : `${name} has your message. Their reply appears here when they finish the current turn.`;
+      : `${name} has your message: a quick answer comes in a few seconds, the full one when they finish the current turn.`;
   return `<div class="bub them pending"><div class="bub-body">${esc(text)}<span class="dots">…</span></div></div>`;
 }
 

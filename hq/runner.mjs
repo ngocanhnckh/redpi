@@ -118,6 +118,12 @@ Answer from what you have done so far in this session: what you are doing, why, 
 THE HUMAN ASKS (by the way):
 `;
 
+const QUICK = (name) => `[Instant answer, on a copy of your session: your live session also has this message and will answer fully when its turn ends.]
+Reply right away as ${name}, first person, at most 4 short sentences, without running tools or changing files. If what you have done so far answers it (status, "what's going on"), answer directly and concretely. If it is a request or instruction, confirm what you will do and when. Never claim work is done that you have not done.
+
+THE HUMAN'S MESSAGE:
+`;
+
 // ---------- one harness process ----------
 function runHarness({ prompt, fresh, instructionsText, fork, onEvent }) {
   const { bin, args, stdin } = turnCommand(HARNESS, { prompt, session: state.session, fresh, instructions: instructionsText, autonomy: AUTONOMY, cwd: process.cwd(), fork });
@@ -214,13 +220,16 @@ const asides = [];
 async function answerAside(m) {
   asideBusy = true;
   const started = Date.now();
-  beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
+  const quick = m.kind !== "aside";
+  if (quick && (!state.started || !state.session)) { asideBusy = false; if (asides.length) answerAside(asides.shift()); return; }
+  if (!quick) beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
   let reply = "", forward = "";
   if (!state.started || !state.session) reply = "I'm just getting started and have no session history yet. Ask again in a moment, or use \"Send to session\".";
   else {
-    const r = await runHarness({ prompt: ASIDE(process.env.REDPI_HQ_NAME || "the worker") + m.body, fresh: false, fork: true, onEvent() {} }).done;
+    const r = await runHarness({ prompt: (quick ? QUICK : ASIDE)(process.env.REDPI_HQ_NAME || "the worker") + m.body, fresh: false, fork: true, onEvent() {} }).done;
     const text = (r.final || r.text || "").trim();
     if (!r.ok || !text) reply = `(I couldn't answer that on the side: ${r.error || "no answer"}. Use "Send to session" to ask my live session directly.)`;
+    else if (quick) reply = text;
     else {
       const fw = /^\s*FORWARD:\s*(.+)$/.exec(text.split("\n")[0] || "");
       if (fw) { forward = fw[1].trim(); reply = text.split("\n").slice(1).join("\n").trim() || `Passed on to my live session: ${forward}`; }
@@ -228,6 +237,14 @@ async function answerAside(m) {
     }
   }
   if (forward) await hq("POST", `/api/runs/${RUN}/messages`, { from: "human", to: ME, kind: "command", body: `(relayed from a side question) ${forward}` }).catch(() => {});
+  if (quick) {
+    // A failed instant answer is dropped: the live session still answers in full.
+    if (!/^\(I couldn't answer/.test(reply)) await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: "human", kind: "quick", body: reply }).catch(() => {});
+    beat({}, { kind: "btw", text: `Answered you instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
+    asideBusy = false;
+    if (asides.length) answerAside(asides.shift());
+    return;
+  }
   await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
   beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
   asideBusy = false;
@@ -246,6 +263,8 @@ async function poll() {
     save();
     for (const m of msgs) {
       if (m.kind === "aside") { if (asideBusy) asides.push(m); else answerAside(m); continue; }
+      // Anything else the human sends to this worker also gets an instant answer (on a fork), then goes to the live session.
+      if (m.sender === "human" && m.recipient === ME && ["chat", "command", "interrupt"].includes(m.kind)) { if (asideBusy) asides.push(m); else answerAside(m); }
       if (m.kind === "interrupt" && current) { interrupted = true; kill(current.child); }
       queue.push(m);
     }
