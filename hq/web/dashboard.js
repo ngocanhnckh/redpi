@@ -173,6 +173,8 @@ function needsYou() {
     else if (w.needs_human) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_human}` });
     else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
   }
+  // HQ watch findings the CEO did not fix in time (a loop, burning tokens, a stalled board, ...).
+  for (const a of (state.alerts || []).filter((a) => a.escalated && !a.resolved)) items.push({ id: a.subject || "ceo", level: "red", text: `HQ watch: ${a.text}`.slice(0, 600) });
   // Questions addressed to you that you have not answered yet. Only real questions: HQ marks a message as needing a reply when it asks one (or its sender says so);
   // reports and status updates to you stay on the event board.
   for (const m of messages.filter((m) => m.recipient === "human" && m.needs_reply && !["system", "aside", "task"].includes(m.kind))) {
@@ -205,7 +207,7 @@ let feedFilter = { chat: "chat", updates: "updates", tools: "tools", actions: "t
 const STATUS_LABEL = { todo: "to do", in_progress: "in progress", review: "review", blocked: "blocked", done: "done" };
 const STATUS_COLOR = { todo: "var(--faint)", in_progress: "var(--cyan)", review: "var(--amber)", blocked: "var(--red)", done: "var(--green)" };
 const TOOL_ICON = { bash: "$", read: "<", edit: ">", write: ">", grep: "?", find: "?", ls: "?", glob: "?", redpi_jevgrep: "?", redpi_browser: "@", web: "@" };
-const nameOf = (id) => id === "ceo" ? "CEO" : id === "human" ? "You" : id === "external" ? "something outside the team" : state.workers.find((w) => w.id === id)?.name || id;
+const nameOf = (id) => id === "ceo" ? "CEO" : id === "human" ? "You" : id === "hq" ? "HQ" : id === "external" ? "something outside the team" : state.workers.find((w) => w.id === id)?.name || id;
 const waitingOn = (t) => t.blocked_on === "human" ? "waiting on you" : t.blocked_on ? `waiting on ${nameOf(t.blocked_on)}` : "";
 const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 

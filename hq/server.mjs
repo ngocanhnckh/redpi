@@ -136,6 +136,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL,
     bytes INTEGER NOT NULL, file TEXT NOT NULL, created INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS attachments_task ON attachments (run_id, task_id);
+  CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
+    subject TEXT, text TEXT NOT NULL, created INTEGER NOT NULL, seen INTEGER NOT NULL, escalated INTEGER, resolved INTEGER);
+  CREATE INDEX IF NOT EXISTS alerts_run ON alerts (run_id, key);
 `);
 
 // Columns added after the first release: ALTER only when missing, so existing hubs upgrade in place.
@@ -154,6 +157,7 @@ for (const [table, col, type] of [
   ["tasks", "kind", "TEXT"], ["tasks", "priority", "TEXT"], ["tasks", "description", "TEXT"], ["tasks", "hours", "REAL"], ["tasks", "created", "INTEGER"],
   // Who reviews a task (it comes back to them after findings), and the last staffing nudge to the CEO.
   ["tasks", "reviewer_id", "TEXT"], ["runs", "staff_nudged", "INTEGER"], ["runs", "staff_key", "TEXT"],
+  ["runs", "checkin_at", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -207,6 +211,7 @@ function ensureProject(path) {
 
 function participantName(runId, id) {
   if (id === "ceo") return "CEO";
+  if (id === "hq") return "HQ";
   if (id === "human") return "You";
   if (id === "all") return "Everyone";
   return one("SELECT name FROM workers WHERE id = ? AND run_id = ?", id, runId)?.name || id;
@@ -261,7 +266,8 @@ function runView(runId) {
     FROM usage WHERE run_id = ? GROUP BY worker_id, at ORDER BY at`, runId);
   const screenshots = all("SELECT id, worker_id, task_id, caption, mime, bytes, created FROM screenshots WHERE run_id = ? ORDER BY created DESC LIMIT 200", runId);
   const attachments = all("SELECT id, task_id, name, mime, bytes, created FROM attachments WHERE run_id = ? ORDER BY created", runId);
-  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, now: now() };
+  const alerts = all("SELECT * FROM alerts WHERE run_id = ? AND (resolved IS NULL OR resolved > ?) ORDER BY id DESC LIMIT 50", runId, now() - 24 * 3600_000);
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, now: now() };
 }
 
 function workerView(w) {
@@ -404,6 +410,176 @@ function sweepStaffing() {
   }
 }
 setInterval(sweepStaffing, Math.min(30000, Math.max(200, Math.min(STAFF_NUDGE_MS, STAFF_GRACE_MS || STAFF_NUDGE_MS) / 4))).unref();
+
+// ---------- HQ watch: catch a run going wrong within minutes, not hours ----------
+// Every minute HQ looks for the patterns that have cost runs hours: two agents talking in circles, an
+// agent burning tokens without moving a card, the same action repeated over and over, a task far past
+// its estimate, a task bouncing through review, a board that stopped moving, messages to a worker that
+// is gone, and questions nobody answers. Each finding wakes the CEO once with the diagnosis and what to
+// do; if it is still happening ALERT_ESCALATE_MS later, the human is told (Needs you). It clears itself
+// when the pattern stops. Every CHECKIN_MS the CEO also gets a progress check-in with the numbers.
+const WATCH_MS = Number(process.env.REDPI_HQ_WATCH_MS || 60_000);
+const WATCH_HOUR = Number(process.env.REDPI_HQ_WATCH_HOUR_MS || 3600_000);   // the watch's "hour" (tests shorten it)
+const CHECKIN_MS = Number(process.env.REDPI_HQ_CHECKIN_MS || 30 * 60_000);
+const ALERT_ESCALATE_MS = Number(process.env.REDPI_HQ_ALERT_ESCALATE_MS || 15 * 60_000);
+const CHATTER_2H = Number(process.env.REDPI_HQ_CHATTER_2H || 40);
+const BURN_TOKENS = Number(process.env.REDPI_HQ_BURN_TOKENS || 5_000_000);
+const REPEAT_N = Number(process.env.REDPI_HQ_REPEAT || 8);
+const STALL_MS = Number(process.env.REDPI_HQ_STALL_MS || 45 * 60_000);
+const pairLimitHits = new Map();   // "run|a|b" -> when the pair was last refused for messaging too much
+
+const mins = (ms) => `${Math.max(1, Math.round(ms / 60_000))} min`;
+const dur = (ms) => (ms >= 90 * 60_000 ? `${(ms / 3600_000).toFixed(1)}h` : mins(ms));
+const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}k`);
+
+function detectTrouble(runId) {
+  const t = now(), found = [];
+  const name = (id) => participantName(runId, id);
+  const workers = all("SELECT * FROM workers WHERE run_id = ?", runId);
+  const W = Object.fromEntries(workers.map((w) => [w.id, w]));
+  const movedSince = (who, since) => one("SELECT COUNT(*) AS n FROM task_transitions WHERE run_id = ? AND actor = ? AND created > ?", runId, who, since).n;
+  const openTasks = (id) => all("SELECT id FROM tasks WHERE run_id = ? AND worker_id = ? AND status IN ('in_progress', 'review', 'blocked')", runId, id).map((x) => x.id);
+  const on = (id) => { const ts = openTasks(id); return ts.length ? ` (on ${ts.join(", ")})` : ""; };
+
+  // 1. Two agents talking in circles: heavy back-and-forth for two hours, or refused for messaging too much.
+  const pairs = all(`SELECT CASE WHEN sender < recipient THEN sender ELSE recipient END AS a, CASE WHEN sender < recipient THEN recipient ELSE sender END AS b, COUNT(*) AS n
+    FROM messages WHERE run_id = ? AND kind = 'chat' AND created > ? AND sender LIKE 'wkr_%' AND recipient LIKE 'wkr_%' GROUP BY a, b`, runId, t - 2 * WATCH_HOUR);
+  for (const [k, at] of pairLimitHits) {
+    const [rid, a, b] = k.split("|");
+    if (rid === runId && t - at < WATCH_HOUR && !pairs.some((p) => p.a === a && p.b === b)) pairs.push({ a, b, n: 0, capped: true });
+  }
+  for (const p of pairs) {
+    const capped = p.capped || t - (pairLimitHits.get(`${runId}|${p.a}|${p.b}`) || 0) < WATCH_HOUR;
+    if (p.n < CHATTER_2H && !capped) continue;
+    const moves = movedSince(p.a, t - 2 * WATCH_HOUR) + movedSince(p.b, t - 2 * WATCH_HOUR);
+    found.push({ kind: "chatter", key: `chatter:${p.a}|${p.b}`, subject: p.a,
+      text: `${name(p.a)} and ${name(p.b)} are talking in circles: ${p.n ? `${p.n} messages to each other in the last ${dur(2 * WATCH_HOUR)}` : "refused for messaging each other too much"}, and ${moves ? `only ${moves} card move${moves > 1 ? "s" : ""}` : "no card moved"} between them. Read their last few messages, decide the open question yourself, and tell both exactly what to do next (or reassign the work).` });
+  }
+  // 2. Burning tokens without progress.
+  for (const b of all("SELECT worker_id AS w, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND created > ? GROUP BY worker_id", runId, t - WATCH_HOUR)) {
+    if (b.n < BURN_TOKENS || movedSince(b.w, t - WATCH_HOUR)) continue;
+    const who = b.w === "ceo" ? "You (the CEO)" : name(b.w);
+    found.push({ kind: "burn", key: `burn:${b.w}`, subject: b.w,
+      text: `${who} used ${tokens(b.n)} tokens in the last ${dur(WATCH_HOUR)} without moving a card${b.w === "ceo" ? "" : on(b.w)}. That is usually a loop: retrying the same fix, re-reading the same files, or re-running a failing command. ${b.w === "ceo" ? "Step back: stop polling and act on what you know." : "Look at what they are doing, then give clear direction, split the task, or hand it to someone else."}` });
+  }
+  // 3. The same action over and over.
+  for (const r of all(`SELECT e.worker_id AS w, e.text, COUNT(*) AS n FROM events e JOIN workers x ON x.id = e.worker_id
+      WHERE x.run_id = ? AND e.kind IN ('tool', 'error') AND e.created > ? GROUP BY e.worker_id, e.text HAVING n >= ? ORDER BY n DESC`, runId, t - WATCH_HOUR / 2, REPEAT_N)) {
+    if (found.some((f) => f.key === `repeat:${r.w}`) || movedSince(r.w, t - WATCH_HOUR / 2)) continue;
+    found.push({ kind: "repeat", key: `repeat:${r.w}`, subject: r.w,
+      text: `${name(r.w)} repeated the same step ${r.n} times in the last ${dur(WATCH_HOUR / 2)}${on(r.w)}: "${String(r.text).slice(0, 140)}". They are probably stuck in a loop; find out what keeps failing and change the approach.` });
+  }
+  // 4. A task far past its estimate.
+  const sched = approvedPlan(runId)?.schedule?.tasks || [];
+  const est = Object.fromEntries((Array.isArray(sched) ? sched : Object.values(sched)).map((x) => [x.id, Number(x.hours) || 0]));
+  for (const task of all("SELECT * FROM tasks WHERE run_id = ? AND status = 'in_progress'", runId)) {
+    const hours = Number(task.hours) || est[task.id];
+    if (!hours) continue;
+    const since = one("SELECT MIN(created) AS at FROM task_transitions WHERE run_id = ? AND task_id = ? AND to_status = 'in_progress'", runId, task.id).at || task.updated;
+    const spent = t - since;
+    if (spent < 2 * hours * WATCH_HOUR) continue;
+    found.push({ kind: "overrun", key: `overrun:${task.id}`, subject: task.worker_id,
+      text: `${task.id} ${task.title} has been in progress for ${dur(spent)} against an estimate of ${hours}h${task.worker_id ? ` (${name(task.worker_id)})` : ""}. Find out why: stuck, blocked without saying so, or too big (split it and put more people on it).` });
+  }
+  // 5. Bouncing through review.
+  for (const r of all(`SELECT tr.task_id AS id, COUNT(*) AS n FROM task_transitions tr JOIN tasks tk ON tk.run_id = tr.run_id AND tk.id = tr.task_id
+      WHERE tr.run_id = ? AND tr.to_status = 'review' AND tk.status != 'done' GROUP BY tr.task_id HAVING n >= 3`, runId)) {
+    const task = one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", runId, r.id);
+    found.push({ kind: "review-loop", key: `review-loop:${r.id}`, subject: task.worker_id,
+      text: `${r.id} ${task.title} has gone to review ${r.n} times${task.worker_id ? ` (author ${name(task.worker_id)}${task.reviewer_id ? `, reviewer ${name(task.reviewer_id)}` : ""})` : ""}. Read the last findings: if they disagree, decide; if the acceptance criteria are unclear, make them exact; if the fix keeps failing, pair someone else on it.` });
+  }
+  // 6. The board stopped moving while people are working.
+  const lastMove = one("SELECT MAX(created) AS at FROM task_transitions WHERE run_id = ?", runId).at || 0;
+  const working = workers.filter((w) => w.alive && w.status === "working");
+  const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status != 'done'", runId).n;
+  if (open && working.length && lastMove && t - lastMove > STALL_MS) {
+    found.push({ kind: "stall", key: "stall", subject: null,
+      text: `No card has moved for ${dur(t - lastMove)} while ${working.map((w) => w.name).join(", ")} ${working.length > 1 ? "are" : "is"} working. Check whether they are stuck or the board is out of date, and fix whichever it is.` });
+  }
+  // 7. Messages to a worker that is gone.
+  for (const r of all(`SELECT recipient AS w, COUNT(*) AS n, GROUP_CONCAT(DISTINCT sender) AS senders FROM messages
+      WHERE run_id = ? AND created > ? AND recipient LIKE 'wkr_%' AND sender != 'human' GROUP BY recipient`, runId, t - WATCH_HOUR)) {
+    const w = W[r.w];
+    if (!w || (w.alive && w.status !== "stopped") || r.n < 2) continue;
+    found.push({ kind: "dead-end", key: `dead-end:${r.w}`, subject: r.w,
+      text: `${r.n} messages went to ${w.name}, whose session is gone (from ${String(r.senders).split(",").map(name).join(", ")}). Resume them (redplan_resume_worker) or reassign their work, and tell the senders who to talk to instead.` });
+  }
+  // 8. Questions between agents that nobody answers.
+  const qs = all(`SELECT m.* FROM messages m WHERE m.run_id = ? AND m.needs_reply = 1 AND m.created < ? AND m.created > ?
+      AND m.sender != 'human' AND m.recipient != 'human' AND m.recipient != 'all' AND m.kind NOT IN ('system', 'brief', 'task')
+      AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.run_id = m.run_id AND r.id > m.id AND r.sender = m.recipient AND (r.recipient = m.sender OR r.recipient = 'all'))`, runId, t - WATCH_HOUR / 2, t - 6 * WATCH_HOUR);
+  const byRecipient = {};
+  for (const m of qs) if (m.recipient === "ceo" || (W[m.recipient]?.alive && W[m.recipient]?.status !== "stopped")) (byRecipient[m.recipient] ||= []).push(m);
+  for (const [who, list] of Object.entries(byRecipient)) {
+    const oldest = list[0];
+    found.push({ kind: "unanswered", key: `unanswered:${who}`, subject: who,
+      text: `${who === "ceo" ? "You have" : `${name(who)} has`} not answered ${list.length} question${list.length > 1 ? "s" : ""} for over ${dur(t - oldest.created > WATCH_HOUR / 2 ? t - oldest.created : WATCH_HOUR / 2)} (oldest, from ${name(oldest.sender)}: "${String(oldest.body).replace(/\s+/g, " ").slice(0, 160)}"). ${who === "ceo" ? "Answer them now." : "Make sure they answer, or answer it yourself."}` });
+  }
+  return found;
+}
+
+function watchRun(r) {
+  const t = now();
+  const found = detectTrouble(r.id);
+  const openAlerts = all("SELECT * FROM alerts WHERE run_id = ? AND resolved IS NULL", r.id);
+  for (const f of found) {
+    let a = openAlerts.find((x) => x.key === f.key);
+    // The same trouble back within the hour continues the old alert (and its escalation clock), silently.
+    if (!a) {
+      const recent = one("SELECT * FROM alerts WHERE run_id = ? AND key = ? AND resolved > ? ORDER BY id DESC LIMIT 1", r.id, f.key, t - WATCH_HOUR);
+      if (recent) { run("UPDATE alerts SET resolved = NULL WHERE id = ?", recent.id); a = recent; }
+    }
+    if (!a) {
+      run("INSERT INTO alerts (run_id, key, kind, subject, text, created, seen) VALUES (?, ?, ?, ?, ?, ?, ?)", r.id, f.key, f.kind, f.subject, f.text, t, t);
+      addMessage(r.id, "human", "ceo", "system", `HQ watch: ${f.text}`);
+      continue;
+    }
+    run("UPDATE alerts SET seen = ?, text = ? WHERE id = ?", t, f.text, a.id);
+    if (!a.escalated && t - a.created >= ALERT_ESCALATE_MS) {
+      run("UPDATE alerts SET escalated = ? WHERE id = ?", t, a.id);
+      addMessage(r.id, "hq", "human", "system", `HQ watch: ${f.text} The CEO was told ${mins(t - a.created)} ago and it is still happening.`);
+      addMessage(r.id, "human", "ceo", "system", `HQ watch, still happening after ${mins(t - a.created)} (the human has been told): ${f.text}`);
+    }
+  }
+  for (const a of openAlerts) if (!found.some((f) => f.key === a.key)) run("UPDATE alerts SET resolved = ? WHERE id = ?", t, a.id);
+  if (found.length || openAlerts.length) notify(r.id, "alert");
+}
+
+// The CEO's regular check-in: the numbers since the last one, and what to look at.
+function checkinText(runId, since) {
+  const t = now();
+  const tasks = all("SELECT * FROM tasks WHERE run_id = ?", runId);
+  const moves = all("SELECT * FROM task_transitions WHERE run_id = ? AND created > ?", runId, since);
+  const name = (id) => participantName(runId, id);
+  const enteredAt = (task) => one("SELECT MAX(created) AS at FROM task_transitions WHERE run_id = ? AND task_id = ?", runId, task.id).at || task.updated;
+  const count = (st) => tasks.filter((x) => x.status === st);
+  const doneNow = [...new Set(moves.filter((m) => m.to_status === "done").map((m) => m.task_id))];
+  const line = (st, label, who) => { const l = count(st); return l.length ? `${label} ${l.length}: ${l.slice(0, 8).map((x) => `${x.id} ${who(x)} ${dur(t - enteredAt(x))}`).join(", ")}${l.length > 8 ? ", …" : ""}` : `${label} 0`; };
+  const burn = all("SELECT worker_id AS w, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND created > ? GROUP BY worker_id ORDER BY n DESC LIMIT 5", runId, since);
+  const alertsOpen = all("SELECT * FROM alerts WHERE run_id = ? AND resolved IS NULL", runId);
+  const idle = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND status = 'idle' AND stop_requested IS NULL", runId).filter((w) => !REVIEWER_RE.test(w.role));
+  return [
+    `Check-in (every ${mins(CHECKIN_MS)}): ${moves.length} card move${moves.length === 1 ? "" : "s"} since the last one${doneNow.length ? `; done: ${doneNow.join(", ")}` : ""}.`,
+    `Board: todo ${count("todo").length}; ${line("in_progress", "in progress", (x) => name(x.worker_id))}; ${line("review", "in review", (x) => `waiting on ${x.reviewer_id ? name(x.reviewer_id) : "a reviewer"}`)}; ${line("blocked", "blocked", (x) => name(x.worker_id))}; done ${count("done").length}.`,
+    idle.length ? `Idle builders: ${idle.map((w) => w.name).join(", ")}.` : "",
+    `Open alerts: ${alertsOpen.length ? alertsOpen.map((a) => a.text.split(". ")[0]).join(" | ") : "none"}.`,
+    burn.length ? `Tokens since the last check-in: ${burn.map((b) => `${b.w === "ceo" ? "you" : name(b.w)} ${tokens(b.n)}`).join(", ")}.` : "",
+    `Look for anything wrong: a task that has not moved, someone looping or burning tokens, builders idle while work waits, a review queue growing. Fix it now. If anything changed or is wrong, post the human a 2-3 line status (redplan_send to "human"; no question unless you need their decision). If nothing changed and nothing is wrong, do nothing and do not reply.`,
+  ].filter(Boolean).join("\n");
+}
+
+function sweepWatch() {
+  for (const r of all("SELECT * FROM runs WHERE status = 'executing'")) {
+    try { watchRun(r); } catch (e) { console.error(`watch failed for ${r.id}: ${e.message}`); }
+    try {
+      if (!r.checkin_at) { run("UPDATE runs SET checkin_at = ? WHERE id = ?", now(), r.id); continue; }
+      if (now() - r.checkin_at < CHECKIN_MS) continue;
+      addMessage(r.id, "human", "ceo", "system", checkinText(r.id, r.checkin_at));
+      run("UPDATE runs SET checkin_at = ? WHERE id = ?", now(), r.id);
+    } catch (e) { console.error(`check-in failed for ${r.id}: ${e.message}`); }
+  }
+}
+setInterval(sweepWatch, Math.max(200, WATCH_MS)).unref();
 
 // Every worker's own tasks are done: tell it once to report and stop (it is woken again only if asked something).
 function maybeReleaseWorker(runId, workerId) {
@@ -963,6 +1139,7 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   if (from.startsWith("wkr_") && to.startsWith("wkr_") && kind === "chat") {
     const n = one(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND kind = 'chat' AND created > ? AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`, p.id, now() - 3600_000, from, to, to, from).n;
     const other = participantName(p.id, to);
+    if (n >= PAIR_MAX) pairLimitHits.set(`${p.id}|${[from, to].sort().join("|")}`, now());
     if (n >= PAIR_MAX) throw httpError(429, `You and ${other} have exchanged ${n} messages in the last hour. Stop the back-and-forth: send the CEO one message with what you agree on and what is still open, and let the CEO decide.`);
     if (n >= PAIR_WARN) warning = `You and ${other} have exchanged ${n} messages in the last hour. Wrap up: settle it in this message, or ask the CEO to decide. Do not reply to acknowledgements.`;
   }

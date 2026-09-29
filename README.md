@@ -577,6 +577,18 @@ The office is drawn on a canvas that pauses when the tab is hidden, respects red
 - **Quiet chat, quick answers.** Messages mark whether they need an answer (`needsReply`, or a message ending in `?`). A teammate's update that asks nothing does not wake a worker whose tasks are all done (it gets it if it has work again); everything else wakes an idle agent at once. Acknowledgements ("thanks", "got it") are discouraged. Two workers messaging each other more than 16 times an hour get a warning; at 30 HQ refuses and asks them to settle it or ask the CEO.
 - **Reviews end.** A task moves to done only from review (the independent reviewer closes it), and a done task can be reopened only by whoever closed it, the CEO, or you, with a note, and only once; after that only you can reopen it.
 - **Staffing for speed.** The CEO staffs one builder per task that can start now (up to 10), each with one task rather than a queue, plus about one reviewer per three builders. It orders the first wave as a thin end-to-end slice, so a first working version arrives early. When tasks that could start are waiting (unassigned, or queued behind a busy teammate) for 3 minutes, HQ tells the CEO exactly what to do: hand them to the free builders by name, or spawn more (`REDPI_HQ_MAX_BUILDERS`, `REDPI_HQ_STAFF_NUDGE_MS`, `REDPI_HQ_STAFF_GRACE_MS`). Spawning also warns when one person owns more than 60% of the critical path's hours.
+- **HQ watch: problems caught in minutes, not hours.** Every minute HQ checks the run, at no token cost, for the patterns that have cost real runs hours:
+  - two agents talking in circles (40+ messages to each other in two hours, or refused for messaging too much);
+  - an agent burning tokens without moving a card (5M+ in an hour);
+  - the same step repeated over and over;
+  - a task far past its estimate (twice as long);
+  - a task bouncing through review (third time);
+  - a board that stopped moving while people work (45 minutes);
+  - messages to a worker whose session is gone;
+  - questions between agents nobody answers (30 minutes).
+
+  Each finding wakes the CEO once, with the diagnosis and what to do. If it is still happening 15 minutes later, you are told on the event board and under Needs you. It clears itself when the pattern stops. Replayed on a real run, it would have flagged a 19-hour, 651-message loop between two workers about 3 hours into the run, instead of never. Settings: `REDPI_HQ_WATCH_MS`, `REDPI_HQ_ALERT_ESCALATE_MS`, `REDPI_HQ_CHATTER_2H`, `REDPI_HQ_BURN_TOKENS`, `REDPI_HQ_REPEAT`, `REDPI_HQ_STALL_MS`.
+- **Check-in every 30 minutes.** HQ gives the CEO the numbers: cards moved and finished, what is in progress or in review and for how long, idle builders, open alerts, and tokens per agent. The CEO fixes anything wrong and posts you a 2-3 line status only when something changed or is wrong; otherwise it stays quiet (`REDPI_HQ_CHECKIN_MS`). The retrospective turns each finding into a lesson.
 - **Planning nudge.** A plan still not submitted 30 minutes into the run gets a nudge to the CEO (`REDPI_HQ_PLAN_NUDGE_MS`).
 - **Long commands don't stall the team.** Workers run builds and Docker through the job watcher (below): nothing blocks for hours, and no one polls with `sleep` loops.
 - **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
@@ -1099,6 +1111,7 @@ npm pack --dry-run
 Smoke coverage includes:
 
 - automatic first-run provider onboarding
+- HQ watch: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each alert the CEO within seconds, escalate to you when they persist, clear when they stop; the CEO check-in carries the numbers
 - office floor scales with the team (1 to 40 people): a desk, café seat, rec-room spot and "needs you" spot for everyone, all reachable from the entrance, none shared
 - browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained
 - image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
