@@ -744,14 +744,29 @@ goto https://example.com --max 2000
 text --max 3000
 click text=Login
 type input[name=q] "redpi 9router" --submit
+wait-for [role=dialog]
 wait-for-text "Dashboard loaded" --max 2000
+ready --timeout 30000
+viewport phone                  # or tablet, desktop, 1440x900
+screenshot /tmp/redpi-page.png  # visible area; --full for the whole page
 console --max 3000
 errors --max 3000
 network --max 3000
 html --max 2000
-screenshot /tmp/redpi-page.png
-reset
+close                           # close the browser, keep logins
+reset                           # close it and clear everything
 ```
+
+**It knows when a page has loaded.** Agents used to screenshot half-rendered pages (a blank app shell, a spinner) and then burn turns re-checking. Now every command that shows the page first waits until it is actually ready: the load event, no requests in flight for half a second (streams such as SSE and websockets do not count), web fonts and visible images loaded, no visible spinner or skeleton, and the DOM unchanged for 400 ms. The first line of the output says which:
+
+```text
+ready: page fully loaded (1.4s)
+NOT READY after 15s: 1 request still loading (GET http://localhost:3000/api/items); loading indicator visible (div.spinner)
+```
+
+The agent is told to trust `ready` and to act on the reason when it is not ready, instead of sleeping and retrying.
+
+**The page stays open between commands.** One Chromium keeps running (each RedPlan worker has its own), so what a click opened is still there for the next `text` or `screenshot`, errors logged between commands are still collected, and the window size you set sticks. It closes itself after 30 minutes unused (`REDPI_BROWSER_IDLE_MIN`). A dev server that is down gets a plain "connection refused. Is the dev server running?".
 
 Frontend shortcut:
 
@@ -1081,6 +1096,7 @@ npm pack --dry-run
 Smoke coverage includes:
 
 - automatic first-run provider onboarding
+- browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained
 - image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
 - `office-files` skill: Markdown to Word and PowerPoint and back, CSV to Excel, PDF merge and page pick (through `uv`; skipped without it)
 - only SenseNova's office skills are registered

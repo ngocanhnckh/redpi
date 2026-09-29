@@ -1547,17 +1547,21 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "redpi_browser",
     label: "RedPi Browser CLI",
-    description: "Token-efficient Playwright browser automation through the RedPi CLI. Use compact commands like: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, console, errors, network, wait-for-text <text>, screenshot <path>, reset.",
+    description: "Token-efficient Playwright browser automation through the RedPi CLI. One browser stays open between calls, so the page keeps its state (a dialog a click opened is still open for the screenshot). goto, click, type, text and screenshot first wait until the page is fully loaded (load event, network quiet, fonts, images, no spinner, DOM settled) and start with `ready: page fully loaded`, or `NOT READY: <what is still loading>`. Commands: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, wait-for <selector>, wait-for-text <text>, ready [--timeout ms], reload, back, viewport phone|tablet|desktop|WxH, screenshot <path> [--full], eval <js>, console, errors, network, close, reset.",
     promptSnippet: "Run compact Playwright browser commands without MCP context bloat",
-    promptGuidelines: ["Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters."],
-    parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto https://example.com --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `screenshot /tmp/page.png`, or `reset`." }) }),
+    promptGuidelines: [
+      "Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters.",
+      "redpi_browser already waits for the page to finish loading and tells you: trust its `ready:` line. Do not sleep, reload or re-screenshot to check whether a page has loaded. On `NOT READY`, read what it says is still loading, then run `ready --timeout 30000` or check `errors`; if content appears only after an action, use `wait-for <selector>` or `wait-for-text`.",
+      "Screenshots are the visible area by default (`--full` for the whole page); set the width with `viewport phone` (390×844) or `viewport desktop` (1280×900) before taking them.",
+    ],
+    parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto http://localhost:3000 --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `wait-for [role=dialog]`, `viewport phone`, `screenshot /tmp/page.png`, `ready`, or `reset`." }) }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const script = join(packageRoot(), "scripts", "redpi-browser.js");
       const args = String(params.command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((s) => s.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
       const runBrowser = () => serializeBrowser(() => runAsync("node", [script, ...args], { cwd: ctx.cwd, signal, timeoutMs: BROWSER_TIMEOUT_MS }));
       let result = await runBrowser();
       let text = (result.stdout || result.stderr || "").trim();
-      if (result.timedOut) text += "\n\nThe browser command was stopped after the time limit. The page may be slow or never finish loading; try `text` or `screenshot`, or check the dev server.";
+      if (result.timedOut) text += "\n\nThe browser command was stopped after the time limit. The page may be slow or never finish loading; run `ready` to see what is still loading, or check `errors` and the dev server.";
       const missingBrowser = result.status !== 0 && /Playwright is not installed|Executable doesn't exist|playwright install/i.test(text);
       if (missingBrowser && ctx.hasUI) {
         const ok = await ctx.ui.confirm("RedPi browser runtime is missing", "Install Playwright Chromium now? This can take a few minutes and only needs to run once.");
