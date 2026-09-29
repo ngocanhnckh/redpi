@@ -97,6 +97,8 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, and the RedPi Playwright browser skill. | None |
 | 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Chromium installs with RedPi (opt out with `REDPI_SKIP_BROWSER=1`). | None |
 | ⏳ | **Job watcher** | Long shell commands (builds, Docker, test suites) are moved to the background after 10 minutes instead of being killed or blocking the agent, with a health report (CPU, disk, network, Docker, errors in the log); the agent is told when they finish or look stuck. | None |
+| 🧾 | **Decisions and lessons** | Agents record significant decisions as ADRs (`docs/adr/`) and what cost them time in `docs/lessons-learned.md`; every later session in the project reads both, so each run starts from what the last one learned. | None |
+| 🪶 | **Ponytail** | Installs [ponytail](https://github.com/DietrichGebert/ponytail): the "lazy senior dev" mode that makes agents reach for the smallest code that works (stdlib, native features, no speculative abstractions). `/ponytail lite\|full\|ultra\|off`. | None |
 | 🔁 | **Fallbacks** | Detects quota/rate/session/overload errors and retries via fallback chains. | Preconfigured |
 | 📚 | **Memory-lite** | Reads capped project/global memory and lets the agent save lessons. | Optional |
 | 🕵️ | **Advisor-lite** | Manual reviewer pass via `/yitec-review`; optional auto-review. | Optional |
@@ -575,6 +577,8 @@ The office is drawn on a canvas that pauses when the tab is hidden, respects red
 - **Long commands don't stall the team.** Workers run builds and Docker through the job watcher (below): nothing blocks for hours, and no one polls with `sleep` loops.
 - **`/redplan-doctor`** checks HQ, the token, tmux, LAN reachability, and every worker's session, workspace, and saved session, with a fix for each problem.
 
+**Is the CEO connected?** The CEO session checks in with HQ every 30 seconds. If a run's CEO is running an older RedPi (it can't answer on the side or reply to you in HQ), or its terminal has closed, the Needs-you strip says so and tells you what to do (`/reload` in its terminal), instead of showing a reply that never comes.
+
 **Talk to a worker or the CEO without interrupting them ("btw").** In anyone's panel, **Ask on the side** asks them anything while they keep working: their RedPi answers on the side with a separate call to the same model, reading the live session's conversation, tasks, and current activity (the CEO also reads the whole team and board). The live session never sees the question. If what you write is really an instruction ("please also make it return 202", "use Postgres instead"), the answer says so and passes it into the live session as a steer, without aborting what it is doing. **Send to session** delivers your message into the live session as its next message, and **Interrupt + send** stops the current turn first.
 
 Workers are real Pi sessions, not subagents: they keep running if the CEO is busy, you can attach to them (`tmux attach -t '=redpi-<run>-alex'`, detach with Ctrl-b d), and anything you or a teammate sends arrives in their session as a message. An interrupt stops the current turn first.
@@ -624,6 +628,23 @@ Builds, Docker, and big test suites used to either hit the 10-minute bash timeou
 | `REDPI_WATCH_CHECKPOINT_SEC` | `600` | When a still-running command moves to the background |
 | `REDPI_WATCH_QUIET_SEC` | `300` | How long a command can be silent with nothing happening before it counts as stuck |
 | `REDPI_JOB_WAKE` | `1` | `0`: finish and warning notices wait for the agent's next turn instead of waking it |
+
+---
+
+## 🧾 Decisions and lessons learned
+
+Every run leaves the project smarter for the next one:
+
+- **ADRs.** A significant technical decision (a library or service, the architecture, a data model, an API contract, a trade-off someone could question) is recorded with `redpi_adr` as `docs/adr/NNNN-title.md`, with context, the decision, the alternatives, and the consequences. `docs/adr/README.md` indexes them. Numbers are claimed atomically, so parallel workers never clash; a new record can supersede an old one, and the old one says so.
+- **Lessons learned.** Anything that cost real time or went wrong goes into `docs/lessons-learned.md` with `redpi_lesson`: what happened, the lesson, and what to do next time. Entries are newest first and duplicates are skipped.
+- **Read back every time.** In a trusted project, every agent session is told the lessons (newest first, capped) and the list of decisions, and is asked to follow them and to supersede a decision rather than quietly go against it.
+- **In RedPlan:**
+  - Workers record their decisions and lessons before moving a task to review, and reviewers send work back when a significant decision has no ADR.
+  - Right after approval, the CEO records the plan's key decisions as ADRs.
+  - At the end, the CEO holds a retrospective: `redplan_finish_run` requires at least one lesson for the next run.
+  - Claude Code, Codex and OpenCode workers use `redpi-hq adr` and `redpi-hq lesson`.
+
+`/decisions` lists the ADRs and where the lessons are. Commit both folders with the work; they are ordinary Markdown.
 
 ---
 
@@ -919,6 +940,8 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 📚 | `/yitec-memory` | Show local RedPi memory/lessons. |
 | 🕵️ | `/yitec-review` | Run advisor-lite review using reviewer role. |
 | ⏳ | `/jobs` | Background jobs with their health reports. |
+| 🧾 | `/decisions` | This project's ADRs and where its lessons learned are. |
+| 🪶 | `/ponytail [lite\|full\|ultra\|off]` | Minimal-code mode (from the ponytail package). |
 
 ---
 
@@ -1045,6 +1068,7 @@ Smoke coverage includes:
 - HQ sign-in: password login, signed sessions (tampering rejected), HTTP Basic, no open redirect, token links retired once a password exists, password change signs browsers out, rate limiting; the projects home API
 - RedPlan end to end: `/redplan` → first-use HQ password (typed masked, never echoed, saved 0600, signs in) → plan → approval → three real Pi workers in tmux (shared folder, git worktree, independent reviewer) → board updates, teammate chat, reports to the CEO, human instructions, btw side questions answered while a turn is running (without touching it) and instructions relayed into the live session, an interrupt that stops a running turn, the review gate, a crash + resume that keeps the worker's conversation, and a healthy doctor report
 - HQ rules: closure reasons, review gate, task history, atomic handoffs, stale-launch guard, and the parked-worker ladder; reopen limits, stop when done (and closing workers when the run ends), needs-reply flags and the chat cap between two workers, the critical-path staffing warning, the planning nudge, token use, and screenshots
+- Decisions and lessons (in a temporary git repo): numbered ADRs with an index (five parallel writers get five numbers), supersede, lessons newest first without duplicates, the `redpi-hq adr`/`lesson` commands, and the lessons and decisions in every trusted session's prompt (never an untrusted one), capped
 - Job watcher (against a stub Pi): quick commands unchanged, short timeouts still kill, long commands move to the background with a report instead of blocking, `wait` returns on finish, finish and stuck messages wake the agent and reach HQ, stop needs a reason, Esc stops the whole job, and errors in the log are called out
 - Tickets: validation, attachments (stored privately, images inline, everything else downloads with a sandbox), the CEO told to act at once on urgent ones with who is free, assigning with a brief that carries the whole ticket, a worker spawned for a ticket without a plan, a ticket reopening a finished run; in the browser, filing one with an attachment (urgent first on the board, panel, timeline), Markdown rendered safely on the event board, and the form at phone width
 - Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the recreation room, each to their own spot; token use charts; the Screenshots tab with its lightbox
@@ -1117,6 +1141,7 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 - The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens) and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
 - Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
 - Prompt routing uses [Jev](https://openrouter.ai/blog/insights/what-is-jev/), TypeSafe's decision model; `redpi_jevgrep` runs [Jevgrep](https://github.com/dzhng/jevgrep) (MIT), installed from npm on demand, with usage guidance adapted from its agent skill.
+- [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) by Dietrich Gebert is installed as a companion Pi package for minimal-code mode.
 - Plan-and-subagent workflow skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT) and skills from [Matt Pocock](https://github.com/mattpocock/skills).
 
 See [`NOTICE`](./NOTICE) for licenses and details.

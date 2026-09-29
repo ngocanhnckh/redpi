@@ -150,9 +150,20 @@ function announceChanges(a, b) {
   if (lines.length) announce(lines.join(". "));
 }
 
+// The CEO session checks in every 30 s; an older RedPi in that terminal never does.
+function ceoLink() {
+  const r = state.run, caps = (() => { try { return JSON.parse(r.ceo_caps || "[]"); } catch { return []; } })();
+  const fresh = r.ceo_seen && (state.now || Date.now()) - r.ceo_seen < 120_000;
+  if (!r.ceo_seen) return { ok: false, text: "The CEO session is running an older RedPi: type /reload in the CEO's terminal so it can answer on the side, reply to you here, and take tickets." };
+  if (!fresh) return { ok: false, text: `The CEO session has not checked in since ${ago(r.ceo_seen)}: is its terminal still open? Start it again (or /reload) so it can take messages and tickets.` };
+  return { ok: caps.includes("aside"), text: caps.includes("aside") ? "" : "The CEO session's RedPi is out of date: type /reload in its terminal." };
+}
+
 function needsYou() {
   const { workers, tasks, messages } = state;
   const items = [];
+  const ceo = ["done", "cancelled"].includes(state.run.status) ? { ok: true } : ceoLink();
+  if (!ceo.ok) items.push({ id: "ceo", level: "red", text: ceo.text });
   const name = (id) => workers.find((w) => w.id === id)?.name || id;
   // Only blockers waiting on you; the rest (a teammate, the CEO, something external) the team handles.
   for (const t of tasks.filter((t) => t.status === "blocked" && t.blocked_on === "human")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
@@ -706,8 +717,10 @@ function pendingNote(id, name, msgs) {
   const lastMine = [...msgs].reverse().find((m) => m.sender === "human");
   if (!lastMine || msgs.some((m) => m.id > lastMine.id && m.sender === id)) return "";
   const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
+  const link = id === "ceo" ? ceoLink() : { ok: true };
   const text = w && !w.alive ? `${name} is offline. Your message waits in their inbox until they are back.`
-    : lastMine.kind === "aside" ? `${name} is answering on the side…`
+    : !link.ok ? link.text
+    : lastMine.kind === "aside" ? (Date.now() - lastMine.created > 3 * 60_000 ? `${name} has not answered on the side after ${ago(lastMine.created).replace(/ ago$/, "")}. The model may be slow or failing; check ${name}'s terminal.` : `${name} is answering on the side…`)
       : `${name} has your message. Their reply appears here when they finish the current turn.`;
   return `<div class="bub them pending"><div class="bub-body">${esc(text)}<span class="dots">…</span></div></div>`;
 }

@@ -93,3 +93,10 @@ provider endpoints and model ids (lib/jev.ts, from packages/core/src/providers.t
 the redpi_jevgrep usage guidance (from skills/jevgrep/SKILL.md), the connection
 check (from `jg doctor`), and the test-only request-routing preload
 (scripts/fixtures/jev-route-preload.mjs, from test/fixtures/provider-route.mjs).
+
+-------------------------------------------------------------------------------
+ponytail — https://github.com/DietrichGebert/ponytail
+Copyright (c) Dietrich Gebert — MIT License
+
+Not bundled: RedPi's installer (and a forced /redpi-update) installs it as a
+separate Pi package with `pi install git:github.com/DietrichGebert/ponytail`.

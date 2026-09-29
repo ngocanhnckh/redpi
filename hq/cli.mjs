@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { addLesson, projectRoot, writeAdr } from "../lib/knowledge.mjs";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const HQ_DIR = process.env.REDPI_HQ_DIR || join(AGENT_DIR, "yitec", "hq");
@@ -22,7 +23,24 @@ const USAGE = `redpi-hq — your RedPlan board and team chat
   redpi-hq task <id> --handoff <name> <note>   hand a task to a teammate
   redpi-hq send <name|ceo|all> [--reply] <message>
                                                message a teammate, the CEO, or everyone (--reply: you need an answer;
-                                               plain updates do not wake an idle teammate)`;
+                                               plain updates do not wake an idle teammate)
+  redpi-hq adr --title T --context C --decision D --consequences X [--alternatives A] [--task ID] [--supersedes N]
+                                               record a significant decision in docs/adr/ (numbered, indexed)
+  redpi-hq lesson --what W --lesson L --next N [--area A]
+                                               add a lesson learned to docs/lessons-learned.md`;
+
+// --key value flags (a value runs to the next --flag).
+function flags(args) {
+  const out = {};
+  for (let i = 0; i < args.length; i++) {
+    const m = /^--([a-z]+)$/.exec(args[i]);
+    if (!m) continue;
+    const vals = [];
+    while (i + 1 < args.length && !/^--[a-z]+$/.test(args[i + 1])) vals.push(args[++i]);
+    out[m[1]] = vals.join(" ");
+  }
+  return out;
+}
 
 function die(msg) { console.error(msg); process.exit(1); }
 
@@ -40,6 +58,20 @@ async function hq(method, path, body) {
 
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") { console.log(USAGE); process.exit(0); }
+// Decisions and lessons live in the project, so they work with or without HQ.
+if (cmd === "adr" || cmd === "lesson") {
+  const f = flags(rest), root = projectRoot(process.cwd()), by = process.env.REDPI_HQ_NAME || undefined;
+  try {
+    if (cmd === "adr") {
+      const r = writeAdr(root, { title: f.title, context: f.context, decision: f.decision, alternatives: f.alternatives, consequences: f.consequences, task: f.task, supersedes: f.supersedes ? Number(f.supersedes) : undefined, by });
+      console.log(`Recorded ADR ${String(r.number).padStart(4, "0")}: ${r.path}`);
+    } else {
+      const r = addLesson(root, { what: f.what, lesson: f.lesson, nextTime: f.next, area: f.area, by });
+      console.log(r.added ? `Lesson added to ${r.path}` : `That lesson is already in ${r.path}`);
+    }
+  } catch (e) { die(`redpi-hq: ${e.message} (${cmd === "adr" ? "--title, --context, --decision, --consequences" : "--what, --lesson, --next"} are required)`); }
+  process.exit(0);
+}
 if (!ME || !RUN) die("redpi-hq: not running inside a RedPlan worker (REDPI_HQ_WORKER / REDPI_HQ_RUN are not set)");
 
 if (cmd === "status") {

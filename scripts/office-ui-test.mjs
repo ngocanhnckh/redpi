@@ -29,6 +29,11 @@ const salt = randomBytes(16);
 writeFileSync(join(dir, "auth.json"), JSON.stringify({ version: 1, user: "yitec", salt: salt.toString("hex"), hash: scryptSync("password123", salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex"), N: 16384, r: 8, p: 1 }));
 
 const runId = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Office test" })).run.id;
+// A connected CEO session checks in every 30 s; this test's "CEO" does the same for its runs.
+const ceoRuns = new Set([runId]);
+const ceoIn = (id) => api("POST", `/api/runs/${id}/ceo-events`, { caps: ["aside", "reply", "ticket", "presence"] }).catch(() => {});
+await ceoIn(runId);
+setInterval(() => ceoRuns.forEach(ceoIn), 20_000).unref();
 const ids = {};
 for (const [name, role] of [["Alex", "backend developer"], ["Priya", "frontend developer"], ["Sam", "data engineer"], ["Rin", "designer"]])
   ids[name] = (await api("POST", `/api/runs/${runId}/workers`, { name, role, cwd: "/tmp/office-test" })).id;
@@ -328,6 +333,7 @@ const plan = {
   risks: ["Card declines"], outOfScope: ["Crypto"],
 };
 const run2 = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Checkout" })).run.id;
+ceoRuns.add(run2); await ceoIn(run2);
 const pl2 = await api("POST", `/api/runs/${run2}/plans`, { plan });
 await api("POST", `/api/plans/${pl2.id}/decision`, { decision: "approve" });
 const kim = (await api("POST", `/api/runs/${run2}/workers`, { name: "Kim", role: "backend developer", cwd: "/tmp/checkout", taskIds: ["T1", "T2", "T3"] })).id;
@@ -398,6 +404,8 @@ if (mdv.strong !== "Status:" || mdv.code !== "checkout.ts" || mdv.li !== 2 || md
 const runT = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", title: "Fixes" })).run.id;
 await page.goto(`${base}/runs/${runT}`);
 await page.waitForSelector("[data-new-ticket]");
+// No CEO session has checked in for this run: HQ says so, instead of promising answers.
+if (!/type \/reload in the CEO's terminal/.test(await page.textContent("#needs-slot"))) await fail("a run whose CEO never checked in should say to /reload it");
 await page.click('[data-view="board"]');
 await page.click("[data-new-ticket]");
 await page.waitForSelector("#ticket-form #tk-title");

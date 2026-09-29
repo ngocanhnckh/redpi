@@ -2,6 +2,7 @@
 // worker sub-sessions (full Pi sessions in tmux) that coordinate through HQ.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { addLesson, projectRoot, LESSONS_FILE } from "../lib/knowledge.mjs";
 import { secretInput } from "../lib/secret-input.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
@@ -237,7 +238,7 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Draw flows: one flowchart per feature the human will use (usually one per story), step by step from the user's action to the result, each step saying where it runs (component and technology), what happens in plain words, and what data moves, with decision steps for the branches that matter (wrong password, not found, timeout, retry). The human reads the flows to confirm the business logic and the tech at each step, so make them concrete and readable: "User types username and password (Browser · Next.js login form)" → "Form posts them over HTTPS to POST /auth/login (NestJS AuthController)" → "Look up the user and compare the password with its bcrypt hash (NestJS AuthService · Postgres users table)" → decision "Match?" → yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'". Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). When every task is done: merge worktree branches, run the full verification, review the result against the plan, then call redplan_finish_run and report to the human; finishing the run closes the workers' sessions. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team: usually 2–6 workers, one per parallel lane of the critical-path analysis, plus one "independent reviewer" worker unless the plan sets review to "self". Builders move tasks to review; the reviewer checks the exact diff against the acceptance criteria and marks them done or sends them back. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). Right after approval, record the plan's key decisions (the verified technologies and the architecture) as ADRs with redpi_adr, one per decision, citing the plan, so every worker builds on them. When every task is done: merge worktree branches (renumber any ADRs that got the same number on different branches, and keep docs/adr/README.md in step), run the full verification, review the result against the plan, then hold a short retrospective: what slowed the run or went wrong (waiting, rework, review loops, wrong assumptions, slow builds) and what the next run should do differently. Call redplan_finish_run with those lessons (they go into docs/lessons-learned.md, which every later session reads) and report to the human; finishing the run closes the workers' sessions. For a ticket, the worker records its own decisions and lessons. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
@@ -265,6 +266,7 @@ How you work:
 5. Use the exact technologies and APIs in your brief; do not substitute look-alikes.
 6. When all your tasks are done, send the CEO one short report (what changed, how you verified it, anything left) and stop: no new work, no re-reviews, no reopening closed tasks. If you think a closed task is wrong, send its reviewer or the CEO the evidence once.
 7. Long commands (docker builds, big test suites, deploys): start them with redpi_job and wait with redpi_job wait, never with sleep loops. If one is slower than expected, investigate (its logs, processes, docker, disk, network) and tell the CEO what you found before waiting more.
+8. Leave the project smarter than you found it. Before moving a task to review: record each significant decision you made as an ADR with redpi_adr (library or service, architecture, data model, API contract, a trade-off someone could question; give the task id), and anything that cost you real time with redpi_lesson (what happened, the lesson, what to do next time). Commit them with your change. Read the lessons and decisions in your instructions first and follow them.${reviewer ? " As a reviewer, check that significant decisions in the diff have an ADR and send the task back if one is missing." : ""}
 Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why (e.g. "Reading the auth module to see how sessions are stored."), and after it, one sentence on what you found or changed. The human follows these lines live in RedPi HQ.
 
 ${frontend ? `Frontend work: check what you built in a real browser before moving a card to review. Use Playwright: redpi_browser for quick checks (goto <url>, text, click, console, errors, screenshot <path>) or a Playwright script for whole flows. Load every page your task touches, click through its flows including the failure branches, check the console for errors, and look at it at desktop (1280px) and phone (390px) widths. Take screenshots of the finished result and share them with redplan_share_screenshot (task id and a caption saying what it shows); they appear in HQ's Screenshots tab and the reviewer checks them. redpi_browser screenshots are shared automatically.${reviewer ? " As the reviewer of UI work, look at the shared screenshots and re-check the flows in the browser yourself." : ""}
@@ -548,10 +550,20 @@ export default function (pi: ExtensionAPI) {
     finally { delivering = false; }
   }
 
+  // The CEO checks in with HQ every 30 s, so the dashboard knows it is connected and what it can do.
+  const CEO_CAPS = ["aside", "reply", "ticket", "presence"];
+  let lastPresence = 0;
+  function ceoPresence() {
+    if (WORKER_ID || !runId || Date.now() - lastPresence < 30_000) return;
+    lastPresence = Date.now();
+    hq("POST", `/api/runs/${runId}/ceo-events`, { caps: CEO_CAPS }).catch(() => { lastPresence = 0; });
+  }
   function startPolling() {
     if (poller) clearInterval(poller);
-    poller = setInterval(pollInbox, 2000);
+    lastPresence = 0;
+    poller = setInterval(() => { ceoPresence(); pollInbox(); }, 2000);
     poller.unref?.();
+    ceoPresence();
   }
 
   pi.on("session_start", async (_event: any, ctx: any) => {
@@ -977,7 +989,7 @@ export default function (pi: ExtensionAPI) {
           return text(`${params.taskId} assigned to ${params.assignTo}; they have the brief and start now.`);
         }
         const t = await hq("POST", `/api/runs/${runId}/tasks/${encodeURIComponent(params.taskId)}`, { status: params.status, note: params.note, handoffTo: params.handoffTo, waitingOn: params.waitingOn, actor: me(), ...(WORKER_ID && params.status === "in_progress" ? { workerId: WORKER_ID } : {}) });
-        return text(params.handoffTo ? `${t.id} handed to ${params.handoffTo}.` : `${t.id} is now ${t.status}.`);
+        return text(params.handoffTo ? `${t.id} handed to ${params.handoffTo}.` : `${t.id} is now ${t.status}.${WORKER_ID && t.status === "review" ? " If you made a significant decision on it, record it with redpi_adr; if something cost you time, add it with redpi_lesson (do it now if you have not)." : ""}`);
       } catch (e: any) { throw new Error(e.message); }
     },
   } as any);
@@ -996,13 +1008,24 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "redplan_finish_run", label: "Finish RedPlan run",
-    description: "Mark the run done after all tasks are complete, work is integrated, and verification passed. Include the final report for the human.",
-    parameters: Type.Object({ report: Type.String() }),
-    async execute(_id: string, params: any) {
+    description: "Mark the run done after all tasks are complete, work is integrated, and verification passed. Include the final report for the human and the retrospective's lessons (saved to docs/lessons-learned.md for every later run).",
+    parameters: Type.Object({
+      report: Type.String(),
+      lessons: Type.Array(Type.Object({
+        what: Type.String({ description: "What happened in this run (the symptom and its cost)" }),
+        lesson: Type.String({ description: "The general lesson, one sentence" }),
+        nextTime: Type.String({ description: "What the next run should do differently, concretely" }),
+        area: Type.Optional(Type.String()),
+      }), { minItems: 1, description: "Retrospective: at least one lesson for the next run (what slowed this one down or went wrong, and what to do instead)" }),
+    }),
+    async execute(_id: string, params: any, _s: any, _u: any, ctx: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
+      if (!params.lessons?.length) throw new Error("Hold a short retrospective first: give at least one lesson for the next run.");
+      const root = projectRoot(ctx.cwd);
+      const saved = params.lessons.map((l: any) => addLesson(root, { ...l, area: l.area || "retrospective", by: "CEO" })).filter((r: any) => r.added).length;
       await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "chat", body: params.report });
       await hq("PATCH", `/api/runs/${runId}`, { status: "done" });
-      return text(`Run marked done. Report posted to HQ: ${hqUrl(`/runs/${runId}`)}`);
+      return text(`Run marked done. Report posted to HQ: ${hqUrl(`/runs/${runId}`)}. ${saved} lesson${saved === 1 ? "" : "s"} added to ${LESSONS_FILE}; commit it.`);
     },
   } as any);
 }

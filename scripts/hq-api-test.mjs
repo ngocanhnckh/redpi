@@ -298,6 +298,11 @@ const run4 = (await api("POST", "/api/runs", { projectPath: "/tmp/slow-plan", ti
 let nudged = false;
 for (let i = 0; i < 40 && !nudged; i++) { await new Promise((r) => setTimeout(r, 150)); nudged = (await api("GET", `/api/runs/${run4}/inbox?for=ceo&after=0`)).body.filter((m) => /without submitting a plan/.test(m.body)).length === 1; }
 if (!nudged) fail("no planning nudge");
+// The CEO session checks in (with what its RedPi can do), so the dashboard can tell an out-of-date CEO.
+if ((await api("GET", `/api/runs/${run4}`)).body.run.ceo_seen) fail("no CEO has checked in yet");
+await api("POST", `/api/runs/${run4}/ceo-events`, { caps: ["aside", "reply", "ticket", "presence"] });
+const r4 = (await api("GET", `/api/runs/${run4}`)).body.run;
+if (!(Date.now() - r4.ceo_seen < 5000) || !JSON.parse(r4.ceo_caps).includes("aside")) fail("CEO presence not recorded", r4);
 
 // Tickets: the human adds work straight to the board (no plan), with attachments; the CEO is told to
 // get it done now; a ticket reopens a finished run; assigning gives the worker the full ticket.
@@ -388,5 +393,5 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, projects home, password sign-in, plan review comments, harness per task.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

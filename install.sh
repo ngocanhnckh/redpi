@@ -57,6 +57,9 @@ pi install npm:pi-subagents
 echo "Installing Claude Code bridge (optional Claude subscription provider and AskClaude delegation)..."
 pi install npm:pi-claude-bridge
 
+echo "Installing ponytail (DietrichGebert/ponytail, MIT): lazy-senior-dev mode, the smallest code that works..."
+pi install git:github.com/DietrichGebert/ponytail
+
 echo "Installing Matt Pocock skills..."
 if [ -d "$MATT_DIR/.git" ]; then
   git -C "$MATT_DIR" pull --ff-only

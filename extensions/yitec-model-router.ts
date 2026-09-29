@@ -799,6 +799,7 @@ function shouldAutoUpdate(cfg: Config): boolean {
   return true;
 }
 
+const PONYTAIL_PACKAGE = "git:github.com/DietrichGebert/ponytail";
 async function updateRedPi(cfg: Config, force = false): Promise<string> {
   const lines = [`RedPi update ${force ? "forced" : "auto"}`];
   if (!force && !shouldAutoUpdate(cfg)) return "RedPi auto-update skipped: interval has not elapsed.";
@@ -816,6 +817,11 @@ async function updateRedPi(cfg: Config, force = false): Promise<string> {
       if (existsSync(join(dir, ".git"))) lines.push(await run("git", ["pull", "--ff-only"], dir));
       else lines.push(`Skill repo not found, skipping: ${dir}`);
     }
+  }
+  // Companion Pi packages added after first install (ponytail: minimal-code mode). Only on a forced
+  // update, so a running Pi never has its package list changed under it; `pi update` keeps them current.
+  if (force && !existsSync(join(AGENT_DIR, "git", "github.com", "DietrichGebert", "ponytail"))) {
+    lines.push(await run("pi", ["install", PONYTAIL_PACKAGE], AGENT_DIR, 5 * 60 * 1000));
   }
   return lines.join("\n\n");
 }

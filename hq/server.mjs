@@ -149,6 +149,8 @@ for (const [table, col, type] of [
   ["workers", "stop_requested", "TEXT"], ["workers", "stop_at", "INTEGER"],
   ["runs", "plan_nudged", "INTEGER"],
   // Tickets: tasks the human (or the CEO, for a request typed in its terminal) adds without a plan.
+  // The CEO session's presence: when it last checked in, and what its RedPi can do (side answers, tickets).
+  ["runs", "ceo_seen", "INTEGER"], ["runs", "ceo_caps", "TEXT"],
   ["tasks", "kind", "TEXT"], ["tasks", "priority", "TEXT"], ["tasks", "description", "TEXT"], ["tasks", "hours", "REAL"], ["tasks", "created", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
@@ -743,7 +745,9 @@ route("POST", "/api/runs/:id/ceo-events", (b, p) => {
     id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", id, id);
   recordUsage(p.id, "ceo", b.usage);
-  notify(p.id, "worker");
+  const first = !one("SELECT ceo_seen FROM runs WHERE id = ?", p.id).ceo_seen;
+  run("UPDATE runs SET ceo_seen = ?, ceo_caps = COALESCE(?, ceo_caps) WHERE id = ?", now(), Array.isArray(b.caps) ? JSON.stringify(b.caps.map(String).slice(0, 20)) : null, p.id);
+  if (first || (b.events || []).length || (b.usage || []).length) notify(p.id, "worker");
   return { ok: true };
 });
 
