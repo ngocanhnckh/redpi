@@ -76,7 +76,7 @@ export function paintStatic(map, pal) {
   // the cafeteria, plain tiles in the files room, patterned carpet in the meeting room.
   const inside = (r, x, y) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
   for (let ty = 0; ty < map.H; ty++) for (let tx = 0; tx < map.W; tx++) {
-    const cafe = ty >= map.lounge.y && tx >= map.W - 10;
+    const cafe = ty >= map.lounge.y && tx >= (map.cafe ? map.cafe.x : map.W - 10);
     const work = ty < map.lounge.y && tx >= 11;
     const cafe2 = cafe && ty < (map.bottom?.y ?? map.H);
     const kind = inside(map.files, tx, ty) ? "archive" : inside(map.meeting, tx, ty) ? "meet" : map.rec && inside(map.rec, tx, ty) ? "rec" : cafe2 ? "cafe" : work ? "carpet" : "wood";

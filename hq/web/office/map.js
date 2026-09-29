@@ -3,21 +3,39 @@
 // of four, a files & servers room (where research and builds happen), a glass
 // meeting room (where people talk), a cafeteria (where people wait on builds over a
 // coffee), a recreation room (games, gym and reading, for anyone with nothing left to
-// do), and the entrance with a "needs you" waiting area and the YOU terminal. Returns
-// the furniture list, a walkability grid for pathfinding, and named spots.
+// do), and the entrance with a "needs you" waiting area and the YOU terminal. Every
+// shared area grows with the team: desk pods, café tables, rec-room armchairs and the
+// waiting mat. Returns the furniture list, a walkability grid for pathfinding, and named spots.
 
 export const TILE = 16;
 
 export function buildMap(workerCount) {
-  const pods = Math.max(1, Math.ceil(workerCount / 4));
+  const n = Math.max(1, workerCount || 0);
+  const pods = Math.ceil(n / 4);
   const cols = Math.min(3, pods);
   const rows = Math.ceil(pods / 3);
   const x0 = 11, y0 = 2;
   const workBottom = y0 + rows * 6;
   const y1 = Math.max(workBottom + 1, 10);        // lounge (meeting + cafeteria) starts here
   const W = Math.max(11 + cols * 8 + 10, 29);     // pods, then the files & servers room on the right
-  const y2 = y1 + 7;                              // bottom band: entrance on the left, recreation room
-  const H = y2 + 8;
+  const mx = Math.floor(W / 2) - 2;               // meeting room
+  const cx = W - 9;                               // cafeteria
+  // Café tables seat four; wider offices add table columns toward the meeting room, bigger
+  // teams add table rows (about one seat for every two people waiting on a build at once).
+  const cafeCols = [cx + 1, cx + 4];
+  for (let tx = cx - 3; tx >= mx + 8; tx -= 3) cafeCols.push(tx);
+  const cafeRows = Math.max(1, Math.ceil(Math.max(8, Math.ceil(n * 0.6) + 2) / (cafeCols.length * 4)));
+  const y2 = y1 + 7 + (cafeRows - 1) * 3;         // bottom band: entrance on the left, recreation room
+  // Recreation room: one spot for everyone (and the CEO) when the work is done, adding rows of
+  // armchairs below the games, gym and reading corners when the base room is too small.
+  const rx = 10;
+  let baseRec = 10;
+  for (let ex = rx + 15; ex + 2 < W - 1; ex += 4) baseRec++;
+  const perRecRow = Math.floor((W - 3 - (rx + 1)) / 2) + 1;
+  const recRows = Math.max(0, Math.ceil((n + 1 - baseRec) / perRecRow));
+  // The "needs you" mat can hold the whole team, four abreast, by the entrance.
+  const matRows = Math.max(2, Math.ceil(n / 4));
+  const H = Math.max(y2 + 8 + recRows * 2, y2 + 2 + matRows + 1);
 
   const solid = Array.from({ length: H }, () => new Array(W).fill(false));
   const items = [];
@@ -70,7 +88,7 @@ export function buildMap(workerCount) {
   }
 
   // Lounge: glass meeting room in the middle, cafeteria on the right.
-  const mx = Math.floor(W / 2) - 2, my = y1 + 2;
+  const my = y1 + 2;
   // The room leaves the row above the bottom wall open as the corridor to the entrance.
   const meeting = { x: mx - 1, y: y1 + 1, w: 6, h: 4 };
   glass("glassH", mx - 2, y1, 8, [mx + 1, mx + 2]);   // double door facing the desks
@@ -85,20 +103,23 @@ export function buildMap(workerCount) {
     meetingSeats.push({ x: mx + i, y: my - 1, dir: "down" }, { x: mx + i, y: my + 2, dir: "up" });
     add("chair", mx + i, my - 1, 1, 1, { walkable: true }); add("chair", mx + i, my + 2, 1, 1, { walkable: true, back: true });
   }
-  const cx = W - 9;
   add("counter", cx, y1, 6, 1);
   add("coffee", cx + 6, y1, 1, 1);
-  add("cafeTable", cx + 1, y1 + 3, 2, 1);
-  add("cafeTable", cx + 4, y1 + 5, 2, 1);
-  const cafeSeats = [
-    { x: cx + 1, y: y1 + 2, dir: "down" }, { x: cx + 2, y: y1 + 2, dir: "down" }, { x: cx + 1, y: y1 + 4, dir: "up" },
-    { x: cx + 4, y: y1 + 4, dir: "down" }, { x: cx + 5, y: y1 + 4, dir: "down" }, { x: cx + 5, y: y1 + 6, dir: "up" },
-  ];
+  // Tables in rows three tiles apart (seats, table, seats), nearest the counter first; the two
+  // rows above the recreation room stay clear as the aisle to its doors.
+  const cafeSeats = [];
+  for (let j = 0; j < cafeRows; j++) {
+    const ty = y1 + 3 + j * 3;
+    for (const tx of cafeCols) {
+      add("cafeTable", tx, ty, 2, 1);
+      cafeSeats.push({ x: tx, y: ty - 1, dir: "down" }, { x: tx + 1, y: ty - 1, dir: "down" }, { x: tx, y: ty + 1, dir: "up" }, { x: tx + 1, y: ty + 1, dir: "up" });
+    }
+  }
   add("plant", 1, y1); add("plant", W - 2, y2 - 1);
 
   // Recreation room (bottom band, glass walls): a games corner, a gym and a reading nook.
   // Everyone with nothing left to do comes here; each spot holds one person.
-  const rx = 10, ry = y2 + 1;
+  const ry = y2 + 1;
   const rec = { x: rx, y: ry, w: W - 1 - rx, h: H - 1 - ry };
   glass("glassH", rx - 1, y2, W - rx, [rx + 4, rx + 10, W - 4]);
   glass("glassV", rx - 1, ry, H - 1 - ry, [ry + 3]);
@@ -116,6 +137,10 @@ export function buildMap(workerCount) {
     add("armchair", ex + 1, ry + 2, 1, 1, { walkable: true }); readSpots.push({ x: ex + 1, y: ry + 2, dir: "down", sit: true, prop: "book" });
     add("plant", ex + 2, ry);
   }
+  // Bigger teams: rows of armchairs below, with an aisle above each row.
+  for (let b = 0; b < recRows; b++) {
+    for (let ax = rx + 1; ax <= W - 3; ax += 2) { add("armchair", ax, ry + 7 + b * 2, 1, 1, { walkable: true }); readSpots.push({ x: ax, y: ry + 7 + b * 2, dir: "down", sit: true, prop: "book" }); }
+  }
   add("plant", W - 2, H - 2);
   const recSpots = [...gameSpots, ...gymSpots, ...readSpots];
   // The YOU terminal: where messages to the human land, next to the entrance.
@@ -123,9 +148,10 @@ export function buildMap(workerCount) {
   const you = { x: 7, y: H - 3 };
   const youSpot = { x: 7, y: H - 2, dir: "up" };
   // "Needs you" mat in front of the door: blocked / parked / waiting workers queue here.
+  // Filled from the door outward; one spot per person, so nobody ever stands on someone else.
   const waitSpots = [];
-  for (let i = 0; i < 8; i++) waitSpots.push({ x: 1 + (i % 4), y: i < 4 ? H - 2 : H - 3, dir: "down" });
-  const mat = { x: 1, y: H - 3, w: 5, h: 2 };
+  for (let i = 0; i < matRows * 4; i++) waitSpots.push({ x: 1 + (i % 4), y: H - 2 - Math.floor(i / 4), dir: "down" });
+  const mat = { x: 1, y: H - 1 - matRows, w: 5, h: matRows };
 
   const walkable = (x, y) => x >= 0 && y >= 0 && x < W && y < H && !solid[y][x];
   const inside = (r, x, y) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
@@ -146,6 +172,7 @@ export function buildMap(workerCount) {
     whiteboard: { x: 2, y: 0, w: 7, h: 2 }, whiteboardSpot: { x: 5, y: 2, dir: "up" },
     entry: { x: door.x, y: H - 2 },
     lounge: { y: y1 }, bottom: { y: y2 },
+    cafe: { x: Math.min(W - 10, Math.min(...cafeCols) - 1), y: y1, w: W - 1 - Math.min(W - 10, Math.min(...cafeCols) - 1), h: y2 - y1 },
     width: W, height: H,
     isWalkable: walkable,
   };

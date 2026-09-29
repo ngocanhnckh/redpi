@@ -518,6 +518,7 @@ Every run has five views. **Auto-play** (the button beside the tabs) fades throu
 - People with nothing left to do (their tasks are done, or the run is finished) head to the **recreation room** at the bottom: the couch and PlayStation, the treadmills and weights, or an armchair with a book. Everyone has their own spot (no two people ever share a seat or a chair, in the meeting room too), and they switch activities now and then.
 - Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`.
 - Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); a worker writing to you walks to the **YOU** terminal to post it.
+- The floor grows with the team: a desk pod for every four people, and café tables, rec-room armchairs and room on the NEEDS YOU mat for everyone, so nobody ends up sharing a seat or standing on someone else.
 - Finishing a task after real work (at least a minute busy) earns confetti.
 - Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
 - The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
@@ -1096,6 +1097,7 @@ npm pack --dry-run
 Smoke coverage includes:
 
 - automatic first-run provider onboarding
+- office floor scales with the team (1 to 40 people): a desk, café seat, rec-room spot and "needs you" spot for everyone, all reachable from the entrance, none shared
 - browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained
 - image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
 - `office-files` skill: Markdown to Word and PowerPoint and back, CSV to Excel, PDF merge and page pick (through `uv`; skipped without it)
