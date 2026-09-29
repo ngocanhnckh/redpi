@@ -47,10 +47,9 @@ SCRIPTS = {
     ("APPROVED", [
       ("redplan_spawn_worker", {"role": "backend developer", "name": "Alex", "taskIds": ["T1"], "workspace": "shared", "brief": "Build T1. Tell Peter the endpoint shape."}),
       ("redplan_spawn_worker", {"role": "full-stack developer", "name": "Peter", "taskIds": ["T2"], "workspace": "worktree", "brief": "Build T2. Wait for Alex's endpoint shape."}),
-      ("redplan_spawn_worker", {"role": "independent reviewer", "name": "Rita", "taskIds": [], "workspace": "shared", "brief": "Review tasks the CEO sends you."}),
+      ("redplan_spawn_worker", {"role": "independent reviewer", "name": "Rita", "taskIds": [], "workspace": "shared", "brief": "Review tasks as HQ sends them to you."}),
       ("redplan_spawn_worker", {"role": "docs writer", "name": "Cora", "taskIds": ["T3"], "workspace": "shared", "brief": "Write the README. TASK=T3"}),
     ]),
-    ("T1 Todo endpoints is ready for review", [("redplan_send", {"to": "Rita", "message": "Please review T1 (Alex, shared workspace)."})]),
     ("RESUME-ALEX", [("redplan_resume_worker", {"name": "Alex"})]),
   ],
   "Alex": [
@@ -61,7 +60,8 @@ SCRIPTS = {
     ]),
   ],
   "Rita": [
-    ("Please review T1", [("redplan_update_task", {"taskId": "T1", "status": "done", "note": "reviewed the diff; tests pass"})]),
+    # HQ sends the review straight to Rita (no relay through the CEO).
+    ("Review T1 now", [("redplan_update_task", {"taskId": "T1", "status": "done", "note": "reviewed the diff; tests pass"})]),
   ],
   "Peter": [
     ("message from Alex", [("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."})]),
@@ -250,7 +250,7 @@ try:
 
     def pane(name):
         return subprocess.run(["tmux", "-L", sock, "capture-pane", "-p", "-t", f"={name}"], capture_output=True, text=True).stdout
-    try: wait("Rita reviewed T1 to done", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None), 90)
+    try: wait("Rita got T1 straight from HQ and reviewed it to done", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None), 90)
     except SystemExit: print("---- Alex pane ----"); print(pane(names["Alex"]["tmux"])[-2500:]); raise
     history = hq("GET", f"/api/runs/{run['id']}/tasks/T1/history")
     if [h["to_status"] for h in history] != ["in_progress", "review", "done"] or history[-1]["actorName"] != "Rita":

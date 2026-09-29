@@ -152,6 +152,8 @@ for (const [table, col, type] of [
   // The CEO session's presence: when it last checked in, and what its RedPi can do (side answers, tickets).
   ["runs", "ceo_seen", "INTEGER"], ["runs", "ceo_caps", "TEXT"],
   ["tasks", "kind", "TEXT"], ["tasks", "priority", "TEXT"], ["tasks", "description", "TEXT"], ["tasks", "hours", "REAL"], ["tasks", "created", "INTEGER"],
+  // Who reviews a task (it comes back to them after findings), and the last staffing nudge to the CEO.
+  ["tasks", "reviewer_id", "TEXT"], ["runs", "staff_nudged", "INTEGER"], ["runs", "staff_key", "TEXT"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -163,6 +165,12 @@ const PARK_MS = Number(process.env.REDPI_HQ_PARK_MS || 5 * 60 * 1000);
 const PLAN_NUDGE_MS = Number(process.env.REDPI_HQ_PLAN_NUDGE_MS || 30 * 60 * 1000);
 // Workers asked to stop (run done) close themselves; after this long HQ closes their tmux session.
 const STOP_GRACE_MS = Number(process.env.REDPI_HQ_STOP_GRACE_MS || 3 * 60 * 1000);
+// Staffing: at most this many builders; a staffing nudge to the CEO at most this often.
+const MAX_BUILDERS = Number(process.env.REDPI_HQ_MAX_BUILDERS || 10);
+const STAFF_NUDGE_MS = Number(process.env.REDPI_HQ_STAFF_NUDGE_MS || 10 * 60 * 1000);
+// ...and only when the same work has been waiting this long (not while the CEO is still spawning).
+const STAFF_GRACE_MS = Number(process.env.REDPI_HQ_STAFF_GRACE_MS || 3 * 60 * 1000);
+const REVIEWER_RE = /review|qa|audit/i;
 // Teammate back-and-forth per pair per hour: a warning at the first number, refused at the second.
 const PAIR_WARN = 16, PAIR_MAX = 30;
 const SHOTS_DIR = join(HQ_DIR, "screenshots");
@@ -317,6 +325,85 @@ function recordUsage(runId, workerId, list) {
       runId, workerId, n(u.input), n(u.output), n(u.cacheRead), n(u.cacheWrite), Number.isFinite(Number(u.cost)) ? Number(u.cost) : 0, u.model ? String(u.model).slice(0, 120) : null, Number(u.at) || now());
   }
 }
+
+// A task that reaches review goes straight to a reviewer, not through the CEO: whoever reviewed it
+// before (it comes back to them after their findings), else the reviewer with the shortest queue.
+function routeReview(runId, t, note) {
+  const owner = t.worker_id ? one("SELECT * FROM workers WHERE id = ?", t.worker_id) : null;
+  const reviewers = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL AND id != ?", runId, t.worker_id || "").filter((w) => REVIEWER_RE.test(w.role));
+  if (!reviewers.length) {
+    addMessage(runId, "human", "ceo", "system", `${t.id} ${t.title} is ready for review and no reviewer is running. Spawn an independent reviewer now (redplan_spawn_worker, role "independent reviewer"; about one per three builders), or review it yourself.`);
+    return null;
+  }
+  const load = (w) => one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND reviewer_id = ? AND status = 'review' AND id != ?", runId, w.id, t.id).n;
+  const pick = reviewers.find((w) => w.id === t.reviewer_id) || reviewers.map((w) => [w, load(w)]).sort((a, b) => a[1] - b[1])[0][0];
+  run("UPDATE tasks SET reviewer_id = ? WHERE run_id = ? AND id = ?", pick.id, runId, t.id);
+  const criteria = planAcceptance(runId, t.id);
+  addMessage(runId, "human", pick.id, "brief", [
+    `Review ${t.id} now${t.reviewer_id === pick.id ? " (back from your findings: check they were fixed)" : ""}: ${t.title}`,
+    `Author: ${owner?.name || "unknown"}, workspace ${owner?.cwd || "unknown"}${owner?.branch ? ` on branch ${owner.branch}` : ""}.`,
+    `How they verified it: ${note || t.note || "(not given)"}`,
+    t.description ? `Task: ${t.description}` : "",
+    criteria.length ? `Acceptance criteria:\n${criteria.map((c) => `- ${c}`).join("\n")}` : "",
+    `Keep it in review while you check it. Check the exact change against the criteria and run its tests. Pass: move it to done with how you verified it, and list minor issues in that note rather than sending it back for them. Fail (a criterion not met, or a real bug): move it to in_progress with concrete findings; it goes back to ${owner?.name || "its author"} and returns to you for the re-check.`,
+  ].filter(Boolean).join("\n"), true);
+  const queue = load(pick) + 1;
+  if (queue >= 3) addMessage(runId, "human", "ceo", "system", `Review queue: ${pick.name} has ${queue} tasks waiting for review. Spawn another independent reviewer now (redplan_spawn_worker) so reviews do not hold up the run.`);
+  return pick;
+}
+
+// The approved plan: each task's dependencies, and its story's acceptance criteria.
+function approvedPlan(runId) {
+  const row = one("SELECT json, schedule FROM plans WHERE run_id = ? AND status = 'approved' ORDER BY version DESC LIMIT 1", runId);
+  try { return row ? { plan: JSON.parse(row.json), schedule: JSON.parse(row.schedule) } : null; } catch { return null; }
+}
+function planAcceptance(runId, taskId) {
+  const story = (approvedPlan(runId)?.plan?.stories || []).find((st) => (st.tasks || []).some((x) => x.id === taskId));
+  const task = story?.tasks.find((x) => x.id === taskId);
+  return [...(Array.isArray(task?.acceptance) ? task.acceptance : []), ...(Array.isArray(story?.acceptance) ? story.acceptance : [])].map(String).slice(0, 12);
+}
+
+// Work waiting for hands: tasks that could start now (dependencies done) but nobody is on, because they
+// are unowned, their owner is gone, or their owner is busy with another task. Tell the CEO exactly what to
+// do (hand them to free builders, or spawn more), once per change and at most every STAFF_NUDGE_MS.
+function staffingAdvice(runId) {
+  const tasks = all("SELECT * FROM tasks WHERE run_id = ?", runId);
+  const status = Object.fromEntries(tasks.map((t) => [t.id, t.status]));
+  const sched = approvedPlan(runId)?.schedule?.tasks || [];
+  const deps = Object.fromEntries((Array.isArray(sched) ? sched : Object.values(sched)).map((x) => [x.id, x.deps || []]));
+  const workers = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId);
+  const builders = workers.filter((w) => !REVIEWER_RE.test(w.role));
+  const busy = (w) => tasks.some((t) => t.worker_id === w.id && t.status === "in_progress");
+  const free = builders.filter((w) => !tasks.some((t) => t.worker_id === w.id && ["in_progress", "todo", "blocked"].includes(t.status)));
+  const waiting = tasks.filter((t) => t.status === "todo" && (deps[t.id] || []).every((d) => !status[d] || status[d] === "done")).filter((t) => {
+    const owner = workers.find((w) => w.id === t.worker_id);
+    return !owner || busy(owner) || REVIEWER_RE.test(owner.role);
+  });
+  if (!waiting.length) return null;
+  const why = (t) => { const o = workers.find((w) => w.id === t.worker_id); return o ? `${t.id} (queued behind ${o.name}'s ${tasks.find((x) => x.worker_id === o.id && x.status === "in_progress")?.id || "work"})` : `${t.id} (${t.worker_id ? "its owner is gone" : "unassigned"})`; };
+  const list = waiting.slice(0, 12).map(why).join(", ") + (waiting.length > 12 ? `, and ${waiting.length - 12} more` : "");
+  const key = waiting.map((t) => t.id).sort().join(",") + "|" + free.map((w) => w.id).sort().join(",");
+  if (free.length) return { key, text: `Work is waiting while ${free.map((w) => w.name).join(", ")} ${free.length > 1 ? "are" : "is"} free: ${list}. Give them these now, one task each (redplan_update_task handoffTo for owned tasks, assignTo for unassigned ones), so they run in parallel.` };
+  const room = Math.max(0, MAX_BUILDERS - builders.length);
+  if (!room) return { key, text: `${waiting.length} task${waiting.length > 1 ? "s" : ""} could start now, but all ${builders.length} builders are busy and the team is at its limit (${MAX_BUILDERS}): ${list}. Keep the critical path moving first.` };
+  const n = Math.min(waiting.length, room);
+  return { key, text: `${waiting.length} task${waiting.length > 1 ? "s" : ""} could start now but every builder is busy: ${list}. Spawn ${n} more worker${n > 1 ? "s" : ""} now (redplan_spawn_worker, one task each; hand the queued tasks over with handoffTo) so they run in parallel instead of waiting.` };
+}
+const staffSeen = new Map();   // run id -> { key, since }: how long the same work has been waiting
+function sweepStaffing() {
+  for (const r of all("SELECT * FROM runs WHERE status = 'executing'")) {
+    let advice;
+    try { advice = staffingAdvice(r.id); } catch (e) { console.error(`staffing check failed for ${r.id}: ${e.message}`); continue; }
+    if (!advice) { staffSeen.delete(r.id); if (r.staff_key) run("UPDATE runs SET staff_key = NULL WHERE id = ?", r.id); continue; }
+    const seen = staffSeen.get(r.id);
+    if (!seen || seen.key !== advice.key) { staffSeen.set(r.id, { key: advice.key, since: now() }); continue; }
+    if (now() - seen.since < STAFF_GRACE_MS) continue;
+    if (advice.key === r.staff_key || now() - (r.staff_nudged || 0) < STAFF_NUDGE_MS) continue;
+    addMessage(r.id, "human", "ceo", "system", advice.text);
+    run("UPDATE runs SET staff_nudged = ?, staff_key = ? WHERE id = ?", now(), advice.key, r.id);
+  }
+}
+setInterval(sweepStaffing, Math.min(30000, Math.max(200, Math.min(STAFF_NUDGE_MS, STAFF_GRACE_MS || STAFF_NUDGE_MS) / 4))).unref();
 
 // Every worker's own tasks are done: tell it once to report and stop (it is woken again only if asked something).
 function maybeReleaseWorker(runId, workerId) {
@@ -815,15 +902,25 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
     throw httpError(409, "this plan uses independent review: move the task to review; the reviewer (or the CEO) marks it done");
   }
 
+  // Sending reviewed work back: it returns to its author with the findings, never to the reviewer.
+  const bounce = t.status === "review" && b.status === "in_progress" && t.worker_id && actor !== t.worker_id;
+  if (bounce && !note) throw httpError(400, `sending ${p.task} back needs the findings: what fails and how you checked (it goes back to ${participantName(p.id, t.worker_id)}). To review it, leave it in review.`);
+  // Starting a task makes you its owner only if it has none (or is yours); a reviewer never takes it over.
+  const owner = b.workerId && !bounce && (!t.worker_id || t.worker_id === b.workerId || actor === "ceo" || actor === "human") ? b.workerId : null;
   run("UPDATE tasks SET status = COALESCE(?, status), worker_id = COALESCE(?, worker_id), note = COALESCE(?, note), updated = ? WHERE run_id = ? AND id = ?",
-    b.status || null, b.workerId || null, note || null, now(), p.id, p.task);
+    b.status || null, owner, note || null, now(), p.id, p.task);
+  if (bounce) {
+    if (actor.startsWith("wkr_")) run("UPDATE tasks SET reviewer_id = ? WHERE run_id = ? AND id = ?", actor, p.id, p.task);
+    addMessage(p.id, actor, t.worker_id, "brief", `Changes requested on ${p.task} (${t.title}) by ${participantName(p.id, actor)}:\n${note}\n\nFix these before starting anything else, verify again, then move it back to review; ${participantName(p.id, actor)} re-checks it.`, true);
+  }
   if (b.status) run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", blockedOn, p.id, p.task);
   if (b.status === "blocked" && (b.status !== t.status || blockedOn !== t.blocked_on)) routeBlocker(p.id, t, actor, blockedOn, note);
   if (b.status && b.status !== t.status) {
     recordTransition(p.id, p.task, t.status, b.status, actor, note, b.status === "blocked" ? blockedOn : null);
     addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: ${t.status} → ${b.status}${note ? ` (${note})` : ""}`);
     if (b.status === "review" && t.worker_id) {
-      addMessage(p.id, "human", "ceo", "system", `${p.task} ${t.title} is ready for review. ${planReview(p.id) === "independent" ? "Have the independent reviewer check the exact diff against the acceptance criteria." : ""}`.trim());
+      if (planReview(p.id) === "independent") routeReview(p.id, one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task), note);
+      else addMessage(p.id, "human", "ceo", "system", `${p.task} ${t.title} is ready for review.`);
     }
   }
   if (b.status === "in_progress" && actor.startsWith("wkr_")) run("UPDATE workers SET current_task = ?, updated = ? WHERE id = ?", p.task, now(), actor);

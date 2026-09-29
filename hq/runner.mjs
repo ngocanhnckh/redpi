@@ -84,8 +84,8 @@ async function instructions() {
   const independent = d.review !== "self";
   const reviewer = /review|qa|audit/i.test(w.role);
   const finish = reviewer
-    ? "done only after you checked the exact diff against the task's acceptance criteria and ran its tests; otherwise move it back to in_progress and send the author concrete findings"
-    : independent ? "review (not done) once it is implemented and you verified it yourself; an independent reviewer marks it done"
+    ? "done only after you checked the exact diff against the task's acceptance criteria and ran its tests. HQ sends you each task that reaches review; keep it in review while you check it (never move it to in_progress to mean reviewing), and review within minutes, oldest first. Pass: done, listing minor issues in the note (never send work back for nits). Fail (a criterion not met, or a real bug): in_progress with concrete findings; it goes back to its author and returns to you for the re-check"
+    : independent ? "review (not done) once it is implemented and you verified it yourself; an independent reviewer marks it done. When a reviewer sends a task back with findings, fix it before anything else"
       : "done once it is implemented and verified (tests/build pass), with a note on how you verified it";
   return `RedPlan worker. You are ${w.name}, ${w.role}, running in ${H.name} as part of a team led by a CEO session. Run: "${d.run.title}". Workspace: ${w.cwd}${w.branch ? ` on branch ${w.branch}` : " (shared with teammates)"}.
 Your tasks:

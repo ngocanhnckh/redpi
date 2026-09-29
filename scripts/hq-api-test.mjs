@@ -68,7 +68,7 @@ const fakeBin = join(dir, "fakebin");
 mkdirSync(fakeBin);
 writeFileSync(join(fakeBin, "claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n", { mode: 0o755 });
 const PATH_NO_CODEX = [fakeBin, ...(process.env.PATH || "").split(":").filter((d) => !existsSync(join(d, "codex")) && !existsSync(join(d, "opencode")))].join(":");
-proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600", REDPI_HQ_STOP_GRACE_MS: "500", REDPI_HQ_PLAN_NUDGE_MS: "400" }, stdio: "ignore" });
+proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600", REDPI_HQ_STOP_GRACE_MS: "500", REDPI_HQ_PLAN_NUDGE_MS: "400", REDPI_HQ_STAFF_NUDGE_MS: "300", REDPI_HQ_STAFF_GRACE_MS: "300" }, stdio: "ignore" });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
@@ -393,5 +393,41 @@ let locked = false;
 for (let i = 0; i < 10 && !locked; i++) locked = (await login("boss", `guess${i}`)).status === 429;
 if (!locked) fail("repeated wrong passwords were never rate limited");
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
+// Reviews go straight to a reviewer (not through the CEO); work sent back returns to its author, never
+// to the reviewer; the same reviewer re-checks it; a growing review queue and work waiting for hands are
+// reported to the CEO with what to do.
+{
+  const rid = (await api("POST", "/api/runs", { projectPath: "/tmp/demo-review", title: "Review flow" })).body.run.id;
+  const pv = await api("POST", `/api/runs/${rid}/plans`, { plan });
+  await api("POST", `/api/plans/${pv.body.id}/decision`, { decision: "approve" });
+  const hire = async (name, role, taskIds = []) => (await api("POST", `/api/runs/${rid}/workers`, { name, role, cwd: "/tmp/demo-review", taskIds })).body;
+  const bo = await hire("Bo", "backend developer", ["T1", "T3"]);
+  const ria = await hire("Ria", "independent reviewer");
+  const set = (task, body) => api("POST", `/api/runs/${rid}/tasks/${task}`, body);
+  const inboxOf = async (who) => (await api("GET", `/api/runs/${rid}/inbox?for=${who}&after=0`)).body;
+  await set("T1", { status: "in_progress", actor: bo.id, workerId: bo.id });
+  await set("T1", { status: "review", note: "pytest: 5 passed", actor: bo.id });
+  const brief = (await inboxOf(ria.id)).find((m) => m.kind === "brief" && /^Review T1 now/.test(m.body));
+  if (!brief || !/Author: Bo/.test(brief.body) || !/pytest: 5 passed/.test(brief.body) || !/- answers/.test(brief.body)) fail("a task in review should go straight to the reviewer with the author, their verification and the criteria", brief);
+  if ((await inboxOf("ceo")).some((m) => /T1 .*ready for review/.test(m.body))) fail("the CEO should not have to relay reviews when a reviewer is running");
+  // The reviewer marking "reviewing" by moving it to in_progress is refused without findings, and never takes it over.
+  const noFindings = await set("T1", { status: "in_progress", actor: ria.id, workerId: ria.id });
+  if (noFindings.status !== 400 || !/needs the findings/.test(noFindings.body.error)) fail("sending work back without findings should be refused", noFindings);
+  const back = await set("T1", { status: "in_progress", note: "POST /chat returns 500 on an empty body", actor: ria.id, workerId: ria.id });
+  if (back.body.worker_id !== bo.id || back.body.reviewer_id !== ria.id) fail("work sent back should stay with its author and remember its reviewer", back.body);
+  if (!(await inboxOf(bo.id)).some((m) => m.kind === "brief" && /Changes requested on T1 \(API skeleton\) by Ria:\nPOST \/chat returns 500/.test(m.body))) fail("the author should get the findings");
+  await set("T1", { status: "review", note: "fixed, empty body now 400", actor: bo.id });
+  if (!(await inboxOf(ria.id)).some((m) => /^Review T1 now \(back from your findings/.test(m.body))) fail("the same reviewer should re-check it");
+  // Review queue: three waiting on one reviewer tells the CEO to add a reviewer.
+  const cy = await hire("Cy", "frontend developer", ["T2"]);
+  for (const [task, who] of [["T3", bo], ["T2", cy]]) { await set(task, { status: "in_progress", actor: who.id, workerId: who.id }); await set(task, { status: "review", note: "done", actor: who.id }); }
+  if (!(await inboxOf("ceo")).some((m) => /Review queue: Ria has 3 tasks waiting/.test(m.body))) fail("a growing review queue should be reported to the CEO");
+  // Work waiting for hands: once T1-T3 are done, T4 can start, nobody owns it, and Bo and Cy are free.
+  for (const task of ["T1", "T2", "T3"]) await set(task, { status: "done", note: "reviewed, tests pass", actor: ria.id });
+  let advice;
+  for (let i = 0; i < 40 && !advice; i++) { await new Promise((r) => setTimeout(r, 100)); advice = (await inboxOf("ceo")).find((m) => /Work is waiting while Bo, Cy are free: T4 \(unassigned\)/.test(m.body)); }
+  if (!advice) fail("the CEO should be told to give waiting work to a free builder", (await inboxOf("ceo")).map((m) => m.body.slice(0, 90)));
+}
+
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();
