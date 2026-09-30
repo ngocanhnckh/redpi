@@ -112,16 +112,16 @@ function format(m) {
   return `[RedPlan · message from ${from}]\n${m.body}\n(${m.needs_reply ? `${from} is waiting for your answer: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>"` : `No reply needed unless it changes your work (then: redpi-hq send ${from === "CEO" ? "ceo" : from} "<message>")`})`;
 }
 
-const ASIDE = (name) => `[Side question from the human, answered on a copy of your session: your live work does not see this exchange.]
-Answer from what you have done so far in this session: what you are doing, why, what you found, what is left. Be concise, first person, as ${name}. Do not run tools or change files for this. If the human's message is an instruction for your live work (e.g. "also add X", "use Z instead"), begin your reply with one line "FORWARD: <the instruction, rewritten clearly>", then confirm briefly that you passed it on. Questions are never forwarded.
+const ASIDE = (name, asker = "the human") => `[Side question from ${asker}, answered on a copy of your session: your live work does not see this exchange.]
+Answer from what you have done so far in this session: what you are doing, why, what you found, what is left. Be concise, first person, as ${name}. Do not run tools or change files for this. If the message is an instruction for your live work (e.g. "also add X", "use Z instead"), begin your reply with one line "FORWARD: <the instruction, rewritten clearly>", then confirm briefly that you passed it on. Questions are never forwarded.${asker === "the CEO" ? " The CEO is checking progress or investigating: give exact facts (what you ran and its result, errors, file paths, what is left)." : ""}
 
-THE HUMAN ASKS (by the way):
+${asker.toUpperCase()} ASKS (by the way):
 `;
 
-const QUICK = (name) => `[Instant answer, on a copy of your session: your live session also has this message and will answer fully when its turn ends.]
+const QUICK = (name, asker = "the human") => `[Instant answer to ${asker}, on a copy of your session: your live session also has this message and will answer fully when its turn ends.]
 Reply right away as ${name}, first person, at most 4 short sentences, without running tools or changing files. If what you have done so far answers it (status, "what's going on"), answer directly and concretely. If it is a request or instruction, confirm what you will do and when. Never claim work is done that you have not done.
 
-THE HUMAN'S MESSAGE:
+${asker.toUpperCase()}'S MESSAGE:
 `;
 
 // ---------- one harness process ----------
@@ -221,12 +221,13 @@ async function answerAside(m) {
   asideBusy = true;
   const started = Date.now();
   const quick = m.kind !== "aside";
+  const fromCeo = m.sender === "ceo", asker = fromCeo ? "the CEO" : "the human", replyTo = fromCeo ? "ceo" : "human";
   if (quick && (!state.started || !state.session)) { asideBusy = false; if (asides.length) answerAside(asides.shift()); return; }
-  if (!quick) beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
+  if (!quick) beat({}, { kind: "btw", text: `Side question from ${fromCeo ? "the CEO" : "you"}: ${String(m.body).slice(0, 160)}` });
   let reply = "", forward = "";
   if (!state.started || !state.session) reply = "I'm just getting started and have no session history yet. Ask again in a moment, or use \"Send to session\".";
   else {
-    const r = await runHarness({ prompt: (quick ? QUICK : ASIDE)(process.env.REDPI_HQ_NAME || "the worker") + m.body, fresh: false, fork: true, onEvent() {} }).done;
+    const r = await runHarness({ prompt: (quick ? QUICK : ASIDE)(process.env.REDPI_HQ_NAME || "the worker", asker) + m.body, fresh: false, fork: true, onEvent() {} }).done;
     const text = (r.final || r.text || "").trim();
     if (!r.ok || !text) reply = `(I couldn't answer that on the side: ${r.error || "no answer"}. Use "Send to session" to ask my live session directly.)`;
     else if (quick) reply = text;
@@ -236,16 +237,16 @@ async function answerAside(m) {
       else reply = text;
     }
   }
-  if (forward) await hq("POST", `/api/runs/${RUN}/messages`, { from: "human", to: ME, kind: "command", body: `(relayed from a side question) ${forward}` }).catch(() => {});
+  if (forward) await hq("POST", `/api/runs/${RUN}/messages`, { from: fromCeo ? "ceo" : "human", to: ME, kind: "command", body: `(relayed from a side question) ${forward}` }).catch(() => {});
   if (quick) {
     // A failed instant answer is dropped: the live session still answers in full.
-    if (!/^\(I couldn't answer/.test(reply)) await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: "human", kind: "quick", body: reply }).catch(() => {});
-    beat({}, { kind: "btw", text: `Answered you instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
+    if (!/^\(I couldn't answer/.test(reply)) await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: replyTo, kind: "quick", body: reply }).catch(() => {});
+    beat({}, { kind: "btw", text: `Answered ${fromCeo ? "the CEO" : "you"} instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
     asideBusy = false;
     if (asides.length) answerAside(asides.shift());
     return;
   }
-  await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
+  await hq("POST", `/api/runs/${RUN}/messages`, { from: ME, to: replyTo, kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
   beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
   asideBusy = false;
   if (asides.length) answerAside(asides.shift());
@@ -262,9 +263,9 @@ async function poll() {
     state.cursor = msgs[msgs.length - 1].id;
     save();
     for (const m of msgs) {
-      if (m.kind === "aside") { if (asideBusy) asides.push(m); else answerAside(m); continue; }
-      // Anything else the human sends to this worker also gets an instant answer (on a fork), then goes to the live session.
-      if (m.sender === "human" && m.recipient === ME && ["chat", "command", "interrupt"].includes(m.kind)) { if (asideBusy) asides.push(m); else answerAside(m); }
+      if (m.kind === "aside" && m.recipient === ME && (m.sender === "human" || m.sender === "ceo")) { if (asideBusy) asides.push(m); else answerAside(m); continue; }
+      // Anything else the human or the CEO sends to this worker also gets an instant answer (on a fork), then goes to the live session.
+      if ((m.sender === "human" || m.sender === "ceo") && m.recipient === ME && ["chat", "command", "interrupt"].includes(m.kind)) { if (asideBusy) asides.push(m); else answerAside(m); }
       if (m.kind === "interrupt" && current) { interrupted = true; kill(current.child); }
       queue.push(m);
     }

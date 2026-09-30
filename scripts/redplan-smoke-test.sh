@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServe
 
 root = sys.argv[1]
 requests = []  # (identity, last user text, system prompt)
+tool_texts = []  # (identity, tool result content) seen in model requests
 resumed_history = []
 slow = {"aborted": False}  # for Alex's first request after resume: did it still carry his earlier conversation?
 
@@ -51,6 +52,7 @@ SCRIPTS = {
       ("redplan_spawn_worker", {"role": "docs writer", "name": "Cora", "taskIds": ["T3"], "workspace": "shared", "brief": "Write the README. TASK=T3"}),
     ]),
     ("RESUME-ALEX", [("redplan_resume_worker", {"name": "Alex"})]),
+    ("ASK-ALEX", [("redplan_ask", {"to": "Alex", "question": "How far along are you with the endpoints?"})]),
   ],
   "Alex": [
     ("[RedPlan brief", [
@@ -89,12 +91,13 @@ def reply(handler, identity, messages, system=""):
     done_steps = sum(1 for m in messages[last_user + 1:] if m.get("role") == "tool")
     steps = next((s for trig, s in SCRIPTS.get(identity, []) if trig in (user_text or "")), [])
     requests.append((identity, user_text or "", system))
+    tool_texts.extend((identity, json.dumps(m.get("content"))) for m in messages[last_user + 1:] if m.get("role") == "tool")
     if identity == "Alex" and "AFTER-RESUME" in (user_text or ""):
         resumed_history.append(any("RedPlan brief from the CEO" in json.dumps(m) for m in messages))
     if identity.endswith("-side"):
         # Side-channel ("btw") answers: plain answer, or FORWARD when the human gives an instruction.
         text = ("FORWARD: Also add a /health endpoint that returns ok.\nGot it, passing that to my live session."
-                if "please also" in (user_text or "").split("THE HUMAN ASKS")[-1].lower()
+                if "please also" in (user_text or "").split("ASKS (by the way)")[-1].lower()
                 else f"CEO here (btw): the team is on it{'; I can see the board and Alex' if 'Board: ' in (user_text or '') and 'Alex (' in (user_text or '') else ''}." if identity == "the-side"
                 else "Alex here (btw): I'm mid-way through the todo endpoints; tests are next.")
         chunks = [{"choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}, {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
@@ -294,6 +297,18 @@ try:
         raise SystemExit(f"bad CEO side answer: {ceo_side}")
     if any(i == "CEO" and "how is the team doing" in u for i, u, _ in requests):
         raise SystemExit("the side question leaked into the CEO's live session")
+    # The CEO checks on Alex with redplan_ask: Alex's side channel answers within seconds, the answer comes
+    # back as the tool result, and Alex's busy live session never sees the question.
+    main_before = sum(1 for i, u, _ in requests if i == "Alex")
+    t_ask = time.time()
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "command", "body": "ASK-ALEX: check how Alex is doing."})
+    wait("Alex's side answer to the CEO", lambda: next((m for m in hq("GET", f"/api/runs/{run['id']}")["messages"] if m["kind"] == "aside" and m["senderName"] == "Alex" and m["recipient"] == "ceo"), None), 40)
+    wait("the answer returned to the CEO's redplan_ask", lambda: any(i == "CEO" and "Alex (" in t and "mid-way through the todo endpoints" in t for i, t in tool_texts), 40)
+    if time.time() - t_ask > 30: raise SystemExit("redplan_ask took too long")
+    if any(i == "Alex" and "How far along are you with the endpoints" in u for i, u, _ in requests):
+        raise SystemExit("the CEO's side question leaked into Alex's live session")
+    if slow["aborted"] or sum(1 for i, u, _ in requests if i == "Alex") != main_before:
+        raise SystemExit("the CEO's question disturbed Alex's live session")
     t0 = time.time()
     hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": names["Alex"]["id"], "kind": "interrupt", "body": "INTERRUPTED-NOW: stop and fix the failing test first."})
     try: wait("interrupt delivered to Alex", lambda: any(i == "Alex" and "INTERRUPTED-NOW" in u for i, u, _ in requests), 25)
@@ -336,7 +351,7 @@ try:
     msgs = view["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: CEO redplan_ask gets a worker side answer in seconds without disturbing it; /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)

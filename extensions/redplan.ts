@@ -23,7 +23,7 @@ const PROVIDER_STUCK = /rate limit|429|quota|insufficient_quota|weekly limit|ses
 const PKG_ROOT = resolve(typeof __dirname === "string" ? __dirname : process.cwd(), "..");
 const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
-const CEO_TOOLS = ["redplan_submit_plan", "redplan_add_ticket", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
+const CEO_TOOLS = ["redplan_submit_plan", "redplan_add_ticket", "redplan_ask", "redplan_spawn_worker", "redplan_resume_worker", "redplan_status", "redplan_send", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
 const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_team", "redplan_status", "redplan_share_screenshot"];
 // Work that has a user interface: those workers check it in a real browser and share screenshots.
 const FRONTEND_RE = /\b(ui|ux|frontend|front-end|web ?app|website|css|html|react|vue|svelte|angular|next\.?js|nuxt|tailwind|page|screen|component|dashboard|layout|visual|browser|mobile|responsive|playwright)\b/i;
@@ -238,7 +238,7 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Draw flows: one flowchart per feature the human will use (usually one per story), step by step from the user's action to the result, each step saying where it runs (component and technology), what happens in plain words, and what data moves, with decision steps for the branches that matter (wrong password, not found, timeout, retry). The human reads the flows to confirm the business logic and the tech at each step, so make them concrete and readable: "User types username and password (Browser · Next.js login form)" → "Form posts them over HTTPS to POST /auth/login (NestJS AuthController)" → "Look up the user and compare the password with its bcrypt hash (NestJS AuthService · Postgres users table)" → decision "Match?" → yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'". Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team for speed: one builder for every task that can start now (the plan's first wave; up to 10 builders), each with ONE task (or a short chain of tasks only that person can do in order), never a queue of independent tasks that others could run in parallel. Add independent reviewers unless the plan sets review to "self": one per three builders, at least one, at least two from six builders. Aim for the first working version as early as possible: order the first wave as a thin end-to-end slice that runs (even with rough edges), tell the human as soon as it is up (with screenshots for UI), and deepen it in the following waves. Builders move tasks to review; HQ sends each one straight to a reviewer (the same reviewer when it comes back), so you do not relay reviews. The reviewer checks the exact diff against the acceptance criteria and marks it done, or sends it back to its author with findings. When HQ tells you work is waiting (tasks that could start while builders are free or everyone is busy) or that a review queue is growing, act at once: hand the tasks to the free builders, or spawn more builders or reviewers. HQ also watches the run for you: an "HQ watch" message means it caught something going wrong (two agents talking in circles, someone burning tokens without moving a card, the same step repeated, a task far past its estimate, a task bouncing through review, a board that stopped moving, messages to a worker that is gone, unanswered questions). Treat it as urgent: find out what is happening, fix it (decide the question, redirect, split or reassign the work, resume a worker), and it clears itself when the pattern stops; if it is still happening 15 minutes later the human is told. Every 30 minutes HQ sends you a check-in with the numbers: act on anything wrong, post the human a 2-3 line status only when something changed or is wrong, and otherwise stay silent. In the retrospective, turn each HQ watch finding into a lesson. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). Right after approval, record the plan's key decisions (the verified technologies and the architecture) as ADRs with redpi_adr, one per decision, citing the plan, so every worker builds on them. When every task is done: merge worktree branches (renumber any ADRs that got the same number on different branches, and keep docs/adr/README.md in step), run the full verification, review the result against the plan, then hold a short retrospective: what slowed the run or went wrong (waiting, rework, review loops, wrong assumptions, slow builds) and what the next run should do differently. Call redplan_finish_run with those lessons (they go into docs/lessons-learned.md, which every later session reads) and report to the human; finishing the run closes the workers' sessions. For a ticket, the worker records its own decisions and lessons. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Form the team for speed: one builder for every task that can start now (the plan's first wave; up to 10 builders), each with ONE task (or a short chain of tasks only that person can do in order), never a queue of independent tasks that others could run in parallel. Add independent reviewers unless the plan sets review to "self": one per three builders, at least one, at least two from six builders. Aim for the first working version as early as possible: order the first wave as a thin end-to-end slice that runs (even with rough edges), tell the human as soon as it is up (with screenshots for UI), and deepen it in the following waves. Builders move tasks to review; HQ sends each one straight to a reviewer (the same reviewer when it comes back), so you do not relay reviews. The reviewer checks the exact diff against the acceptance criteria and marks it done, or sends it back to its author with findings. When HQ tells you work is waiting (tasks that could start while builders are free or everyone is busy) or that a review queue is growing, act at once: hand the tasks to the free builders, or spawn more builders or reviewers. HQ also watches the run for you: an "HQ watch" message means it caught something going wrong (two agents talking in circles, someone burning tokens without moving a card, the same step repeated, a task far past its estimate, a task bouncing through review, a board that stopped moving, messages to a worker that is gone, unanswered questions). Treat it as urgent: find out what is happening, fix it (decide the question, redirect, split or reassign the work, resume a worker), and it clears itself when the pattern stops; if it is still happening 15 minutes later the human is told. To find out what is going on (checking progress, investigating an alert or a slow task, reading what a command or log showed), use redplan_ask: workers answer from their own session within seconds without stopping their work, and you can ask several at once. Do not wait on redplan_send for information. Every 30 minutes HQ sends you a check-in with the numbers: act on anything wrong, post the human a 2-3 line status only when something changed or is wrong, and otherwise stay silent. HQ also sends a "Token check" each time one agent's spend on one task passes another 5M tokens (5M, 10M, 15M, ...): check that nothing is leaking or looping (what they are doing now, repeated steps or re-reads, how full their context is), let it continue only if it is progressing, otherwise redirect, split or reassign the task. In the retrospective, turn each HQ watch finding and costly task into a lesson. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). Right after approval, record the plan's key decisions (the verified technologies and the architecture) as ADRs with redpi_adr, one per decision, citing the plan, so every worker builds on them. When every task is done: merge worktree branches (renumber any ADRs that got the same number on different branches, and keep docs/adr/README.md in step), run the full verification, review the result against the plan, then hold a short retrospective: what slowed the run or went wrong (waiting, rework, review loops, wrong assumptions, slow builds) and what the next run should do differently. Call redplan_finish_run with those lessons (they go into docs/lessons-learned.md, which every later session reads) and report to the human; finishing the run closes the workers' sessions. For a ticket, the worker records its own decisions and lessons. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
@@ -346,13 +346,13 @@ function sessionTranscript(ctx: any, maxChars = 60000): string {
   return out || "(the session has no messages yet)";
 }
 
-const ASIDE_PROMPT = (name: string, role: string) => `You are the side channel of ${name}, a ${role} working in a RedPlan team. The human is asking you something "by the way" while your main session keeps working; your main session will not see this exchange.
+const ASIDE_PROMPT = (name: string, role: string, asker = "the human") => `You are the side channel of ${name}, a ${role} working in a RedPlan team. ${asker[0].toUpperCase() + asker.slice(1)} is asking you something "by the way" while your main session keeps working; your main session will not see this exchange.
 Answer from the session transcript and state below: what you are doing, why, what you found, what is left, where things are. Be concise and concrete, first person, as ${name}. If the transcript does not contain the answer, say so plainly; never invent progress.
-If the human's message is an instruction or change for the live work (e.g. "also add X", "stop doing Y", "use Z instead", "tell him to..."), begin your reply with one line "FORWARD: <the instruction, rewritten clearly for your live session>", then on the next lines confirm briefly to the human that you passed it on. Only forward when the human clearly wants the live work to change; questions are never forwarded.`;
+If the message is an instruction or change for the live work (e.g. "also add X", "stop doing Y", "use Z instead", "tell him to..."), begin your reply with one line "FORWARD: <the instruction, rewritten clearly for your live session>", then on the next lines confirm briefly that you passed it on. Only forward when ${asker} clearly wants the live work to change; questions are never forwarded.${asker === "the CEO" ? " The CEO asks to check on progress or investigate a problem: give exact facts (what you ran and its result, error messages, file paths, what is left), not reassurance." : ""}`;
 
 // The instant answer to a message the human sent: the message itself goes into the live session,
 // which answers thoroughly when its turn ends; this says right away what the human needs to know.
-const QUICK_PROMPT = (name: string, role: string) => `You are ${name}, a ${role} in a RedPlan team. The human just sent you the message below in RedPi HQ. It is being delivered to your live session right now, which will act on it and post a full answer when it finishes what it is doing. Your job is the instant answer, in first person as ${name}:
+const QUICK_PROMPT = (name: string, role: string, asker = "the human") => `You are ${name}, a ${role} in a RedPlan team. ${asker[0].toUpperCase() + asker.slice(1)} just sent you the message below${asker === "the human" ? " in RedPi HQ" : ""}. It is being delivered to your live session right now, which will act on it and post a full answer when it finishes what it is doing. Your job is the instant answer, in first person as ${name}:
 - If the transcript and state already answer it (a status question, "what's going on", "why is it slow"), answer it directly and concretely: what you are doing, what is done, what is left, what is in the way.
 - If it is a request or instruction, confirm in one line what you will do and when (e.g. "right after the test run that is going now"), and anything that changes because of it.
 - At most 4 short sentences or bullets. Never claim work is done that the transcript does not show, and never invent progress. No greetings.`;
@@ -455,6 +455,8 @@ export default function (pi: ExtensionAPI) {
     if (m.kind === "decision") return `[RedPlan · decision from the human]\n${m.body}`;
     if (m.kind === "system") return `[RedPlan · HQ]\n${m.body}`;
     if (m.kind === "ticket") return `[RedPlan · new ticket from the human via HQ]\n${m.body}\n(When this turn ends, your final reply is posted back to the human in HQ: say who is on it.)`;
+    if (m.kind === "quick") return `[RedPlan · instant answer from ${from}]\n${m.body}\n(Their live session has your message too and replies in full when it finishes its current step.)`;
+    if (m.kind === "aside" && m.sender !== "human") return `[RedPlan · side answer from ${from}]\n${m.body}`;
     if (m.sender === "human") return `[RedPlan · message from the human via HQ]\n${m.body}\n(The human wrote this in RedPi HQ and reads your answer there: reply to them directly in your response. When this turn ends, your final reply is posted back to them in HQ.)`;
     if (m.held) return `[RedPlan · update from ${from}, no reply needed]\n${m.body}`;
     return `[RedPlan · message from ${from}]\n${m.body}\n(${m.needs_reply ? `${from} is waiting for your answer: reply with redplan_send to "${from === "CEO" ? "ceo" : from}".` : `No reply needed unless it changes your work; if it does, reply with redplan_send to "${from === "CEO" ? "ceo" : from}".`})`;
@@ -463,11 +465,19 @@ export default function (pi: ExtensionAPI) {
   let asideChain: Promise<void> = Promise.resolve();
   let owedReply = false;
   let quickChain: Promise<void> = Promise.resolve();
+  // redplan_ask: which workers the CEO is waiting on (worker id -> id of the question), and their answers.
+  const askWaiting = new Map<string, number>();
+  const askReplies = new Map<number, any>();
+  const askConsumed = new Set<number>();
   async function answerAside(m: any, mode: "aside" | "quick" = "aside") {
     const ctx = latestCtx;
     const started = Date.now();
     const quick = mode === "quick";
-    if (!quick) beat({}, { kind: "btw", text: `Side question from you: ${String(m.body).slice(0, 160)}` });
+    // You and the CEO both get instant answers; the reply goes back to whoever asked.
+    const fromCeo = m.sender === "ceo";
+    const asker = fromCeo ? "the CEO" : "the human";
+    const replyTo = fromCeo ? "ceo" : "human";
+    if (!quick) beat({}, { kind: "btw", text: `Side question from ${fromCeo ? "the CEO" : "you"}: ${String(m.body).slice(0, 160)}` });
     let reply = "", forward = "";
     try {
       let state: string, who: [string, string];
@@ -493,8 +503,8 @@ export default function (pi: ExtensionAPI) {
       const model = ctx?.model;
       if (!model) throw new Error("no model selected in this session");
       const res: any = await ctx.modelRegistry.complete(model, {
-        systemPrompt: quick ? QUICK_PROMPT(...who) : ASIDE_PROMPT(...who),
-        messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx, quick ? 24000 : 60000)}\n\n${quick ? "THE HUMAN'S MESSAGE" : "THE HUMAN ASKS (by the way)"}:\n${m.body}` }],
+        systemPrompt: quick ? QUICK_PROMPT(...who, asker) : ASIDE_PROMPT(...who, asker),
+        messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx, quick ? 24000 : 60000)}\n\n${quick ? `${asker.toUpperCase()}'S MESSAGE` : `${asker.toUpperCase()} ASKS (by the way)`}:\n${m.body}` }],
       }, { maxTokens: quick ? 500 : 1500 });
       const text = (res?.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
       if (res?.stopReason === "error" || !text) throw new Error(res?.errorMessage || "empty answer");
@@ -507,16 +517,16 @@ export default function (pi: ExtensionAPI) {
       reply = `(I couldn't answer that on the side: ${e.message}. Use "Send to session" to ask my live session directly.)`;
     }
     if (quick) {
-      await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: "quick", body: reply }).catch(() => {});
-      beat({}, { kind: "btw", text: `Answered you instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
+      await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: replyTo, kind: "quick", body: reply }).catch(() => {});
+      beat({}, { kind: "btw", text: `Answered ${fromCeo ? "the CEO" : "you"} instantly in ${((Date.now() - started) / 1000).toFixed(1)}s; the full answer follows from the live session`, ms: Date.now() - started, ok: true });
       return;
     }
     // Relay a real instruction into the live session without aborting it.
     if (forward) {
-      const body = `[RedPlan · instruction from the human via HQ (relayed from a side question)]\n${forward}`;
+      const body = `[RedPlan · instruction from ${asker}${fromCeo ? "" : " via HQ"} (relayed from a side question)]\n${forward}`;
       if (latestCtx?.isIdle?.()) pi.sendUserMessage(body); else pi.sendUserMessage(body, { deliverAs: "steer" });
     }
-    await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: "human", kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
+    await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: replyTo, kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
     beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
   }
 
@@ -529,10 +539,14 @@ export default function (pi: ExtensionAPI) {
       inboxCursor = msgs[msgs.length - 1].id;
       pi.appendEntry("redplan-cursor", { runId, cursor: inboxCursor });
       // Side questions never enter the live session: answer them on the side, one at a time.
-      const asides = msgs.filter((m) => m.kind === "aside" && m.sender === "human");
+      // Answers to the CEO's redplan_ask go to that tool, not into the live session.
+      for (const m of msgs) if (["aside", "quick"].includes(m.kind) && (askWaiting.get(m.sender) ?? Infinity) < m.id) askReplies.set(m.id, m);
+      msgs = msgs.filter((m) => !askReplies.has(m.id) && !askConsumed.has(m.id));
+      // Side questions (from the human or the CEO) never enter the live session: answer them on the side, one at a time.
+      const asides = msgs.filter((m) => m.kind === "aside" && (m.sender === "human" || m.sender === "ceo") && m.recipient === me());
       for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
-      // Anything else the human sends gets an instant answer too, while the live session takes it in.
-      for (const q of msgs.filter((x) => x.sender === "human" && x.recipient === me() && ["chat", "command", "interrupt", "ticket"].includes(x.kind)))
+      // Anything else the human or the CEO sends gets an instant answer too, while the live session takes it in.
+      for (const q of msgs.filter((x) => (x.sender === "human" || x.sender === "ceo") && x.recipient === me() && ["chat", "command", "interrupt", "ticket"].includes(x.kind)))
         quickChain = quickChain.then(() => answerAside(q, "quick")).catch(() => {});
       msgs = msgs.filter((m) => !asides.includes(m));
       // Wake rules: everything wakes an idle session except a teammate's update that asks nothing,
@@ -926,6 +940,59 @@ export default function (pi: ExtensionAPI) {
     async execute() {
       if (!runId) throw new Error("No RedPlan run in this session.");
       return text(await statusText());
+    },
+  } as any);
+
+  // The CEO's "by the way": instant answers from workers without waiting for their live session.
+  pi.registerTool({
+    name: "redplan_ask", label: "Ask workers (instant answer)",
+    description: "Get an instant answer from one or more workers (what they are doing, what they found, what a command or log showed, what is blocking them, where a file is) without interrupting their work: each worker's RedPi answers from its own session in seconds, like a \"by the way\" question, while its live work continues. Use it whenever you check progress or investigate a problem, instead of redplan_send and waiting. Ask several at once with a comma-separated list or \"all\". Set deliver to true when you also want the question in their live session (it replies in full when it finishes its current step); use redplan_send for instructions.",
+    promptSnippet: "Ask workers something and get their answers in seconds",
+    parameters: Type.Object({
+      to: Type.String({ description: "Worker name, several names separated by commas, or \"all\"" }),
+      question: Type.String(),
+      deliver: Type.Optional(Type.Boolean({ description: "Also put the question into their live session for a full answer later (default false: answered on the side only)" })),
+      waitSeconds: Type.Optional(Type.Number({ description: "How long to wait for the answers (default 60, at most 120)" })),
+    }),
+    async execute(_id: string, params: any, signal: AbortSignal) {
+      if (!runId) throw new Error("No RedPlan run in this session.");
+      const s = await hq("GET", `/api/runs/${runId}`);
+      const wanted = String(params.to).trim().toLowerCase() === "all"
+        ? s.workers.filter((w: any) => w.alive && w.status !== "stopped")
+        : String(params.to).split(",").map((n) => n.trim()).filter(Boolean).map((n) => {
+          const w = s.workers.find((x: any) => x.name.toLowerCase() === n.toLowerCase() || x.id === n);
+          if (!w) throw new Error(`No worker named "${n}". Team: ${s.workers.map((x: any) => x.name).join(", ") || "(none)"}.`);
+          return w;
+        });
+      if (!wanted.length) throw new Error("Nobody to ask: no worker is running.");
+      const started = Date.now();
+      const asked = new Map<string, { name: string; id: number; alive: boolean }>();
+      for (const w of wanted) {
+        const r = await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: w.id, kind: params.deliver ? "chat" : "aside", body: params.question, needsReply: true });
+        asked.set(w.id, { name: w.name, id: r.id, alive: !!w.alive && w.status !== "stopped" });
+        askWaiting.set(w.id, r.id);
+      }
+      const answers = new Map<string, { body: string; secs: number }>();
+      const deadline = started + Math.min(120, Math.max(5, Number(params.waitSeconds) || 60)) * 1000;
+      const first = Math.min(...[...asked.values()].map((a) => a.id)) - 1;
+      try {
+        while (answers.size < asked.size && Date.now() < deadline && !signal?.aborted) {
+          const inbox: any[] = await hq("GET", `/api/runs/${runId}/inbox?for=${encodeURIComponent(me())}&after=${first}`).catch(() => []);
+          for (const m of [...inbox, ...askReplies.values()]) {
+            const a = asked.get(m.sender);
+            if (!a || answers.has(m.sender) || m.id <= a.id || !["aside", "quick"].includes(m.kind)) continue;
+            answers.set(m.sender, { body: m.body, secs: (Date.now() - started) / 1000 });
+            askConsumed.add(m.id); askReplies.delete(m.id);
+          }
+          if (answers.size < asked.size) await new Promise((r) => setTimeout(r, 800));
+        }
+      } finally { for (const id of asked.keys()) if (askWaiting.get(id) === asked.get(id)!.id) askWaiting.delete(id); }
+      const lines = [...asked.entries()].map(([id, a]) => {
+        const ans = answers.get(id);
+        if (ans) return `${a.name} (${ans.secs.toFixed(1)}s): ${ans.body}`;
+        return `${a.name}: no instant answer yet${a.alive ? "" : " (their session is gone: resume them with redplan_resume_worker)"}; ${params.deliver ? "their live session replies when it finishes its current step" : "a late answer will arrive in your inbox"}.`;
+      });
+      return text(lines.join("\n\n"), { answered: answers.size, asked: asked.size });
     },
   } as any);
 

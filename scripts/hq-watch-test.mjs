@@ -16,7 +16,7 @@ const proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { stdio: 
   ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1",
   REDPI_HQ_WATCH_MS: "150", REDPI_HQ_WATCH_HOUR_MS: String(HOUR), REDPI_HQ_CHATTER_2H: "12", REDPI_HQ_BURN_TOKENS: "100000",
   REDPI_HQ_REPEAT: "5", REDPI_HQ_ALERT_ESCALATE_MS: "1500", REDPI_HQ_CHECKIN_MS: "2500", REDPI_HQ_STALL_MS: "600000",
-  REDPI_HQ_STAFF_GRACE_MS: "600000", REDPI_HQ_PARK_MS: "600000",
+  REDPI_HQ_STAFF_GRACE_MS: "600000", REDPI_HQ_PARK_MS: "600000", REDPI_HQ_TASK_TOKEN_STEP: "100000",
 } });
 process.on("exit", () => { proc.kill(); rmSync(dir, { recursive: true, force: true }); });
 const fail = (msg, extra) => { console.error("FAIL:", msg, extra ?? ""); process.exit(1); };
@@ -76,11 +76,30 @@ await until("dead-end alert", () => watchMsg(/2 messages went to Kai, whose sess
 await send(mia, noor, "Which port does the client call?", { needsReply: true });
 await until("unanswered alert", () => watchMsg(/Noor has not answered 1 question .*from Mia: "Which port does the client call\?"/), HOUR);
 
+// 7. Token milestones per agent per task: every step (100k here, 5M by default) the CEO checks for leaks
+// and loops, once per step, with the facts; a reviewer's tokens count against the task it reviews.
+const tokenChecks = async (who) => (await ceoInbox()).filter((m) => m.body.startsWith(`Token check: ${who} `));
+await move("T2", "in_progress", noor);
+await beat(noor, { usage: [{ input: 60000, output: 1000 }] });
+await sleep(300);
+if ((await tokenChecks("Noor")).length) fail("no token check below the first step");
+await beat(noor, { usage: [{ input: 50000, cacheRead: 10000 }], context: { percent: 71 } });
+const tc = await until("first token check", async () => (await tokenChecks("Noor"))[0]);
+for (const want of [/has now used 100k\+ tokens on T2 Client/, /started \d+ min ago/, /estimate 2h/, /context 71% full/, /Check that nothing is leaking or looping/, /HQ checks again at 200k/]) if (!want.test(tc.body)) fail(`token check should include ${want}`, tc.body);
+await beat(noor, { usage: [{ input: 20000 }] });
+await beat(noor, { usage: [{ input: 90000 }] });
+await until("second token check", async () => (await tokenChecks("Noor")).some((m) => /used 200k\+ tokens on T2/.test(m.body)));
+if ((await tokenChecks("Noor")).length !== 2) fail("each step should be checked exactly once", (await tokenChecks("Noor")).map((m) => m.body.slice(0, 60)));
+await beat(ria, { usage: [{ input: 120000 }] });
+await until("reviewer token check", async () => (await tokenChecks("Ria")).some((m) => /used 100k\+ tokens on T1 Endpoints .*3 trips through review/.test(m.body)));
+const cardTokens = (await state()).taskTokens;
+if (!(cardTokens.T2 >= 230000 && cardTokens.T1 >= 120000)) fail("the board should show tokens per task", cardTokens);
+
 // It clears itself when the pattern stops: the chatter falls out of the two-hour window.
 await until("chatter alert resolved", async () => (await state()).alerts.find((a) => a.kind === "chatter")?.resolved, 3 * HOUR);
 // 7. Check-in: the numbers and what to look for, on the schedule.
-const checkin = await until("check-in", async () => (await ceoInbox()).find((m) => /^Check-in \(every/.test(m.body)));
-for (const want of [/card moves? since the last one/, /Board: todo \d+; in progress \d+/, /in review 1: T1 waiting on Ria/, /Open alerts: /, /Tokens since the last check-in: .*Mia 152k/, /post the human a 2-3 line status/, /do nothing and do not reply/]) if (!want.test(checkin.body)) fail(`check-in should include ${want}`, checkin.body);
+const checkin = await until("check-in", async () => (await ceoInbox()).reverse().find((m) => /^Check-in \(every/.test(m.body) && /Tokens per task so far/.test(m.body)), 8000);
+for (const want of [/card moves? since the last one/, /Board: todo \d+; in progress \d+/, /in review 1: T1 waiting on Ria/, /Open alerts: /, /Tokens per task so far: T2 2\d\dk, T1 1\d\dk/, /post the human a 2-3 line status/, /do nothing and do not reply/]) if (!want.test(checkin.body)) fail(`check-in should include ${want}`, checkin.body);
 
-console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each wake the CEO with a diagnosis within seconds, keep-happening alerts reach the human (Needs you), alerts clear when the pattern stops, and the CEO gets a regular check-in with the numbers.");
+console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each wake the CEO with a diagnosis within seconds, token milestones per agent per task (checked once per step, reviewers' tokens counted against the task they review), keep-happening alerts reach the human (Needs you), alerts clear when the pattern stops, and the CEO gets a regular check-in with the numbers.");
 process.exit(0);

@@ -158,6 +158,8 @@ for (const [table, col, type] of [
   // Who reviews a task (it comes back to them after findings), and the last staffing nudge to the CEO.
   ["tasks", "reviewer_id", "TEXT"], ["runs", "staff_nudged", "INTEGER"], ["runs", "staff_key", "TEXT"],
   ["runs", "checkin_at", "INTEGER"],
+  // The task a worker was on when it spent the tokens (for per-task token milestones).
+  ["usage", "task_id", "TEXT"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -267,7 +269,8 @@ function runView(runId) {
   const screenshots = all("SELECT id, worker_id, task_id, caption, mime, bytes, created FROM screenshots WHERE run_id = ? ORDER BY created DESC LIMIT 200", runId);
   const attachments = all("SELECT id, task_id, name, mime, bytes, created FROM attachments WHERE run_id = ? ORDER BY created", runId);
   const alerts = all("SELECT * FROM alerts WHERE run_id = ? AND (resolved IS NULL OR resolved > ?) ORDER BY id DESC LIMIT 50", runId, now() - 24 * 3600_000);
-  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, now: now() };
+  const taskTokens = Object.fromEntries(all("SELECT task_id AS id, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id IS NOT NULL GROUP BY task_id", runId).map((x) => [x.id, x.n]));
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, taskTokens, now: now() };
 }
 
 function workerView(w) {
@@ -325,11 +328,52 @@ for (const t of all("SELECT * FROM tasks WHERE status = 'blocked' AND blocked_on
 
 // Token use per model call, from worker heartbeats and the CEO's events.
 function recordUsage(runId, workerId, list) {
-  for (const u of (Array.isArray(list) ? list : []).slice(0, 100)) {
-    const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
-    run("INSERT INTO usage (run_id, worker_id, input, output, cache_read, cache_write, cost, model, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      runId, workerId, n(u.input), n(u.output), n(u.cacheRead), n(u.cacheWrite), Number.isFinite(Number(u.cost)) ? Number(u.cost) : 0, u.model ? String(u.model).slice(0, 120) : null, Number(u.at) || now());
+  const items = (Array.isArray(list) ? list : []).slice(0, 100);
+  if (!items.length) return;
+  const task = workerId === "ceo" ? null : taskFor(runId, workerId);
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
+  let added = 0;
+  for (const u of items) {
+    run("INSERT INTO usage (run_id, worker_id, input, output, cache_read, cache_write, cost, model, created, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      runId, workerId, n(u.input), n(u.output), n(u.cacheRead), n(u.cacheWrite), Number.isFinite(Number(u.cost)) ? Number(u.cost) : 0, u.model ? String(u.model).slice(0, 120) : null, Number(u.at) || now(), task?.id || null);
+    added += n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite);
   }
+  if (task && added) tokenMilestone(runId, workerId, task, added);
+}
+
+// The task a worker is spending tokens on: the one it is building (its current task first), else the
+// one it is reviewing, else one it is blocked on.
+function taskFor(runId, workerId) {
+  const w = one("SELECT current_task FROM workers WHERE id = ?", workerId);
+  const own = all("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ? AND status = 'in_progress' ORDER BY updated DESC", runId, workerId);
+  return own.find((t) => t.id === w?.current_task) || own[0]
+    || one("SELECT * FROM tasks WHERE run_id = ? AND reviewer_id = ? AND status = 'review' ORDER BY updated DESC LIMIT 1", runId, workerId)
+    || one("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ? AND status = 'blocked' ORDER BY updated DESC LIMIT 1", runId, workerId) || null;
+}
+
+// Every TASK_TOKEN_STEP tokens one agent spends on one task (5M, 10M, 15M, ...), the CEO checks that
+// nothing is leaking or looping. Time alone misses a fast, expensive loop; this does not.
+function tokenMilestone(runId, workerId, task, added) {
+  const sum = (sql, ...a) => one(sql, ...a).n || 0;
+  const mine = sum("SELECT SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND worker_id = ? AND task_id = ?", runId, workerId, task.id);
+  const mark = Math.floor(mine / TASK_TOKEN_STEP);
+  if (!mark || mark === Math.floor((mine - added) / TASK_TOKEN_STEP)) return;
+  const w = one("SELECT * FROM workers WHERE id = ?", workerId);
+  const all_ = sum("SELECT SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id = ?", runId, task.id);
+  const cache = sum("SELECT SUM(cache_read) AS n FROM usage WHERE run_id = ? AND worker_id = ? AND task_id = ?", runId, workerId, task.id);
+  const since = one("SELECT MIN(created) AS at FROM task_transitions WHERE run_id = ? AND task_id = ? AND to_status = 'in_progress'", runId, task.id).at;
+  const rounds = sum("SELECT COUNT(*) AS n FROM task_transitions WHERE run_id = ? AND task_id = ? AND to_status = 'review'", runId, task.id);
+  let ctx = null; try { ctx = JSON.parse(w?.context || "null"); } catch {}
+  const est = Number(task.hours) || (() => { const sc = approvedPlan(runId)?.schedule?.tasks || []; return (Array.isArray(sc) ? sc : Object.values(sc)).find((x) => x.id === task.id)?.hours; })();
+  const facts = [
+    since ? `started ${dur(now() - since)} ago` : "",
+    est ? `estimate ${est}h` : "",
+    rounds ? `${rounds} trip${rounds > 1 ? "s" : ""} through review` : "",
+    ctx?.percent != null ? `context ${Math.round(ctx.percent)}% full` : "",
+    cache ? `${Math.round((cache / mine) * 100)}% of it re-read from cache` : "",
+    all_ > mine ? `${tokens(all_)} on this task across everyone` : "",
+  ].filter(Boolean).join("; ");
+  addMessage(runId, "human", "ceo", "system", `Token check: ${w?.name || workerId} has now used ${tokens(mark * TASK_TOKEN_STEP)}+ tokens on ${task.id} ${task.title} (${facts}). Check that nothing is leaking or looping: look at what they are doing right now, whether they repeat the same steps, re-read the same files or re-run a failing command, and how full their context is. If it is progressing, let it continue; if not, give clear direction, split the task, or hand it to someone else. HQ checks again at ${tokens((mark + 1) * TASK_TOKEN_STEP)}.`);
 }
 
 // A task that reaches review goes straight to a reviewer, not through the CEO: whoever reviewed it
@@ -426,11 +470,12 @@ const CHATTER_2H = Number(process.env.REDPI_HQ_CHATTER_2H || 40);
 const BURN_TOKENS = Number(process.env.REDPI_HQ_BURN_TOKENS || 5_000_000);
 const REPEAT_N = Number(process.env.REDPI_HQ_REPEAT || 8);
 const STALL_MS = Number(process.env.REDPI_HQ_STALL_MS || 45 * 60_000);
-const pairLimitHits = new Map();   // "run|a|b" -> when the pair was last refused for messaging too much
+const pairLimitHits = new Map();
+const TASK_TOKEN_STEP = Number(process.env.REDPI_HQ_TASK_TOKEN_STEP || 5_000_000);   // "run|a|b" -> when the pair was last refused for messaging too much
 
 const mins = (ms) => `${Math.max(1, Math.round(ms / 60_000))} min`;
 const dur = (ms) => (ms >= 90 * 60_000 ? `${(ms / 3600_000).toFixed(1)}h` : mins(ms));
-const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}k`);
+const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M` : `${Math.round(n / 1e3)}k`);
 
 function detectTrouble(runId) {
   const t = now(), found = [];
@@ -564,6 +609,7 @@ function checkinText(runId, since) {
     idle.length ? `Idle builders: ${idle.map((w) => w.name).join(", ")}.` : "",
     `Open alerts: ${alertsOpen.length ? alertsOpen.map((a) => a.text.split(". ")[0]).join(" | ") : "none"}.`,
     burn.length ? `Tokens since the last check-in: ${burn.map((b) => `${b.w === "ceo" ? "you" : name(b.w)} ${tokens(b.n)}`).join(", ")}.` : "",
+    (() => { const top = all("SELECT task_id AS id, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id IS NOT NULL GROUP BY task_id ORDER BY n DESC LIMIT 5", runId); return top.length ? `Tokens per task so far: ${top.map((x) => `${x.id} ${tokens(x.n)}`).join(", ")}.` : ""; })(),
     `Look for anything wrong: a task that has not moved, someone looping or burning tokens, builders idle while work waits, a review queue growing. Fix it now. If anything changed or is wrong, post the human a 2-3 line status (redplan_send to "human"; no question unless you need their decision). If nothing changed and nothing is wrong, do nothing and do not reply.`,
   ].filter(Boolean).join("\n");
 }

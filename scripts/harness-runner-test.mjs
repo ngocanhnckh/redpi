@@ -117,6 +117,12 @@ if (!side.body.includes("halfway through") || side.recipient !== "human") fail(`
 const forkCall = calls().find((c) => c.worker === cora.id && c.fork && c.prompt.includes("Side question"));
 if (!forkCall.args.includes("--fork-session") || !forkCall.args.includes(cora.session)) fail(`side question did not fork the session: ${forkCall.args}`);
 if ((await api("GET", `/api/workers/${cora.id}`)).worker.status !== "working") fail("the side question disturbed the live turn");
+// The CEO asks on the side too (redplan_ask): the answer goes back to the CEO, and the live turn keeps going.
+await api("POST", `/api/runs/${run}/messages`, { from: "ceo", to: cora.id, kind: "aside", body: "How far along are you with the docs?" });
+const ceoSide = await wait("side answer to the CEO", async () => (await api("GET", `/api/runs/${run}`)).messages.find((m) => m.kind === "aside" && m.sender === cora.id && m.recipient === "ceo"));
+if (!ceoSide.body.includes("halfway through")) fail(`bad side answer to the CEO: ${ceoSide.body}`);
+if (!calls().some((c) => c.worker === cora.id && c.fork && c.prompt.includes("Side question from the CEO"))) fail("the CEO's side question should be answered on a fork, as the CEO's");
+if ((await api("GET", `/api/workers/${cora.id}`)).worker.status !== "working") fail("the CEO's side question disturbed the live turn");
 const t0 = Date.now();
 await api("POST", `/api/runs/${run}/messages`, { from: "human", to: cora.id, kind: "interrupt", body: "INTERRUPTED-NOW: stop and fix the test" });
 await wait("interrupt delivered", () => calls().find((c) => c.worker === cora.id && !c.fork && c.prompt.includes("INTERRUPTED-NOW")), 15000);
@@ -155,6 +161,6 @@ if (!pane(olive.tmux).includes("resuming session")) fail("pane does not say it r
 const cli = spawnSync(process.execPath, [join(root, "hq", "cli.mjs"), "task", "T1", "blocked"], { env: { ...env, REDPI_HQ_WORKER: cora.id, REDPI_HQ_RUN: run }, encoding: "utf8" });
 if (cli.status === 0 || !/reason|note/i.test(cli.stderr)) fail(`redpi-hq accepted blocked without a reason: ${cli.stderr}`);
 
-console.log("Harness runner test passed: Claude Code, Codex, and OpenCode workers take the brief, move cards and message the CEO via redpi-hq, continue their session every turn, answer every message instantly from a fork, answer side questions on a fork (and relay instructions), stop on interrupt, flag provider trouble, and resume after a crash.");
+console.log("Harness runner test passed: Claude Code, Codex, and OpenCode workers take the brief, move cards and message the CEO via redpi-hq, continue their session every turn, answer every message (and the CEO side questions) instantly from a fork, answer side questions on a fork (and relay instructions), stop on interrupt, flag provider trouble, and resume after a crash.");
 cleanup();
 process.exit(0);
