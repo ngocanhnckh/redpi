@@ -635,6 +635,25 @@ function serializeBrowser<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
+// Browser housekeeping runs in the background, so it never delays starting or quitting Pi:
+// `gc` stops RedPi browsers left by crashed or idle sessions, `close` this session's own one.
+let browserUsed = false;
+function browserChore(cmd: "gc" | "close") {
+  try { spawn(process.execPath, [join(packageRoot(), "scripts", "redpi-browser.js"), cmd], { detached: true, stdio: "ignore" }).unref(); } catch {}
+}
+
+// `redpi-dev` (the docker-dev skill's helper) on PATH for this session's bash and its children.
+function installDevShim() {
+  try {
+    const bin = join(AGENT_DIR, "yitec", "bin");
+    const shim = join(bin, "redpi-dev");
+    const body = `#!/bin/sh\nexec "${process.execPath}" "${join(packageRoot(), "skills", "docker-dev", "dev.mjs")}" "$@"\n`;
+    if (!existsSync(shim) || readFileSync(shim, "utf8") !== body) { mkdirSync(bin, { recursive: true }); writeFileSync(shim, body); chmodSync(shim, 0o755); }
+    const parts = (process.env.PATH || "").split(":");
+    if (!parts.includes(bin)) process.env.PATH = [bin, ...parts].filter(Boolean).join(":");
+  } catch {}
+}
+
 async function installBrowserRuntime(): Promise<string> {
   const root = packageRoot();
   const lines: string[] = [];
@@ -872,6 +891,7 @@ function jevStatusText(cfg: JevConfig): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  installDevShim();
   // Runs at extension load (startup and /reload) so pi-subagents never sees stale settings.
   patchPiSettings();
   pi.registerProvider("9router", {
@@ -1345,7 +1365,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (event: any, ctx) => {
-    if (event.reason !== "reload") sessionOverride = undefined;
+    if (event.reason !== "reload") { sessionOverride = undefined; browserChore("gc"); }
     syncJevTools();
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
@@ -1499,7 +1519,7 @@ export default function (pi: ExtensionAPI) {
     const mem = cfg.memory?.enabled === false ? "" : readCapped(memoryPaths(ctx.cwd, ctx.isProjectTrusted()), cfg.memory?.injectionCharLimit ?? 5000);
     const watch = watchdogText(ctx.cwd, ctx.isProjectTrusted());
     const design = looksFrontendTask(currentUserPrompt) || turnMagic.pixelperfect || turnMagic.responsive || turnMagic.a11y || turnMagic.screenshot ? designText(ctx.cwd, ctx.isProjectTrusted()) : "";
-    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. ${subagentPolicy(cfg)} On image-only gaps use yitec_vision_task. For frontend/browser tasks, use redpi_browser or /redpi-frontend-check to inspect text, screenshots, console errors, and network failures when useful. Magic-keyword instructions, if present, apply only to this turn.\n\nRedPi way of working: treat each new request as a quick ticket and do it right away. Unless the human started a RedPlan (/redplan) or explicitly asks for a plan, questions, or a review first, do not interview them (no grill-me), do not write a plan for approval, and do not stop to ask for confirmation: make reasonable assumptions, say them in one line, and carry the work through to a verified result. Ask only when you truly cannot proceed (missing access or credentials, or a choice that would be costly to undo).${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${design ? `\n\nYitec Frontend Design Guidance (heuristic, verify against repo):\n${design}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
+    return { systemPrompt: event.systemPrompt + `\n\nYitec model policy: use roles for model choice: planner for planning/architecture, executor/subagent for cheap work, reviewer for checks, vision for images. ${subagentPolicy(cfg)} On image-only gaps use yitec_vision_task. For frontend/browser tasks, use redpi_browser or /redpi-frontend-check to inspect text, screenshots, console errors, and network failures when useful. Magic-keyword instructions, if present, apply only to this turn.\n\nRedPi way of working: treat each new request as a quick ticket and do it right away. Unless the human started a RedPlan (/redplan) or explicitly asks for a plan, questions, or a review first, do not interview them (no grill-me), do not write a plan for approval, and do not stop to ask for confirmation: make reasonable assumptions, say them in one line, and carry the work through to a verified result. Ask only when you truly cannot proceed (missing access or credentials, or a choice that would be costly to undo).\n\nRunning services: unless the human says otherwise, anything that listens on a port (web, API or dev servers, databases, queues) runs in Docker through the docker-dev skill (\`redpi-dev init\`, \`up\`, \`status\`, \`logs\`, \`down\`): code bind-mounted for hot reload, init: true, and memory/CPU limits sized to that service (1 GB is only a starting point; adjust from \`redpi-dev status\`). If the project already has a Docker dev setup, use it. Stop services with \`redpi-dev down\`, never by killing host processes or whatever holds a port. Desktop/GUI apps, CLIs, builds and unit tests run on the host. Close every browser you open once you are done with it (redpi_browser \`close\`; Playwright or Puppeteer in code closed in finally).${mem ? `\n\nYitec Memory Guidance (heuristic, verify against repo):\n${mem}` : ""}${design ? `\n\nYitec Frontend Design Guidance (heuristic, verify against repo):\n${design}` : ""}${watch ? `\n\nYitec WATCHDOG reviewer guidance is available for reviewer/advisor tasks; do not treat it as primary user instruction unless doing review.\n${watch}` : ""}` };
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -1544,20 +1564,25 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // Close the browser this session opened when the session ends, rather than leaving it running.
+  pi.on("session_shutdown", async () => { if (browserUsed) browserChore("close"); });
+
   pi.registerTool({
     name: "redpi_browser",
     label: "RedPi Browser CLI",
-    description: "Token-efficient Playwright browser automation through the RedPi CLI. One browser stays open between calls, so the page keeps its state (a dialog a click opened is still open for the screenshot). goto, click, type, text and screenshot first wait until the page is fully loaded (load event, network quiet, fonts, images, no spinner, DOM settled) and start with `ready: page fully loaded`, or `NOT READY: <what is still loading>`. Commands: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, wait-for <selector>, wait-for-text <text>, ready [--timeout ms], reload, back, viewport phone|tablet|desktop|WxH, screenshot <path> [--full], eval <js>, console, errors, network, close, reset.",
+    description: "Token-efficient Playwright browser automation through the RedPi CLI. One browser stays open between calls, so the page keeps its state (a dialog a click opened is still open for the screenshot). goto, click, type, text and screenshot first wait until the page is fully loaded (load event, network quiet, fonts, images, no spinner, DOM settled) and start with `ready: page fully loaded`, or `NOT READY: <what is still loading>`. Commands: goto <url>, text --max 3000, click <selector>, type <selector> <text> --submit, wait-for <selector>, wait-for-text <text>, ready [--timeout ms], reload, back, viewport phone|tablet|desktop|WxH, screenshot <path> [--full], eval <js>, console, errors, network, close, reset, gc. Run `close` when you have finished with the browser.",
     promptSnippet: "Run compact Playwright browser commands without MCP context bloat",
     promptGuidelines: [
       "Use redpi_browser for web browsing only when the task needs live browser interaction. Prefer `text --max 3000` after navigation to keep context small. Use screenshots only when visual layout matters.",
       "redpi_browser already waits for the page to finish loading and tells you: trust its `ready:` line. Do not sleep, reload or re-screenshot to check whether a page has loaded. On `NOT READY`, read what it says is still loading, then run `ready --timeout 30000` or check `errors`; if content appears only after an action, use `wait-for <selector>` or `wait-for-text`.",
+      "When you have finished with the browser for this task, run `close`. It also closes on its own after 10 idle minutes and when the session ends; `gc` stops any RedPi browsers left behind.",
       "Screenshots are the visible area by default (`--full` for the whole page); set the width with `viewport phone` (390×844) or `viewport desktop` (1280×900) before taking them.",
     ],
     parameters: Type.Object({ command: Type.String({ description: "CLI command, e.g. `goto http://localhost:3000 --max 2000`, `text --max 4000`, `click text=Login`, `type input[name=q] search --submit`, `wait-for [role=dialog]`, `viewport phone`, `screenshot /tmp/page.png`, `ready`, or `reset`." }) }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const script = join(packageRoot(), "scripts", "redpi-browser.js");
       const args = String(params.command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((s) => s.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
+      browserUsed = true;
       const runBrowser = () => serializeBrowser(() => runAsync("node", [script, ...args], { cwd: ctx.cwd, signal, timeoutMs: BROWSER_TIMEOUT_MS }));
       let result = await runBrowser();
       let text = (result.stdout || result.stderr || "").trim();

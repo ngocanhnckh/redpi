@@ -44,7 +44,7 @@ Selectors use Playwright syntax: `text=...`, `role=...[name="..."]`, or CSS.
 2. Interact with `click` / `type`; they wait for the page to settle and show the result. If the change you expect comes later (a toast, a list after a slow search), `wait-for <selector>` or `wait-for-text`.
 3. For bugs, always check `errors` and `console` before guessing at a cause.
 4. Take a `screenshot` only when layout or visuals matter, then inspect the image file. Set the width first (`viewport phone` / `viewport desktop`); the size stays until you change it.
-5. `reset` when a flow needs a clean session (logged out, empty storage). The browser closes itself after 30 minutes unused.
+5. `reset` when a flow needs a clean session (logged out, empty storage). When you are done, `close` it; it also closes itself after 10 minutes unused and when the Pi session ends, and `gc` stops any RedPi browsers left behind.
 
 For a one-shot health check of a frontend, the user can run `/redpi-frontend-check <url>`.
 

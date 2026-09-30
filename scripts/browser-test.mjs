@@ -4,7 +4,7 @@
 // width, and explain a dev server that is down. Uses its own browser folder; needs Playwright Chromium.
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,7 @@ import { deflateSync, crc32 } from "node:zlib";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = mkdtempSync(join(tmpdir(), "redpi-browser-test-"));
-const env = { ...process.env, REDPI_BROWSER_DIR: join(dir, "browser"), REDPI_BROWSER_READY_MS: "12000" };
+const env = { ...process.env, PI_CODING_AGENT_DIR: dir, REDPI_BROWSER_DIR: join(dir, "yitec", "browser"), REDPI_BROWSER_READY_MS: "12000" };
 delete env.REDPI_HQ_WORKER;
 let server;
 const done = async (code) => { await cli("reset"); server?.close(); rmSync(dir, { recursive: true, force: true }); process.exit(code); };
@@ -53,7 +53,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 let r = await cli("goto", `${base}/slow`);
 if (/Executable doesn't exist|Playwright is not installed/.test(r.out)) { console.log("Browser test skipped: Playwright Chromium is not installed."); await done(0); }
 if (!/^ready: page fully loaded/m.test(r.out) || !r.out.includes("Loaded 3 items") || r.out.includes("Loading…")) await fail("goto should wait until the data rendered", r.out);
-const state = () => JSON.parse(readFileSync(join(dir, "browser", "state.json"), "utf8"));
+const state = () => JSON.parse(readFileSync(join(dir, "yitec", "browser", "state.json"), "utf8"));
 const pid = state().cdp?.pid;
 // 2. A screenshot right after is of the finished page, from the same browser (no reload).
 r = await cli("screenshot", join(dir, "a.png"));
@@ -86,11 +86,26 @@ if (readFileSync(join(dir, "p.png")).readUInt32BE(16) !== 390) await fail("phone
 const closed = await new Promise((res) => { const t = createServer(); t.listen(0, "127.0.0.1", () => { const port = t.address().port; t.close(() => res(port)); }); });
 r = await cli("goto", `http://127.0.0.1:${closed}/`);
 if (r.status === 0 || !/connection refused\. Is the dev server running/.test(r.out)) await fail("connection refused should be explained", r.out);
-// 8. reset closes the browser.
+// 8. close stops the whole Chromium process tree (zygote, GPU, renderers), not just the parent.
+const statePath = join(dir, "yitec", "browser", "state.json");
+const group = (pgid) => readdirSync("/proc").filter((d) => /^\d+$/.test(d)).filter((d) => { try { return Number(readFileSync(`/proc/${d}/stat`, "utf8").replace(/^.*\) /s, "").split(" ")[2]) === pgid; } catch { return false; } }).length;
+await cli("goto", `${base}/modal`);
+let cdpPid = JSON.parse(readFileSync(statePath, "utf8")).cdp.pid;
+if (group(cdpPid) < 3) await fail(`expected Chromium helpers in the browser's process group, found ${group(cdpPid)}`);
+r = await cli("close");
+if (group(cdpPid) !== 0) await fail(`close left ${group(cdpPid)} Chromium processes behind`, r.out);
+// 9. gc stops a browser nothing owns any more (a crash, an older version) and leaves no helpers.
+await cli("goto", `${base}/modal`);
+const st = JSON.parse(readFileSync(statePath, "utf8")); cdpPid = st.cdp.pid; delete st.cdp; writeFileSync(statePath, JSON.stringify(st));
+r = await cli("gc");
+if (!/orphaned/.test(r.out) || group(cdpPid) !== 0) await fail("gc should stop an orphaned browser and all its helpers", `${r.out} left=${group(cdpPid)}`);
+r = await cli("gc");
+if (!/no leftover/.test(r.out)) await fail("gc with nothing left over", r.out);
+// 10. reset closes the browser.
+await cli("goto", `${base}/modal`);
+cdpPid = JSON.parse(readFileSync(statePath, "utf8")).cdp.pid;
 await cli("reset");
-await new Promise((res) => setTimeout(res, 500));
-let running = true; try { process.kill(pid, 0); } catch { running = false; }
-if (running) await fail("reset should close the browser");
+if (group(cdpPid) !== 0) await fail("reset should close the browser");
 
-console.log("Browser test passed: pages are ready before text and screenshots (slow API, spinner, late image), the browser and page stay open between commands, never-settling pages say what is loading, late errors are collected, phone width sticks, a down dev server is explained, reset closes it.");
+console.log("Browser test passed: pages are ready before text and screenshots (slow API, spinner, late image), the browser and page stay open between commands, never-settling pages say what is loading, late errors are collected, phone width sticks, a down dev server is explained, close and gc stop the whole Chromium tree, reset closes it.");
 await done(0);

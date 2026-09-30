@@ -6,7 +6,8 @@
  * keeps its state from one command to the next: a click that opens a dialog is still open for the
  * screenshot. Every command that shows the page first waits until it is actually ready (load event,
  * network quiet, fonts, visible images, no spinner, DOM settled) and says so, or says what is still
- * loading. The browser closes itself after REDPI_BROWSER_IDLE_MIN minutes unused (default 30).
+ * loading. The browser closes itself after REDPI_BROWSER_IDLE_MIN minutes unused (default 10), and
+ * `close` or `gc` stop its whole process tree, so no Chromium helpers are left behind.
  *
  * Usage examples:
  *   redpi-browser.js goto https://example.com
@@ -24,12 +25,13 @@ const { spawn } = require('child_process');
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent');
 // Each RedPlan worker gets its own browser, so teammates never drive each other's page.
 const WORKER = String(process.env.REDPI_HQ_WORKER || '').replace(/[^\w.-]/g, '');
-const STATE_DIR = process.env.REDPI_BROWSER_DIR || path.join(AGENT_DIR, 'yitec', 'browser', ...(WORKER ? ['workers', WORKER] : []));
+const BROWSER_ROOT = path.join(AGENT_DIR, 'yitec', 'browser');
+const STATE_DIR = process.env.REDPI_BROWSER_DIR || path.join(BROWSER_ROOT, ...(WORKER ? ['workers', WORKER] : []));
 const STATE_PATH = path.join(STATE_DIR, 'state.json');
 const PROFILE = path.join(STATE_DIR, 'profile');
 const DEFAULT_TIMEOUT = Number(process.env.REDPI_BROWSER_TIMEOUT || 15000);
 const READY_MS = Number(process.env.REDPI_BROWSER_READY_MS || 15000);
-const IDLE_MS = Number(process.env.REDPI_BROWSER_IDLE_MIN || 30) * 60 * 1000;
+const IDLE_MS = Number(process.env.REDPI_BROWSER_IDLE_MIN || 10) * 60 * 1000;
 const HEADLESS = process.env.REDPI_BROWSER_HEADLESS !== 'false';
 const SIZES = { desktop: [1280, 900], laptop: [1440, 900], tablet: [768, 1024], phone: [390, 844] };
 const DEFAULT_SIZE = [Number(process.env.REDPI_BROWSER_WIDTH || 1280), Number(process.env.REDPI_BROWSER_HEIGHT || 900)];
@@ -60,6 +62,7 @@ Commands:
   console | errors | network [--max N]
   close                             close the browser (keeps logins)
   reset                             close it and forget everything (logins, history)
+  gc [--all]                        stop leftover RedPi browsers (orphaned or idle; --all: every one)
 
 Options: --timeout MS limits the wait for readiness (default ${READY_MS}).
 Selectors use Playwright syntax: text=Login, role=button[name="Save"], css selectors, etc.`);
@@ -75,6 +78,7 @@ function parse(argv) {
     else if (args[i] === '--timeout') opts.timeout = Number(args[++i] || opts.timeout);
     else if (args[i] === '--submit') opts.submit = true;
     else if (args[i] === '--full') opts.full = true;
+    else if (args[i] === '--all') opts.all = true;
     else rest.push(args[i]);
   }
   return { cmd, args: rest, opts };
@@ -127,10 +131,65 @@ async function getPlaywright() {
   }
 }
 
-function stopBrowser(state) {
-  const pid = state.cdp?.pid;
-  if (alive(pid)) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+// Chromium starts detached, so it leads its own process group: signal the group, and its
+// zygote, GPU, network and renderer helpers go with it instead of lingering.
+function killTree(pid, sig = 'SIGTERM') {
+  if (!pid) return;
+  try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch {} }
+}
+const groupAlive = (pgid) => { try { process.kill(-pgid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+async function stopTree(pid, waitMs = 3000) {
+  if (!pid || !groupAlive(pid)) return;
+  killTree(pid, 'SIGTERM');
+  const until = Date.now() + waitMs;
+  while (groupAlive(pid) && Date.now() < until) await sleep(100);
+  if (groupAlive(pid)) killTree(pid, 'SIGKILL');
+}
+async function stopBrowser(state) {
+  await stopTree(state.cdp?.pid);
   delete state.cdp;
+}
+
+// Every Chromium process group started from a RedPi browser profile (all workers), read from /proc.
+function browserGroups() {
+  const groups = new Map();
+  let pids = [];
+  try { pids = fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)); } catch { return groups; }
+  const marker = `--user-data-dir=${BROWSER_ROOT}${path.sep}`;
+  for (const pid of pids) {
+    let cmd = '';
+    try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { continue; }
+    // Chromium rewrites its own title, so arguments may be separated by spaces rather than NULs.
+    const at = cmd.indexOf(marker);
+    if (at < 0) continue;
+    const arg = cmd.slice(at).split(/[\0 ]/)[0];
+    let pgid = 0;
+    try { pgid = Number(fs.readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[2]); } catch { continue; }
+    if (!pgid) continue;
+    const g = groups.get(pgid) || { pgid, pids: [], profile: '' };
+    g.pids.push(Number(pid));
+    if (!cmd.includes('--type=')) g.profile = arg.slice('--user-data-dir='.length);
+    groups.set(pgid, g);
+  }
+  return groups;
+}
+
+// Stop RedPi browsers nobody is using: groups no state file owns (left by a crash or an old
+// version) and browsers idle past the limit. Returns one line per group stopped.
+async function gc({ all = false } = {}) {
+  const stopped = [];
+  for (const g of browserGroups().values()) {
+    const stateDir = g.profile ? path.dirname(g.profile) : '';
+    let st = {};
+    try { st = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8')); } catch {}
+    const owned = st.cdp?.pid === g.pgid;
+    const idle = owned && Date.now() - Number(st.usedAt || Date.parse(st.cdp.started) || 0) > IDLE_MS;
+    if (owned && !idle && !all) continue;
+    await stopTree(g.pgid);
+    if (owned) { delete st.cdp; try { fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify(st, null, 2)); } catch {} }
+    stopped.push(`stopped ${g.pids.length} Chromium process(es) (group ${g.pgid}, ${all ? 'all' : owned ? 'idle' : 'orphaned'}) ${stateDir ? path.relative(BROWSER_ROOT, stateDir) || '.' : ''}`.trim());
+  }
+  return stopped;
 }
 
 const chromiumLog = (f) => { try { return (fs.readFileSync(f, 'utf8').split('\n').find((l) => /FATAL|ERROR/.test(l)) || 'no output').slice(0, 400); } catch { return 'no output'; } };
@@ -138,6 +197,8 @@ const chromiumLog = (f) => { try { return (fs.readFileSync(f, 'utf8').split('\n'
 // Start Chromium once, detached, with the DevTools port on localhost; later commands reconnect.
 async function startBrowser(pw, state) {
   fs.mkdirSync(PROFILE, { recursive: true });
+  // Clear out browsers left by crashed or abandoned sessions before adding another.
+  await gc().catch(() => {});
   for (const f of ['DevToolsActivePort', 'SingletonLock', 'SingletonSocket', 'SingletonCookie']) fs.rmSync(path.join(PROFILE, f), { force: true });
   const exe = process.env.REDPI_BROWSER_EXECUTABLE || pw.chromium.executablePath();
   if (!fs.existsSync(exe)) throw new Error(`Executable doesn't exist at ${exe}. Run: npx playwright install chromium`);
@@ -184,7 +245,7 @@ async function startBrowser(pw, state) {
 async function connect(pw, state) {
   if (state.cdp?.port && alive(state.cdp.pid)) {
     try { return { browser: await pw.chromium.connectOverCDP(`http://127.0.0.1:${state.cdp.port}`, { timeout: 5000 }), fresh: false }; }
-    catch { stopBrowser(state); }
+    catch { await stopBrowser(state); }
   } else delete state.cdp;
   return { browser: await startBrowser(pw, state), fresh: true };
 }
@@ -356,7 +417,7 @@ async function keeper() {
     await sleep(15000);
     const s = readState();
     if (!alive(s.cdp?.pid)) return;
-    if (Date.now() - Number(s.usedAt || Date.parse(s.cdp.started) || Date.now()) > IDLE_MS) { try { process.kill(s.cdp.pid, 'SIGTERM'); } catch {} return; }
+    if (Date.now() - Number(s.usedAt || Date.parse(s.cdp.started) || Date.now()) > IDLE_MS) { await stopTree(s.cdp.pid); return; }
   }
 }
 
@@ -369,10 +430,13 @@ async function keeper() {
     process.exit(124);
   }, MAX_RUNTIME).unref();
   const out = (s) => { console.log(s); };
+  if (cmd === 'gc') {
+    const lines = await gc({ all: !!opts.all });
+    return out(lines.length ? lines.join('\n') : 'no leftover RedPi browsers');
+  }
   if (cmd === 'reset' || cmd === 'close') {
     await withLock(async () => {
-      const s = readState(); stopBrowser(s);
-      await sleep(300);
+      const s = readState(); await stopBrowser(s);
       if (cmd === 'reset') fs.rmSync(STATE_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); else writeState(s);
     });
     return out(cmd === 'reset' ? 'reset ok: browser closed, profile and history cleared' : 'browser closed (logins kept)');

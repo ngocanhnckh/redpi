@@ -94,7 +94,7 @@ RedPi is designed to **auto-create the best usable harness** from your available
 | ✳️ | **Claude subscription bridge** | Optional [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) provider: use a signed-in Claude Code subscription in Pi. | `/redpi-claude` |
 | ⚙️ | **Thinking-aware routing** | Each role has its own thinking level: off/low/medium/high/etc. | Preconfigured |
 | 🤖 | **Subagent defaults** | Installs `pi-subagents`; defaults cheap workers/scouts/reviewers. | None |
-| 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, Anthropic's frontend-design skill, the RedPi Playwright browser skill, and office skills: [SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) for slide decks, Excel analysis and HTML reports, plus RedPi's `office-files` for reading and writing Word, Excel, PowerPoint and PDF files. | None |
+| 🧰 | **Skills** | Installs Matt Pocock skills, the liquid-glass frontend skill, Anthropic's frontend-design skill, the RedPi Playwright browser skill, RedPi's `docker-dev` skill (services that take a port run in Docker with hot reload and sized memory/CPU limits), and office skills: [SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) for slide decks, Excel analysis and HTML reports, plus RedPi's `office-files` for reading and writing Word, Excel, PowerPoint and PDF files. | None |
 | 🖼 | **Image size guard** | Big screenshots and photos no longer break a session: before each model request, images over the size budget are recompressed and the oldest are left out so the whole request stays under 4 MB (gateways answer bigger ones with `413 Request Entity Too Large`), without changing the saved session. `redpi_image_compress` writes a smaller copy of an image file. | None |
 | 🌐 | **Browser automation** | One compact Playwright CLI tool, `redpi_browser`; console/errors/network/screenshot; no MCP overhead. Chromium installs with RedPi (opt out with `REDPI_SKIP_BROWSER=1`). | None |
 | ⏳ | **Job watcher** | Long shell commands (builds, Docker, test suites) are moved to the background after 10 minutes instead of being killed or blocking the agent, with a health report (CPU, disk, network, Docker, errors in the log); the agent is told when they finish or look stuck. | None |
@@ -627,6 +627,34 @@ Requires `tmux` for workers.
 
 ---
 
+## 🐳 Services run in Docker
+
+Unless you say otherwise, anything an agent starts that listens on a port runs in a Docker container: a web or API server, a dev server, a database, a queue. The code folder is bind-mounted, so edits hot-reload as usual. Every process the service starts stays inside the container, under a memory, CPU and process limit, so:
+
+- nothing is left running on the host;
+- no agent hunts for a stray Node child process to free a port;
+- stopping it is one command.
+
+Desktop apps, CLIs, builds and unit tests still run on the host.
+
+The `docker-dev` skill and its `redpi-dev` helper (on PATH in RedPi sessions) do the work:
+
+| Command | What it does |
+| --- | --- |
+| `redpi-dev init` | Writes `compose.dev.yaml` for the project it finds, with a start command that listens on 0.0.0.0 and dependencies in a named volume that reinstall only when the lock file changes. Stacks: Next.js, Vite, Astro, Nuxt, Angular, a plain Node service, FastAPI, Django, Flask, Go. |
+| `redpi-dev up` | Starts the stack and waits until the port answers, then prints the URL and memory/CPU use against the limits. On failure it prints the error and the last logs. |
+| `redpi-dev status` | State, URL, use against the limits, restarts, and an out-of-memory kill together with the fix. |
+| `redpi-dev logs`, `restart`, `exec <service> -- <cmd>` | The usual operations, without hunting for PIDs. |
+| `redpi-dev down` | Removes the stack. |
+| `redpi-dev ls` | Lists every RedPi dev stack on the machine. |
+
+- **Limits are sized to the service.** A Vite app starts at 1 GB, Next.js at 2 GB, an API at 768 MB, and Postgres at 512 MB. The agent adjusts them from real use: about 1.5× the working peak, and a limit is never removed.
+- **`init: true`** puts a small init process in each container, which reaps finished child processes so they can't pile up as zombies.
+- **Files stay yours.** The container runs as your user, so files it writes into the repo remain editable.
+- **Parallel stacks.** Each folder and each RedPlan worker gets its own stack name, plus a free host port when the default is taken, so parallel workers never collide. Workers stop their own stack when their task is done.
+- **Existing setups win.** A project with its own dev compose file keeps using it (`redpi-dev up --file compose.yaml`).
+- **Without Docker,** the agent runs the service directly and says so.
+
 ## ⏳ Long commands: the job watcher
 
 Builds, Docker, and big test suites used to either hit the 10-minute bash timeout (and get killed) or leave the agent sleeping and polling for hours without checking whether anything was still happening. RedPi's `bash` now watches them instead (Linux):
@@ -783,7 +811,7 @@ NOT READY after 15s: 1 request still loading (GET http://localhost:3000/api/item
 
 The agent is told to trust `ready` and to act on the reason when it is not ready, instead of sleeping and retrying.
 
-**The page stays open between commands.** One Chromium keeps running (each RedPlan worker has its own), so what a click opened is still there for the next `text` or `screenshot`, errors logged between commands are still collected, and the window size you set sticks. It closes itself after 30 minutes unused (`REDPI_BROWSER_IDLE_MIN`). A dev server that is down gets a plain "connection refused. Is the dev server running?".
+**The page stays open between commands.** One Chromium keeps running (each RedPlan worker has its own), so what a click opened is still there for the next `text` or `screenshot`, errors logged between commands are still collected, and the window size you set sticks. Agents `close` it when done; it also closes itself after 10 minutes unused (`REDPI_BROWSER_IDLE_MIN`) and when the Pi session that used it ends. Stopping it stops the whole Chromium process tree (zygote, GPU, network and renderer helpers), and each Pi start runs `redpi-browser.js gc`, which clears RedPi browsers left behind by a crash or an older version. A dev server that is down gets a plain "connection refused. Is the dev server running?".
 
 Frontend shortcut:
 
@@ -835,6 +863,7 @@ RedPi adds skills to Pi settings automatically:
 <redpi package>/skills/redpi-browser   (Playwright browser skill)
 <redpi package>/skills/frontend-design   (Anthropic's frontend-design skill)
 <redpi package>/skills/office-files   (read and write Word, Excel, PowerPoint, PDF)
+<redpi package>/skills/docker-dev   (run services in Docker with limits, see "Services run in Docker")
 ```
 
 **Office work.** From [OpenSenseNova/SenseNova-Skills](https://github.com/OpenSenseNova/SenseNova-Skills) (MIT), RedPi registers only the office skills (a sparse clone keeps just their folders):
@@ -1115,7 +1144,8 @@ Smoke coverage includes:
 - automatic first-run provider onboarding
 - HQ watch: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each alert the CEO within seconds, escalate to you when they persist, clear when they stop; the CEO check-in carries the numbers
 - office floor scales with the team (1 to 40 people): a desk, café seat, rec-room spot and "needs you" spot for everyone, all reachable from the entrance, none shared
-- browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained
+- browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained, `close` and `gc` leave no Chromium helper processes behind
+- docker-dev: `init` detects Next/Vite/FastAPI/Django/Go with sized limits; a Node app runs limited in Docker, hot-reloads an edit, gets its own stack and port per worker, reaps orphaned children, reports an out-of-memory kill, keeps repo files owned by you, and `down` removes it (Docker part skipped without Docker)
 - image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
 - `office-files` skill: Markdown to Word and PowerPoint and back, CSV to Excel, PDF merge and page pick (through `uv`; skipped without it)
 - only SenseNova's office skills are registered
