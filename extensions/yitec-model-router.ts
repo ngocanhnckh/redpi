@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createPasteBurstGuard } from "../lib/paste-burst.ts";
+import { logDecision } from "../lib/jev-decisions.ts";
 import { secretInput } from "../lib/secret-input.ts";
 import { JEV_PROVIDERS, ROUTE_ROLE, describeJev, findJg, installJg, jevCheck, jevReady, jevRoute, jgProviderFor, loadJevConfig, normalizeJevBaseUrl, routeLabel, runJevgrep, saveJevConfig, type JevConfig, type JevProviderId, type RouteDecision } from "../lib/jev.ts";
 
@@ -914,6 +915,8 @@ function jevStatusText(cfg: JevConfig): string {
     `Endpoint: ${describeJev(cfg)}`,
     `Model routing: ${cfg.routing !== false ? "on" : "off"} · thinking from Jev: ${cfg.thinking !== false ? "on" : "off"} · confidence floor ${Math.round((cfg.minConfidence ?? 0.6) * 100)}%`,
     `Jevgrep: ${cfg.jevgrep !== false ? "on" : "off"} · jg ${jg ? `installed (${jg})` : "not installed"} · ${jgKey}`,
+    `Command safety check: ${cfg.safety ?? "ask"} · flags at ${Math.round((cfg.safetyThreshold ?? 0.5) * 100)}%, blocks with nobody to ask at ${Math.round((cfg.safetyBlockThreshold ?? 0.8) * 100)}%`,
+    `Stale-output pruning: ${cfg.prune !== false ? "on" : "off"} · from ${Math.round((cfg.pruneAt ?? 0.3) * 100)}% of the context window · decisions: /redpi-jev-stats`,
     `Config: ${join(USER_YITEC_DIR, "decision-model.json")}`,
   ].join("\n");
 }
@@ -1131,7 +1134,7 @@ export default function (pi: ExtensionAPI) {
     let cfg = loadJevConfig(AGENT_DIR);
     const save = (next: JevConfig) => { saveJevConfig(AGENT_DIR, next); cfg = next; syncJevTools(); };
     const a = arg.trim().toLowerCase();
-    if (a === "off") { save({ ...cfg, enabled: false }); return ctx.ui.notify("Decision model OFF: prompts use the planner model (magic keywords still apply), and Jevgrep is hidden from the agent.", "info"); }
+    if (a === "off") { save({ ...cfg, enabled: false }); return ctx.ui.notify("Decision model OFF: prompts use the planner model (magic keywords still apply), Jevgrep is hidden from the agent, and the command safety check and output pruning stop.", "info"); }
     if (a === "on" && cfg.baseUrl && cfg.apiKey) { save({ ...cfg, enabled: true }); return ctx.ui.notify(`Decision model ON.\n\n${jevStatusText(cfg)}`, "info"); }
     if (a === "test") {
       if (!cfg.baseUrl || !cfg.apiKey) return ctx.ui.notify("No decision model endpoint and key yet. Run /redpi-decision to set them.", "warning");
@@ -1146,6 +1149,9 @@ export default function (pi: ExtensionAPI) {
         `Model routing: ${cfg.routing !== false ? "ON" : "OFF"} (toggle)`,
         `Thinking level from Jev: ${cfg.thinking !== false ? "ON" : "OFF"} (toggle)`,
         `Jevgrep code search: ${cfg.jevgrep !== false ? "ON" : "OFF"} (toggle)`,
+        `Command safety check: ${(cfg.safety ?? "ask").toUpperCase()} (ask → shadow → off)`,
+        `Stale-output pruning: ${cfg.prune !== false ? "ON" : "OFF"} (toggle)`,
+        "Decision stats",
         findJg(AGENT_DIR) ? "Update Jevgrep" : "Install Jevgrep (jg)",
         "Test connection",
         "Try routing a prompt",
@@ -1168,6 +1174,9 @@ export default function (pi: ExtensionAPI) {
         if (next) { cfg = next; syncJevTools(); }
       } else if (choice.startsWith("Model routing")) save({ ...cfg, routing: cfg.routing === false });
       else if (choice.startsWith("Thinking level")) save({ ...cfg, thinking: cfg.thinking === false });
+      else if (choice.startsWith("Command safety check")) save({ ...cfg, safety: ({ ask: "shadow", shadow: "off", off: "ask" } as const)[cfg.safety ?? "ask"] });
+      else if (choice.startsWith("Stale-output pruning")) save({ ...cfg, prune: cfg.prune === false });
+      else if (choice === "Decision stats") pi.sendUserMessage("/redpi-jev-stats", { deliverAs: "followUp", expandPromptTemplates: true });
       else if (choice.startsWith("Jevgrep code search")) {
         save({ ...cfg, jevgrep: cfg.jevgrep === false });
         if (cfg.jevgrep !== false && !findJg(AGENT_DIR) && await ctx.ui.confirm("Install Jevgrep?", "jg is not installed yet. Install it into RedPi's tools folder now?")) await installJgWithNotice(ctx);
@@ -1584,6 +1593,9 @@ export default function (pi: ExtensionAPI) {
           try {
             lastRoute = await jevRoute(jev, event.prompt, lastAssistantText(ctx), ctx.signal);
             lastRouteNote = routeLabel(lastRoute);
+            logDecision(AGENT_DIR, { kind: "route", version: "route-v2", model: jev.model, layer: "jev", ms: lastRoute.ms, threshold: jev.minConfidence ?? 0.6,
+              answers: { [lastRoute.jevTier]: lastRoute.probability, ...(lastRoute.effort !== undefined ? { effort: lastRoute.effort } : {}) },
+              outcome: lastRoute.tier === lastRoute.jevTier ? `routed ${lastRoute.tier}` : `routed ${lastRoute.tier} (confidence floor; jev said ${lastRoute.jevTier})` });
           } catch (e: any) {
             lastRoute = undefined;
             lastRouteNote = `jev unavailable (${e?.message || e}) → planner`;

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Public Pi harness: model role routing, native 9Router support, Matt Pocock skills bootstrap, subagents defaults, memory-lite, and advisor-lite.",
   "scripts": {
-    "smoke": "node scripts/hq-api-test.mjs && node --no-warnings scripts/hq-watch-test.mjs && node scripts/plan-review-ui-test.mjs && node scripts/office-ui-test.mjs && node --no-warnings scripts/office-map-test.mjs && node scripts/harness-runner-test.mjs && node --no-warnings scripts/paste-burst-test.mjs && node --no-warnings scripts/jev-test.mjs && node --no-warnings scripts/jobs-test.mjs && node --no-warnings scripts/knowledge-test.mjs && node --no-warnings scripts/images-test.mjs && node --no-warnings scripts/office-files-test.mjs && node --no-warnings scripts/browser-test.mjs && node --no-warnings scripts/docker-dev-test.mjs && ./scripts/smoke-test.sh && ./scripts/context-window-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh && ./scripts/redplan-smoke-test.sh",
+    "smoke": "node scripts/hq-api-test.mjs && node --no-warnings scripts/hq-watch-test.mjs && node scripts/plan-review-ui-test.mjs && node scripts/office-ui-test.mjs && node --no-warnings scripts/office-map-test.mjs && node scripts/harness-runner-test.mjs && node --no-warnings scripts/paste-burst-test.mjs && node --no-warnings scripts/jev-test.mjs && node --no-warnings scripts/jev-decisions-test.mjs && node --no-warnings scripts/jobs-test.mjs && node --no-warnings scripts/knowledge-test.mjs && node --no-warnings scripts/images-test.mjs && node --no-warnings scripts/office-files-test.mjs && node --no-warnings scripts/browser-test.mjs && node --no-warnings scripts/docker-dev-test.mjs && ./scripts/smoke-test.sh && ./scripts/context-window-test.sh && ./scripts/setup-wizard-smoke-test.sh && ./scripts/folder-config-smoke-test.sh && ./scripts/redplan-smoke-test.sh",
     "smoke:hq": "node scripts/hq-api-test.mjs",
     "smoke:watch": "node --no-warnings scripts/hq-watch-test.mjs",
     "smoke:review": "node scripts/plan-review-ui-test.mjs",
@@ -12,7 +12,7 @@
     "smoke:redplan": "./scripts/redplan-smoke-test.sh",
     "smoke:folder": "./scripts/folder-config-smoke-test.sh",
     "smoke:paste": "node --no-warnings scripts/paste-burst-test.mjs",
-    "smoke:jev": "node --no-warnings scripts/jev-test.mjs",
+    "smoke:jev": "node --no-warnings scripts/jev-test.mjs && node --no-warnings scripts/jev-decisions-test.mjs",
     "smoke:browser": "node --no-warnings scripts/browser-test.mjs",
     "smoke:docker": "node --no-warnings scripts/docker-dev-test.mjs",
     "smoke:context": "./scripts/context-window-test.sh",
@@ -31,7 +31,7 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions/yitec-model-router.ts", "./extensions/redplan.ts", "./extensions/redpi-jobs.ts", "./extensions/redpi-knowledge.ts", "./extensions/redpi-images.ts"],
+    "extensions": ["./extensions/yitec-model-router.ts", "./extensions/redplan.ts", "./extensions/redpi-jobs.ts", "./extensions/redpi-knowledge.ts", "./extensions/redpi-images.ts", "./extensions/redpi-decisions.ts"],
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]

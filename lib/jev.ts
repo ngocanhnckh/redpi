@@ -34,6 +34,15 @@ export type JevConfig = {
   jevgrep?: boolean; // offer the redpi_jevgrep tool (default on)
   minConfidence?: number; // below this, a cheaper route falls back to the strong model
   timeoutMs?: number;
+  safety?: "ask" | "shadow" | "off"; // command safety check before bash runs (default ask)
+  safetyThreshold?: number; // a "yes" this likely flags the command (default 0.5)
+  safetyBlockThreshold?: number; // with nobody to ask, block at this (default 0.8)
+  prune?: boolean; // drop stale tool output from long contexts (default on)
+  pruneAt?: number; // share of the context window that triggers pruning (default 0.3)
+  pruneMinTokens?: number; // and at least this many tokens in context (default 60000)
+  pruneMinChars?: number; // and this much prunable output (default 60000 chars)
+  pruneConfidence?: number; // drop only when this sure it is no longer needed (default 0.9)
+  logInputs?: boolean; // keep commands in the decision log (default: hash only)
 };
 
 export function jevConfigPath(agentDir: string) {
@@ -148,7 +157,7 @@ export function routeRequest(prompt: string, previousReply?: string) {
     questions: {
       tier: {
         type: "choice",
-        instructions: "Which model should handle this request?",
+        instructions: "Which model should handle `request` (read with `previousAssistantReply` when present)?",
         criteria: {
           strong: "Needs strong reasoning: designing or planning a feature, architecture, changes across several files or steps, debugging an unclear failure, security or performance work, reviewing code, ambiguous or open-ended requests, or long autonomous work. Also a short follow-up that approves or continues such work.",
           fast: "Routine, well-specified work: a small or clearly described edit, running a known command, fixing an obvious error, writing a simple test or doc, or answering a direct question about code or tools.",
@@ -157,7 +166,7 @@ export function routeRequest(prompt: string, previousReply?: string) {
       },
       effort: {
         type: "score",
-        instructions: "How much reasoning effort does this request need?",
+        instructions: "How much reasoning effort does `request` need?",
         criteria: [
           "Trivial: a greeting, acknowledgement, or one-line answer",
           "Simple: a small, clear change or a direct question",

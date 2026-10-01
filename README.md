@@ -377,6 +377,61 @@ Jevgrep reports that coding agents solved the same tasks at about 30% lower cost
 
 Searches send the repository's eligible source (ignored, hidden, dependency and obvious secret files are skipped) to Jev through your provider.
 
+### 🛡 Jev in the agent loop: command safety check and stale-output pruning
+
+Following the [Jev engineering playbook](https://x.com/polydao/status/2104783226833186920), the routine decisions inside the agent loop go to Jev instead of a full model call. Simple rules in code come first; Jev answers bounded yes/no questions in about 300 ms; you get the irreversible calls. All of this runs only while the decision model is on, and each part has its own switch in `/redpi-decision`.
+
+**Command safety check** (default `ask`). Before `bash` or a `redpi_job` start runs, the layers apply in order:
+
+1. **Rules in code.** Commands that only read (`ls`, `git status`, `npm test`, `docker ps`…) run without a question, unless they touch credential files such as `.env` or `~/.ssh`. A few catastrophic patterns (`rm -rf ~`, `mkfs`, `shutdown`…) are flagged straight away.
+2. **One Jev call** for everything else, asking four yes/no questions about the same command. Would it:
+   - delete data that can't easily be recreated;
+   - change something outside this project;
+   - expose secrets;
+   - publish or send something that can't be taken back?
+3. **You decide.** A command that is 50% or more likely to do one of those asks you: **Block it**, **Allow once**, or **Allow this exact command for the rest of the session**.
+   - RedPlan workers never get a dialog. They are blocked only at 80% or more, and are told to ask you through HQ.
+   - `shadow` mode only logs what it would have asked, for trying it out.
+   - If Jev is unreachable, nothing is blocked.
+
+On a test set, everything that should be caught was flagged:
+- force-pushing main
+- `npm publish`
+- `cat .env`
+- `docker compose down -v`
+- `pkill -f node`
+- `git reset --hard`
+- `DROP TABLE`
+- a Slack webhook
+- `sudo apt-get`
+
+Ordinary work ran without a question: `rm -rf node_modules`, `npm install`, pushing a feature branch, writing source files.
+
+**Stale-output pruning** (default on). Once the context passes 30% of the window (and at least 60k tokens), Jev judges older, large tool outputs in one call. It asks whether each one is still needed for the current task.
+
+- Only outputs Jev is at least 90% sure are no longer needed are replaced by a one-line stub, which says what ran so the agent can run it again.
+- The newest 8 outputs are never touched.
+- Those outputs are then not re-sent on every following turn.
+- Decisions are saved in the session, so the prompt prefix stays stable and caching keeps working.
+
+**`/redpi-jev-stats [days]`** shows the decisions:
+- per kind, which layer answered (code, Jev, you) and the outcomes;
+- confidence bands, speed, and the cost of Jev input (about $0.042 per million tokens; output is free);
+- how many flagged commands you approved, which tells you when a threshold can go up.
+
+The log (`~/.pi/agent/yitec/jev/decisions.jsonl`) keeps commands only as hashes unless you set `logInputs: true`.
+
+Thresholds live in `decision-model.json`:
+
+| Setting | Default | Controls |
+| --- | --- | --- |
+| `safety` | `ask` | `ask`, `shadow` or `off` |
+| `safetyThreshold` | 0.5 | flag a command at this likelihood |
+| `safetyBlockThreshold` | 0.8 | block at this likelihood when nobody can be asked |
+| `prune` | on | stale-output pruning on or off |
+| `pruneAt` | 0.3 | share of the context window before pruning starts |
+| `pruneConfidence` | 0.9 | how sure Jev must be that an output is no longer needed |
+
 ### 📁 Strict role models for one folder
 
 By default RedPi picks the planner model at the start of every turn and can fail over to other models. When a project needs exact models, open:
@@ -1038,7 +1093,8 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 🧙 | `/yitec-setup` | Alias for `/redpi-setup`. |
 | 🎯 | `/redpi-config` | Set role models and thinking for this folder (strict), this session, the project file, or globally; apply preset profiles (Cybersecurity); show or unpin routing. |
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
-| 🧭 | `/redpi-decision` | Decision model (Jev): on/off, endpoint and key, prompt routing, thinking from Jev, Jevgrep install/toggle, connection test, try a prompt. Also `on`, `off`, `test`, `status`. |
+| 🧭 | `/redpi-decision` | Decision model (Jev): on/off, endpoint and key, prompt routing, thinking from Jev, Jevgrep install/toggle, command safety check (ask/shadow/off), stale-output pruning, connection test, try a prompt. Also `on`, `off`, `test`, `status`. |
+| 📊 | `/redpi-jev-stats [days]` | Jev decisions by kind, layer, outcome and confidence band, with speed and cost. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
 | 📏 | `/redpi-context [1m\|256k\|reset]` | Show or set the current model's context window (for combos whose size 9Router does not know). |
 | 🌐 | `/redpi-browser-install` | Install or reinstall the Playwright Chromium runtime. |
@@ -1193,6 +1249,7 @@ Smoke coverage includes:
 - Tickets: validation, attachments (stored privately, images inline, everything else downloads with a sandbox), the CEO told to act at once on urgent ones with who is free, assigning with a brief that carries the whole ticket, a worker spawned for a ticket without a plan, a ticket reopening a finished run; in the browser, filing one with an attachment (urgent first on the board, panel, timeline), Markdown rendered safely on the event board, and the form at phone width
 - Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the recreation room, each to their own spot; token use charts; the Screenshots tab with its lightbox
 - Multi-line paste in terminals without bracketed paste: three pasted lines reach the model as one prompt, and a line typed with Enter still submits (real Pi TUI)
+- Jev in the agent loop: read-only commands skip Jev, catastrophic ones are caught by rule, four safety questions in one call, you block or allow (once or for the session), workers never get a dialog, shadow/off/Jev-off/Jev-down behave; stale outputs pruned in one call with the newest kept and decisions persisted; the log keeps hashes only
 - Decision model (Jev), against a fake Jev and a fake model:
   - `/redpi-decision` setup: the key is masked and saved 0600, and the connection is checked
   - routing to strong, fast and tiny, including the confidence floor, Jev errors, and magic keywords
