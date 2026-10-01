@@ -760,6 +760,23 @@ RedPi lists **only 9Router combos** (models 9Router marks `owned_by: "combo"`), 
 - Need a raw route anyway? Choose `✍️ manual entry` in the picker and type e.g. `9router/cx/gpt-5.6-terra`, or start Pi with `REDPI_9ROUTER_ALL_MODELS=1` to list everything (a search option appears on long lists).
 - The model list is cached in `~/.pi/agent/yitec/9router-models.json`, so menus and startup still work when 9Router is slow to answer.
 
+**Context windows.** RedPi uses the context window that 9Router reports for each combo; Pi's auto-compaction and the `ctx` bar both work from it.
+
+When 9Router does not know a model's size, it answers exactly 200,000. That is its built-in default, not a real limit. It happens for provider aliases such as `syn:large:text` and for every combo built on them. RedPi treats that number as unknown:
+
+- the `ctx` bar shows `200k?`;
+- a one-time hint says to set the real size.
+
+To set it:
+
+```text
+/redpi-context          show the current model's window and where it came from
+/redpi-context 1m       set it (1m = 1,048,576; also 256k or an exact number); applies at once
+/redpi-context reset    go back to what the provider reports
+```
+
+Sizes you set are saved per model in `~/.pi/agent/yitec/context-windows.json` and work for any provider, not only 9Router. Set a combo's size to that of the smallest model it can fall back to, so a fallback never overflows.
+
 Check live status:
 
 ```text
@@ -1023,6 +1040,7 @@ REDPI_CONTEXT_WIDGET=1 pi   # show a larger context widget above the editor
 | 🎯 | `/yitec-config` | Alias for `/redpi-config`. |
 | 🧭 | `/redpi-decision` | Decision model (Jev): on/off, endpoint and key, prompt routing, thinking from Jev, Jevgrep install/toggle, connection test, try a prompt. Also `on`, `off`, `test`, `status`. |
 | ⬆️ | `/redpi-update` | Force-update RedPi and vendored skill repos. |
+| 📏 | `/redpi-context [1m\|256k\|reset]` | Show or set the current model's context window (for combos whose size 9Router does not know). |
 | 🌐 | `/redpi-browser-install` | Install or reinstall the Playwright Chromium runtime. |
 | 🖼️ | `/redpi-frontend-check` | Open a frontend URL and report page text, console/errors/network failures, and screenshot path. |
 | ✳️ | `/redpi-claude` | Flexibly switch between Claude subscription (Opus/Sonnet) and 9Router MainAgent/SubAgent profiles. |
@@ -1145,6 +1163,7 @@ Smoke coverage includes:
 - HQ watch: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each alert the CEO within seconds, escalate to you when they persist, clear when they stop; the CEO check-in carries the numbers
 - office floor scales with the team (1 to 40 people): a desk, café seat, rec-room spot and "needs you" spot for everyone, all reachable from the entrance, none shared
 - browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained, `close` and `gc` leave no Chromium helper processes behind
+- context windows: real 9Router windows used as is, its 200k "unknown" default flagged, `/redpi-context` applies at once (Pi's footer and auto-compaction included), persists and resets
 - docker-dev: `init` detects Next/Vite/FastAPI/Django/Go with sized limits; a Node app runs limited in Docker, hot-reloads an edit, gets its own stack and port per worker, reaps orphaned children, reports an out-of-memory kill, keeps repo files owned by you, and `down` removes it (Docker part skipped without Docker)
 - image guard: big images recompressed before each request, only the newest kept, the whole request under 4 MB even with a long text history, the session untouched, `redpi_image_compress`
 - `office-files` skill: Markdown to Word and PowerPoint and back, CSV to Excel, PDF merge and page pick (through `uv`; skipped without it)

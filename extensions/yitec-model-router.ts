@@ -618,11 +618,37 @@ function nineRouterApiKeyCommand(): string {
   return `!${process.execPath} ${join(packageRoot(), "scripts", "redpi-9router-key.js")}`;
 }
 
-function nineRouterContextWindow(id: string): number {
-  // 9Router's OpenAI-compatible /models response currently exposes only model IDs.
-  // Keep metadata for its named 1M agent combinations so Pi does not compact them
-  // at the generic discovery fallback (200k) before the router receives a request.
-  return /^(MainAgent|SubAgent)$/i.test(id) ? 1_000_000 : 200_000;
+// Context windows. 9Router reports a window per model and combo, but answers 200,000 (its
+// `contextWindow || 200000` default) whenever it does not know, e.g. for provider aliases
+// like syn:large:text and every combo built on them. Real values are trusted; that default
+// is shown as unknown, and /redpi-context sets the true size per model (context-windows.json).
+const NINE_ROUTER_UNKNOWN_WINDOW = 200_000;
+const CONTEXT_OVERRIDES_PATH = join(USER_YITEC_DIR, "context-windows.json");
+const contextSource = new Map<string, string>(); // "provider/id" -> where its window came from
+const originalWindows = new Map<string, number>();
+function contextOverrides(): Record<string, number> {
+  const j = readJson(CONTEXT_OVERRIDES_PATH, {});
+  return j && typeof j === "object" && !Array.isArray(j) ? j : {};
+}
+function contextOverride(provider: string, id: string): number | undefined {
+  const v = Number(contextOverrides()[`${provider}/${id}`]);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+function nineRouterWindow(id: string, reported: number): { contextWindow: number; source: string } {
+  const override = contextOverride("9router", id);
+  if (override) return { contextWindow: override, source: "set with /redpi-context" };
+  if (reported > 0 && reported !== NINE_ROUTER_UNKNOWN_WINDOW) return { contextWindow: reported, source: "reported by 9Router" };
+  // Pre-capabilities gateways listed only IDs: keep the 1M agent combos from compacting early.
+  if (/^(MainAgent|SubAgent)$/i.test(id)) return { contextWindow: 1_000_000, source: "not reported by 9Router; RedPi assumes 1M for its agent combos" };
+  return { contextWindow: NINE_ROUTER_UNKNOWN_WINDOW, source: "unknown: 9Router's 200k default" };
+}
+// Sizes people type: 1m (1,048,576, the usual "1M" window), 256k, 1048576.
+function parseTokens(text: string): number | undefined {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([km]?)\s*$/i.exec(text);
+  if (!m) return undefined;
+  const n = Number(m[1]); const unit = m[2].toLowerCase();
+  const v = unit === "m" ? (n === 1 ? 1_048_576 : Math.round(n * 1_000_000)) : unit === "k" ? Math.round(n * 1_000) : Math.round(n);
+  return v >= 1_000 ? v : undefined;
 }
 
 // One browser command at a time: every command reopens the same persistent Chromium
@@ -749,12 +775,14 @@ const NINE_ROUTER_MODELS_CACHE_PATH = join(USER_YITEC_DIR, "9router-models.json"
 function nineRouterModelEntry(m: any) {
   const id = typeof m === "string" ? m : m.id;
   const caps = (typeof m === "object" && m?.capabilities) || {};
+  const window = nineRouterWindow(id, Number(caps.contextWindow ?? m?.context_length) || 0);
+  contextSource.set(`9router/${id}`, window.source);
   return {
     id,
     name: `9Router ${id}`,
     reasoning: caps.reasoning ?? true,
     input: caps.vision === false ? ["text"] : ["text", "image"],
-    contextWindow: /^(MainAgent|SubAgent)$/i.test(id) ? nineRouterContextWindow(id) : caps.contextWindow || nineRouterContextWindow(id),
+    contextWindow: window.contextWindow,
     maxTokens: caps.maxOutput || 64000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
@@ -962,6 +990,70 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("yitec-claude", { description: "Alias for /redpi-claude", handler: async (_args, _ctx) => pi.sendUserMessage("/redpi-claude", { deliverAs: "followUp", expandPromptTemplates: true }) });
   pi.registerCommand("redpi-update", { description: "Force-update RedPi harness and vendored skill repositories", handler: async (_args, ctx) => ctx.ui.notify(await updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
   pi.registerCommand("yitec-update", { description: "Alias for /redpi-update", handler: async (_args, ctx) => ctx.ui.notify(await updateRedPi(loadConfig(ctx.cwd, ctx.isProjectTrusted()), true), "info") });
+  // A window set with /redpi-context applies to any provider's model, not only 9Router's.
+  function applyContextWindow(model: any) {
+    if (!model?.provider || !model?.id) return;
+    const key = `${model.provider}/${model.id}`;
+    if (!originalWindows.has(key) && model.contextWindow) originalWindows.set(key, model.contextWindow);
+    const override = contextOverride(model.provider, model.id);
+    if (override) { model.contextWindow = override; contextSource.set(key, "set with /redpi-context"); }
+    else if (!contextSource.has(key)) contextSource.set(key, "from the provider's model list");
+  }
+  const unknownWarned = new Set<string>();
+  function windowNote(ctx: any) {
+    const m = ctx.model;
+    if (!m) return;
+    const key = `${m.provider}/${m.id}`;
+    if (!String(contextSource.get(key) || "").startsWith("unknown") || unknownWarned.has(key)) return;
+    unknownWarned.add(key);
+    ctx.ui.notify(`9Router does not report the real context window of ${m.id}, so Pi assumes 200k and compacts early. If it runs a bigger model (Kimi K3: 1M), set it with /redpi-context 1m.`, "info");
+  }
+  pi.on("model_select", async (event: any, ctx: any) => { applyContextWindow(event.model); windowNote(ctx); updateContextStatus(ctx); });
+
+  pi.registerCommand("redpi-context", {
+    description: "Show or set the current model's context window: /redpi-context [1m | 256k | <tokens> | reset]",
+    handler: async (args, ctx) => {
+      const m: any = ctx.model;
+      if (!m) { ctx.ui.notify("No model selected.", "warning"); return; }
+      const key = `${m.provider}/${m.id}`;
+      const arg = String(args || "").trim().toLowerCase();
+      const overrides = contextOverrides();
+      if (arg === "reset") {
+        delete overrides[key];
+        writeJson(CONTEXT_OVERRIDES_PATH, overrides);
+        const cached = m.provider === "9router" ? readJson(NINE_ROUTER_MODELS_CACHE_PATH, {}).models?.find((x: any) => x?.id === m.id) : undefined;
+        const back = m.provider === "9router" ? nineRouterWindow(m.id, Number(cached?.capabilities?.contextWindow) || 0) : { contextWindow: originalWindows.get(key) || m.contextWindow, source: "from the provider's model list" };
+        m.contextWindow = back.contextWindow;
+        const reg: any = ctx.modelRegistry.find(m.provider, m.id);
+        if (reg && reg !== m) reg.contextWindow = back.contextWindow;
+        contextSource.set(key, back.source);
+        updateContextStatus(ctx);
+        ctx.ui.notify(`${key}: back to ${Math.round(back.contextWindow / 1000)}k (${back.source}).`, "info");
+        return;
+      }
+      if (arg) {
+        const tokens = parseTokens(arg);
+        if (!tokens) { ctx.ui.notify(`Not a size: "${arg}". Examples: /redpi-context 1m, /redpi-context 256k, /redpi-context 400000, /redpi-context reset.`, "warning"); return; }
+        if (!originalWindows.has(key) && m.contextWindow) originalWindows.set(key, m.contextWindow);
+        overrides[key] = tokens;
+        writeJson(CONTEXT_OVERRIDES_PATH, overrides);
+        m.contextWindow = tokens;
+        const reg: any = ctx.modelRegistry.find(m.provider, m.id);
+        if (reg && reg !== m) reg.contextWindow = tokens;
+        contextSource.set(key, "set with /redpi-context");
+        updateContextStatus(ctx);
+        ctx.ui.notify(`${key}: context window set to ${tokens.toLocaleString()} tokens. Auto-compaction and the ctx bar use it now; saved in ${CONTEXT_OVERRIDES_PATH}.`, "info");
+        return;
+      }
+      const usage = ctx.getContextUsage?.();
+      ctx.ui.notify([
+        `${key}: ${m.contextWindow ? m.contextWindow.toLocaleString() : "?"} tokens (${contextSource.get(key) || "from the provider's model list"})`,
+        usage?.tokens != null ? `In use: ${usage.tokens.toLocaleString()} tokens` : "",
+        "Set it: /redpi-context 1m | 256k | <tokens>   Undo: /redpi-context reset",
+      ].filter(Boolean).join("\n"), "info");
+    },
+  });
+
   pi.registerCommand("redpi-browser-install", { description: "Install Playwright Chromium runtime for RedPi browser automation", handler: async (_args, ctx) => {
     const ok = !ctx.hasUI || await ctx.ui.confirm("Install RedPi browser runtime?", "This downloads Playwright Chromium. It can take a few minutes but only needs to run once.");
     if (ok) { ctx.ui.notify("Installing Playwright Chromium in the background; Pi stays usable…", "info"); ctx.ui.notify((await installBrowserRuntime()) || "Browser install completed.", "info"); }
@@ -1366,6 +1458,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (event: any, ctx) => {
     if (event.reason !== "reload") { sessionOverride = undefined; browserChore("gc"); }
+    applyContextWindow(ctx.model);
+    windowNote(ctx);
     syncJevTools();
     const cfg = loadConfig(ctx.cwd, ctx.isProjectTrusted());
     const low = cfg.tiers?.[cfg.executor?.tier ?? "low"] ?? [];
@@ -1433,7 +1527,8 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("redpi-ctx", total ? `ctx ?/${Math.round(total / 1000)}k (updates after the next reply)` : "ctx waiting");
       return;
     }
-    const label = contextBar(usage.tokens, total);
+    const unknown = String(contextSource.get(`${ctx.model?.provider}/${ctx.model?.id}`) || "").startsWith("unknown");
+    const label = contextBar(usage.tokens, total).replace(/k (\d+%)$/, unknown ? "k? $1" : "k $1");
     const ratio = total ? usage.tokens / total : 0;
     const color = ratio > 0.8 ? "\x1b[38;5;196m" : ratio > 0.5 ? "\x1b[38;5;226m" : MATRIX_BRIGHT;
     ctx.ui.setStatus("redpi-ctx", `ctx ${label}`);
