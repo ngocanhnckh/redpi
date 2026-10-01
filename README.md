@@ -1055,6 +1055,17 @@ RedPi includes [`pi-claude-bridge`](https://github.com/elidickinson/pi-claude-br
 
 `/redpi-claude` can also enable the bridge's optional `AskClaude` delegation tool. The bridge uses your Claude Code subscription quota and its terms; it is independent of 9Router.
 
+**Everything RedPi does works on the bridge.**
+
+- **RedPlan.** The CEO protocol, worker briefs and team rules reach Claude. So do RedPi's working rules, the Docker policy and the decisions policy. The bridge builds Claude Code's system prompt from Pi's own parts and drops text that extensions add the usual way, so with the bridge RedPi adds its text at request time, which the bridge passes through. A test runs real Pi and the bridge against a fake `claude` executable to check this without using your subscription.
+- **HQ, tools and the Jev safety check.** Tool calls run through Pi, so these work as usual.
+- **Side answers.** The CEO's `redplan_ask` and instant answers run as one-off isolated queries.
+- **Long commands.** RedPi removes the bridge's 120-second bash default, so long builds are watched and moved to the background as with any other provider.
+- **Jev routing** switches between Opus and Sonnet as usual.
+- **Stale-output pruning** is skipped, because Claude Code keeps its own copy of the conversation and the edits would not reach it.
+
+Update the bridge with `pi update --extension npm:pi-claude-bridge`, then `/reload`.
+
 ## 🎨 Visuals and context bar
 
 RedPi ships and selects a complete Pi theme named `redpi-matrix`—not just a colored banner. It replaces the default purple/yellow UI tokens across borders, selection, Markdown, syntax highlighting, tool panels, diffs, thinking levels, and status surfaces with phosphor green, deep green, and signal cyan.

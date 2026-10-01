@@ -12,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { jevReady, loadJevConfig } from "../lib/jev.ts";
+import { isClaudeBridge } from "../lib/claude-bridge.ts";
 import {
   PRUNE_BATCH, PRUNE_KEEP_RECENT, PRUNE_MIN_CHARS, PRUNE_VERSION, SAFETY_VERSION, checkCommand, decisionStats,
   judgeStaleOutputs, logDecision, pruneStub, readDecisions, shortHash, type SafetyVerdict,
@@ -91,7 +92,9 @@ export default function (pi: ExtensionAPI) {
   // ---- Stale-output pruning ----------------------------------------------------------------
   pi.on("context", async (event: any, ctx: any) => {
     const cfg = loadJevConfig(AGENT_DIR);
-    if (!jevReady(cfg) || cfg.prune === false) return undefined;
+    // Claude Code keeps its own copy of the conversation under the Claude bridge, so edits here
+    // would never reach the model: skip the Jev call.
+    if (!jevReady(cfg) || cfg.prune === false || isClaudeBridge(ctx.model)) return undefined;
     const messages: any[] = event.messages || [];
     const stubbed = () => messages.map((m) => (m?.role === "toolResult" && pruned.has(m.toolCallId) ? { ...m, content: [{ type: "text", text: pruned.get(m.toolCallId) }] } : m));
     let out = pruned.size ? stubbed() : messages;

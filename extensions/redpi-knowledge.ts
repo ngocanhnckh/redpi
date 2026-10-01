@@ -7,6 +7,7 @@
  */
 import { Type } from "typebox";
 import { addLesson, knowledgeText, listAdrs, projectRoot, writeAdr, ADR_DIR, LESSONS_FILE } from "../lib/knowledge.mjs";
+import { systemTextChannel } from "../lib/claude-bridge.ts";
 
 const text = (t: string, details?: any) => ({ content: [{ type: "text", text: t }], details });
 const who = () => process.env.REDPI_HQ_NAME || "";
@@ -57,10 +58,11 @@ export default function (pi: any) {
     ctx.ui.notify(`${adrs.length ? adrs.map((a) => `${String(a.number).padStart(4, "0")} ${a.title} [${a.status}]`).join("\n") : "No ADRs yet."}\n\nADRs: ${root}/${ADR_DIR}\nLessons: ${root}/${LESSONS_FILE}`, "info");
   } });
 
+  const policyText = systemTextChannel(pi, "knowledge");
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     let known = "";
     // Project files go into the prompt only for projects the human trusts.
     try { if (ctx.isProjectTrusted?.()) known = knowledgeText(projectRoot(ctx.cwd)); } catch {}
-    return { systemPrompt: `${event.systemPrompt}\n\n${POLICY}${known ? `\n\n${known}` : ""}` };
+    return policyText.deliver(event, ctx, `${POLICY}${known ? `\n\n${known}` : ""}`);
   });
 }

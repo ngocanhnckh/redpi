@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { HealthSampler, ago, assess, listJobs, logFile, newJob, oneLine, pruneJobs, readFrom, readMeta, refresh, removeJob, report, startJob, stopJob, tailLog, writeMeta, type Assessment, type Health, type JobMeta } from "../lib/jobs.ts";
+import { BRIDGE_BASH_TIMEOUT_S, isClaudeBridge } from "../lib/claude-bridge.ts";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const ms = (name: string, dflt: number) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v * 1000 : dflt; };
@@ -43,6 +44,13 @@ export default function (pi: ExtensionAPI) {
   const local = createLocalBashOperations({ shellPath: settings.shellPath });
   const live = new Map<string, Live>();
   let latestCtx: any;
+  // The Claude bridge gives every bash call a 120 s timeout because Claude Code expects one.
+  // Drop that default so long commands get the same watching (moved to the background after
+  // ~10 minutes, never killed) as with any other provider; a timeout the model chose stays.
+  pi.on("tool_call", async (event: any, ctx: any) => {
+    if (event.toolName === "bash" && isClaudeBridge(ctx.model) && event.input?.timeout === BRIDGE_BASH_TIMEOUT_S) delete event.input.timeout;
+    return undefined;
+  });
 
   const track = (m: JobMeta): Live => { const l: Live = { m, s: new HealthSampler(m), alerted: new Map(), waiters: 0, lastProgress: 0 }; live.set(m.id, l); return l; };
   const sampleNow = (l: Live) => (l.sampling ??= l.s.sample().then((h) => { l.h = h; l.a = assess(l.m, h, QUIET_MS); }).catch(() => {}).finally(() => { l.sampling = undefined; }));

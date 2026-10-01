@@ -9,6 +9,7 @@ import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, networkInterfaces, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { isClaudeBridge, systemTextChannel } from "../lib/claude-bridge.ts";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const HQ_DIR = process.env.REDPI_HQ_DIR || join(AGENT_DIR, "yitec", "hq");
@@ -505,7 +506,7 @@ export default function (pi: ExtensionAPI) {
       const res: any = await ctx.modelRegistry.complete(model, {
         systemPrompt: quick ? QUICK_PROMPT(...who, asker) : ASIDE_PROMPT(...who, asker),
         messages: [{ role: "user", timestamp: Date.now(), content: `STATE\n${state}\n\nSESSION TRANSCRIPT (most recent last)\n${sessionTranscript(ctx, quick ? 24000 : 60000)}\n\n${quick ? `${asker.toUpperCase()}'S MESSAGE` : `${asker.toUpperCase()} ASKS (by the way)`}:\n${m.body}` }],
-      }, { maxTokens: quick ? 500 : 1500 });
+      }, { maxTokens: quick ? 500 : 1500, ...(isClaudeBridge(model) ? { cacheRetention: "none" } : {}) } as any);
       const text = (res?.content || []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n").trim();
       if (res?.stopReason === "error" || !text) throw new Error(res?.errorMessage || "empty answer");
       const fw = quick ? null : /^\s*FORWARD:\s*(.+)$/m.exec(text.split("\n")[0] || "");
@@ -684,20 +685,21 @@ export default function (pi: ExtensionAPI) {
   pi.on("ui_prompt_start" as any, async () => { openDialogs++; beat({ needsInput: { count: openDialogs, reason: "A prompt is waiting in the worker's terminal: attach to its tmux session to answer" } }); });
   pi.on("ui_prompt_end" as any, async () => { openDialogs = Math.max(0, openDialogs - 1); beat({ needsInput: openDialogs ? { count: openDialogs, reason: "A prompt is waiting in the worker's terminal" } : null }); });
 
+  const planText = systemTextChannel(pi, "redplan");
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     latestCtx = ctx;
     if (WORKER_ID) {
       const prompt = await workerPrompt().catch(() => "");
-      return prompt ? { systemPrompt: `${event.systemPrompt}\n\n${prompt}` } : undefined;
+      return planText.deliver(event, ctx, prompt);
     }
-    if (!runId) return undefined;
+    if (!runId) return planText.deliver(event, ctx, "");
     let where = "";
     try {
       const s = await hq("GET", `/api/runs/${runId}`);
       const done = s.tasks.filter((t: any) => t.status === "done").length;
       where = `\nCurrent run: "${s.run.title}" status=${s.run.status}${s.plan ? `, plan v${s.plan.version} ${s.plan.status}` : ", no plan yet"}${s.tasks.length ? `, tasks ${done}/${s.tasks.length} done` : ""}, workers: ${s.workers.map((w: any) => { const open = s.tasks.filter((t: any) => t.worker_id === w.id && t.status !== "done").length; return `${w.name} (${w.role}, ${w.alive ? `${w.status}, ${open ? `${open} open task${open === 1 ? "" : "s"}` : "free"}` : "offline"})`; }).join(", ") || "none"}${s.tasks.some((t: any) => t.kind === "ticket" && t.status !== "done") ? `; open tickets: ${s.tasks.filter((t: any) => t.kind === "ticket" && t.status !== "done").map((t: any) => `${t.id} ${t.priority}${t.worker_id ? "" : " UNASSIGNED"} [${t.status}]`).join(", ")}` : ""}. Dashboard: ${hqUrl(`/runs/${runId}`)}`;
     } catch {}
-    return { systemPrompt: `${event.systemPrompt}\n\n${CEO_PROTOCOL}${where}` };
+    return planText.deliver(event, ctx, `${CEO_PROTOCOL}${where}`);
   });
 
   // ----- commands -----
