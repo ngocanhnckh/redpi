@@ -1,4 +1,5 @@
-// Office floor scales with the team: for every team size from 1 to 40 there is a desk per person,
+// Office floor scales with the team: for every team size from 1 to 40 (all engineers, or a mix of
+// departments) there is a desk per person,
 // enough café seats, a rec-room spot for everyone plus the CEO, a "needs you" spot per person,
 // every spot is reachable from the entrance, and no two spots or pieces of furniture overlap.
 import { buildMap } from "../hq/web/office/map.js";
@@ -7,7 +8,9 @@ import { findPath } from "../hq/web/office/pathfinding.js";
 const fail = (msg, extra) => { console.error("FAIL:", msg, extra ?? ""); process.exit(1); };
 const rows = [];
 for (let n = 1; n <= 40; n++) {
-  const m = buildMap(n);
+  // A mixed team, so several department zones share the floor.
+  const roles = Array.from({ length: n }, (_, i) => ["backend developer", "designer", "data engineer", "QA reviewer", "devops", "frontend developer", "security tester", "technical writer"][i % 8]);
+  const m = buildMap(n % 3 === 0 ? n : roles);
   if (m.seats.length < n) fail(`${n} people: only ${m.seats.length} desks`);
   if (m.cafeSeats.length < Math.max(8, Math.ceil(n * 0.6))) fail(`${n} people: only ${m.cafeSeats.length} café seats`);
   if (m.recSpots.length < n + 1) fail(`${n} people: only ${m.recSpots.length} rec-room spots`);
@@ -16,7 +19,7 @@ for (let n = 1; n <= 40; n++) {
   const seen = new Map();
   // Solid furniture (not chairs, couches and other things people sit on) must not cover any spot.
   const solid = new Set();
-  for (const it of m.items) if (!["chair", "couch", "armchair", "bench", "treadmill", "whiteboard"].includes(it.type)) for (let y = it.y; y < it.y + it.h; y++) for (let x = it.x; x < it.x + it.w; x++) solid.add(`${x},${y}`);
+  for (const it of m.items) if (!it.walkable) for (let y = it.y; y < it.y + it.h; y++) for (let x = it.x; x < it.x + it.w; x++) solid.add(`${x},${y}`);
   for (const [kind, list] of Object.entries(spots)) for (const s of list) {
     const k = `${s.x},${s.y}`;
     if (seen.has(k) && !(kind === "coffee" || seen.get(k) === "coffee")) fail(`${n} people: ${kind} spot ${k} is also a ${seen.get(k)} spot`);

@@ -493,7 +493,7 @@ await api("POST", `/api/workers/${kim}/heartbeat`, { status: "idle" }); await ap
 await page.click('[data-view="office"]');
 w = await until(page, "Kim, Lee and the CEO in the recreation room", (w) => ["Kim", "Lee", "CEO"].every((n) => w[n]?.mode === "rest" && w[n].inRec && w[n].arrived && !w[n].walking), 25000);
 if (overlaps(w).length) await fail("two people on one spot in the recreation room", overlaps(w));
-const props = { controller: 1, book: 1, dumbbell: 1 };
+const props = { controller: 1, book: 1, dumbbell: 1, paddle: 1 };
 if (!["Kim", "Lee", "CEO"].every((n) => w[n].pose && (props[w[n].pose.prop] || w[n].pose.treadmill))) await fail("everyone in the recreation room should be playing, training or reading", ["Kim", "Lee", "CEO"].map((n) => w[n].pose));
 if (shots) await page.locator(".office-host").screenshot({ path: join(shots, "office-rec.png") });
 // They move on to another free spot now and then, still never sharing one.

@@ -1,418 +1,228 @@
-// Procedural pixel people for the RedPi Office: portraits (18×28) and walking
-// scene sprites (18×32, front/back, 3 walk phases).
-//
-// Ported from munder-difflin (scene/office/portraitArt.ts),
-// Copyright (c) 2026 Chaitanya Giri, MIT License. The drawing primitives, head,
-// face, hairstyles, facial hair, glasses, clothing and outline pass follow the
-// original. Changes for RedPi: plain JS, and the fixed TV-cast recipes are
-// replaced by recipeFor(), which derives a deterministic look from a worker's
-// name and role (no likeness of any real or fictional person).
+// Procedural pixel people for the RedPi Office (original RedPi art, drawn in code): small
+// "chibi" characters with round heads, simple dark eyes, rosy cheeks, arms and a soft dark
+// outline. Walking scene sprites are 18×32 (front and back, 3 walk phases); portraits are the
+// top 18×28 of the front sprite. Every look is derived from the worker's name and role, so a
+// person always looks the same and their clothes hint at what they do (no likeness of any real
+// or fictional person).
 
 export const PORTRAIT_W = 18, PORTRAIT_H = 28, SCENE_W = 18, SCENE_H = 32;
-const OUTLINE = [18, 28, 22];
-const HX0 = 4, HX1 = 13;
-let CUR_W = PORTRAIT_W, CUR_H = PORTRAIT_H;
+const OUTLINE = [35, 31, 46];
 
-const clamp = (v) => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
-function shades(rgb, dl = 1.22, dd = 0.68) {
-  return [rgb.map((c) => clamp(c * dl)), rgb.slice(), rgb.map((c) => clamp(c * dd))];
-}
-function set(buf, x, y, c, a = 255) {
-  if (x < 0 || x >= CUR_W || y < 0 || y >= CUR_H) return;
-  const i = (y * CUR_W + x) * 4;
-  buf[i] = c[0]; buf[i + 1] = c[1]; buf[i + 2] = c[2]; buf[i + 3] = a;
-}
-function alphaAt(buf, x, y) {
-  if (x < 0 || x >= CUR_W || y < 0 || y >= CUR_H) return 0;
-  return buf[(y * CUR_W + x) * 4 + 3];
-}
-function rgbAt(buf, x, y) { const i = (y * CUR_W + x) * 4; return [buf[i], buf[i + 1], buf[i + 2]]; }
-const eq = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
-function rect(buf, x0, y0, x1, y1, c) { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) set(buf, x, y, c); }
-
-const SKIN = {
-  light: { hi: [255, 221, 189], base: [247, 201, 170], sh: [212, 158, 126], line: [168, 112, 82] },
-  tan: { hi: [232, 182, 136], base: [214, 162, 116], sh: [176, 126, 86], line: [138, 92, 60] },
-  brown: { hi: [180, 130, 94], base: [158, 112, 78], sh: [124, 86, 58], line: [90, 60, 40] },
-  dark: { hi: [142, 98, 70], base: [120, 80, 56], sh: [94, 62, 42], line: [64, 42, 28] },
+let buf = null;
+const W = SCENE_W, H = SCENE_H;
+const set = (x, y, c, a = 255) => {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  const i = (y * W + x) * 4; buf[i] = c[0]; buf[i + 1] = c[1]; buf[i + 2] = c[2]; buf[i + 3] = a;
 };
+const alpha = (x, y) => (x < 0 || x >= W || y < 0 || y >= H ? 0 : buf[(y * W + x) * 4 + 3]);
+const rect = (x0, y0, x1, y1, c) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) set(x, y, c); };
+// Rows given as [y, x0, x1].
+const rows = (list, c) => { for (const [y, a, b] of list) rect(a, y, b, y, c); };
+const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+const tone = (c, k) => c.map((v) => clamp(v * k));
+const hex = (s) => [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
 
-function drawHead(buf, skin) {
-  const s = SKIN[skin];
-  for (let y = 4; y <= 16; y++) for (let x = HX0; x <= HX1; x++) {
-    if (((x === HX0 || x === HX1) && (y === 4 || y === 5 || y === 16)) || ((x === 5 || x === 12) && y === 4)) continue;
-    set(buf, x, y, s.base);
+const SKINS = ["#ffe0c7", "#f7cba4", "#e9b48a", "#c98d62", "#a86f4a", "#7d4f33"].map(hex);
+const HAIR_COLORS = ["#2b2230", "#4a3226", "#6e4630", "#9a5a33", "#c98a3e", "#e6c06a", "#b9b4ad", "#3b3f5c", "#a8433f", "#5b3a6e"].map(hex);
+const STYLES = ["short", "fringe", "bob", "long", "bun", "ponytail", "curly", "spiky", "buzz", "afro", "short", "bob", "bald"];
+const PANTS = ["#3b4258", "#2f3443", "#56607a", "#6b5a48", "#3e5a4f"].map(hex);
+const SHOES = ["#2b2730", "#6a4430", "#f2f2f2", "#3b5bdb"].map(hex);
+const WHITE = [246, 246, 244], EYE = [40, 33, 48], BLUSH = [240, 140, 140], MOUTH = [150, 70, 70];
+
+// ---- head and face ----
+const HEAD = [[4, 5, 12], [5, 4, 13], [6, 3, 14], [7, 3, 14], [8, 3, 14], [9, 3, 14], [10, 3, 14], [11, 3, 14], [12, 3, 14], [13, 3, 14], [14, 4, 13], [15, 5, 12]];
+function head(r) {
+  const s = r.skin, sh = tone(s, 0.86);
+  rows(HEAD, s);
+  for (let y = 7; y <= 13; y++) set(14, y, sh);
+  rect(5, 15, 12, 15, sh); set(13, 14, sh);
+  set(2, 10, s); set(2, 11, sh); set(15, 10, s); set(15, 11, sh);   // ears
+  rect(7, 16, 10, 16, sh);                                        // neck
+}
+function face(r) {
+  const m = r.mood;
+  for (const ex of [5, 10]) {
+    if (m === "done") { set(ex, 11, EYE); set(ex + 1, 10, EYE); set(ex + 2, 11, EYE); continue; }   // happy ^^ eyes
+    rect(ex + (ex === 5 ? 1 : 0), 10, ex + (ex === 5 ? 2 : 1), 12, EYE);
+    set(ex + (ex === 5 ? 1 : 0), 10, WHITE);
   }
-  for (let y = 6; y < 12; y++) set(buf, 5, y, s.hi);
-  set(buf, 6, 5, s.hi); set(buf, 7, 5, s.hi);
-  for (let y = 6; y < 15; y++) set(buf, 12, y, s.sh);
-  for (const x of [7, 8, 9, 10, 11]) set(buf, x, 16, s.sh);
-  for (const ex of [HX0 - 1, HX1 + 1]) { set(buf, ex, 9, s.base); set(buf, ex, 10, s.base); set(buf, ex, 11, s.sh); }
-  rect(buf, 7, 17, 10, 18, s.sh); rect(buf, 7, 17, 9, 17, s.base);
-}
-
-function drawFace(buf, skin, brow, mouth, blush, lashes) {
-  const s = SKIN[skin];
-  const white = [250, 248, 244], pup = [46, 38, 42];
-  for (const [a, b, p] of [[5, 6, 6], [10, 11, 10]]) { set(buf, a, 9, white); set(buf, b, 9, white); set(buf, p, 9, pup); }
-  if (lashes) {
-    const lash = [54, 40, 48], glint = [252, 250, 248];
-    for (const x of [5, 6, 10, 11]) set(buf, x, 8, lash);
-    set(buf, 4, 8, lash); set(buf, 12, 8, lash);
-    set(buf, 5, 9, glint); set(buf, 10, 9, glint);
-  }
-  if (brow === "flat") for (const x of [5, 6, 10, 11]) set(buf, x, 7, s.line);
-  else if (brow === "angry") { set(buf, 5, 8, s.line); set(buf, 6, 7, s.line); set(buf, 10, 7, s.line); set(buf, 11, 8, s.line); }
-  else if (brow === "raised") for (const x of [5, 6, 10, 11]) set(buf, x, 6, s.line);
-  else if (brow === "soft") { for (const x of [5, 11]) set(buf, x, 7, s.line); for (const x of [6, 10]) set(buf, x, 7, s.sh); }
-  set(buf, 8, 11, s.sh); set(buf, 8, 12, s.sh); set(buf, 7, 12, s.sh);
-  const mc = [158, 86, 80];
-  const mouths = {
-    neutral: [[7, 14], [8, 14], [9, 14], [10, 14]],
-    smile: [[7, 14], [8, 14], [9, 14], [10, 14], [6, 13], [11, 13]],
-    frown: [[7, 15], [8, 15], [9, 15], [10, 15], [6, 14], [11, 14]],
-    grin: [[7, 14], [8, 14], [9, 14], [10, 14], [7, 13], [8, 13], [9, 13], [10, 13], [6, 13], [11, 13]],
-  };
-  for (const [x, y] of mouths[mouth]) set(buf, x, y, mc);
-  if (blush) for (const x of [5, 12]) set(buf, x, 12, [235, 150, 140], 140);
-}
-
-const HAIR = {
-  styleShort(buf, color, skinBase, a) {
-    const [hi, base, sh] = shades(color);
-    const part = a.part ?? "L", recede = a.recede ?? 0;
-    rect(buf, HX0, 2, HX1, 4, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 3, base);
-    rect(buf, HX0 - 1, 4, HX1 + 1, 5, base);
-    for (let y = 6; y < 9; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    if (recede) { for (let y = 3; y < 6; y++) for (let x = 6; x < 12; x++) if (eq(rgbAt(buf, x, y), base)) set(buf, x, y, skinBase); set(buf, 8, 5, base); }
-    const hx = part === "L" ? 6 : 11;
-    for (let y = 2; y < 6; y++) set(buf, hx, y, sh);
-    for (let x = HX0; x < hx; x++) if (alphaAt(buf, x, 3)) set(buf, x, 3, hi);
-    for (let x = HX0; x <= HX1; x++) if (alphaAt(buf, x, 2)) set(buf, x, 2, hi);
-  },
-  styleFloppy(buf, color) {
-    const [hi, base] = shades(color);
-    rect(buf, HX0, 2, HX1, 4, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 3, base);
-    rect(buf, HX0 - 1, 4, HX1 + 1, 5, base);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    for (let x = 6; x <= 12; x++) set(buf, x, 6, base);
-    set(buf, 9, 7, base); set(buf, 10, 7, base); set(buf, 11, 7, base);
-    for (let y = 6; y < 9; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-    for (let x = HX0; x <= HX1; x++) if (alphaAt(buf, x, 2)) set(buf, x, 2, hi);
-    for (const x of [7, 8, 9]) set(buf, x, 6, hi);
-  },
-  styleFrame(buf, color, skinBase, a) {
-    const [hi, base, sh] = shades(color);
-    const length = a.length ?? 17, vol = a.vol ?? 1;
-    rect(buf, HX0 - 1, 2, HX1 + 1, 5, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 3, base);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    for (let x = 6; x < 12; x++) set(buf, x, 6, base);
-    set(buf, 8, 6, skinBase); set(buf, 9, 6, skinBase);
-    for (let y = 6; y <= length; y++) {
-      for (let dx = 0; dx < vol; dx++) { set(buf, HX0 - 1 - dx, y, base); set(buf, HX1 + 1 + dx, y, base); }
-      set(buf, HX0, y, base); set(buf, HX1, y, base);
-    }
-    for (let x = HX0 - 1; x < HX0 + 1; x++) set(buf, x, length + 1, base);
-    for (let x = HX1; x < HX1 + 2; x++) set(buf, x, length + 1, base);
-    for (let y = 2; y < 6; y++) if (alphaAt(buf, HX1, y)) set(buf, HX1, y, sh);
-    for (let x = HX0; x < 9; x++) if (alphaAt(buf, x, 2)) set(buf, x, 2, hi);
-  },
-  styleBun(buf, color, skinBase) {
-    const [hi, base] = shades(color);
-    rect(buf, HX0, 3, HX1, 5, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 4, base);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    for (let x = 6; x < 12; x++) set(buf, x, 6, base);
-    set(buf, 8, 6, skinBase); set(buf, 9, 6, skinBase);
-    for (let y = 6; y < 9; y++) { set(buf, HX0, y, base); set(buf, HX1, y, base); }
-    rect(buf, 7, 1, 10, 2, base);
-    for (let x = HX0; x <= HX1; x++) if (alphaAt(buf, x, 3)) set(buf, x, 3, hi);
-  },
-  styleCurly(buf, color, skinBase) {
-    const [hi, base] = shades(color);
-    const pts = [[4, 3], [5, 2], [6, 3], [7, 2], [8, 3], [9, 2], [10, 3], [11, 2], [12, 3], [13, 3], [3, 4], [4, 4], [13, 4], [14, 4], [3, 5], [4, 5], [13, 5], [14, 5], [3, 6], [13, 6], [4, 6], [12, 6], [3, 7], [13, 7], [4, 7]];
-    rect(buf, HX0, 3, HX1, 5, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 4, base);
-    for (const [x, y] of pts) set(buf, x, y, base);
-    for (let x = 6; x < 12; x++) set(buf, x, 6, base);
-    set(buf, 8, 6, skinBase); set(buf, 9, 6, skinBase);
-    for (const [x, y] of [[5, 2], [7, 2], [9, 2], [11, 2]]) set(buf, x, y, hi);
-  },
-  styleMessy(buf, color, skinBase, a) {
-    const [hi, base] = shades(color);
-    const length = a.length ?? 8;
-    rect(buf, HX0 - 1, 2, HX1 + 1, 5, base);
-    const spikes = [[3, 2], [5, 1], [7, 2], [9, 1], [11, 2], [13, 1], [14, 2], [4, 2], [12, 2]];
-    for (const [x, y] of spikes) set(buf, x, y, base);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    for (let x = 6; x < 12; x++) set(buf, x, 6, base);
-    set(buf, 8, 6, skinBase); set(buf, 9, 6, skinBase);
-    for (let y = 6; y <= length; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-    for (const [x, y] of spikes) set(buf, x, y, hi);
-  },
-  styleRecede(buf, color, skinBase) {
-    const [, base, sh] = shades(color);
-    for (let y = 4; y < 10; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 4, base);
-    for (let x = HX0 + 1; x < HX1; x++) set(buf, x, 5, base);
-    for (let y = 5; y < 9; y++) for (let x = 6; x < 12; x++) if (eq(rgbAt(buf, x, y), base)) set(buf, x, y, skinBase);
-    for (let x = HX0; x <= HX1; x++) if (alphaAt(buf, x, 4)) set(buf, x, 4, sh);
-  },
-  styleSpiky(buf, color, skinBase) {
-    const [hi, base] = shades(color);
-    rect(buf, HX0, 3, HX1, 5, base);
-    for (let x = HX0 - 1; x <= HX1 + 1; x++) set(buf, x, 4, base);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 5, base);
-    const spikes = [[5, 2], [7, 1], [9, 2], [11, 1], [6, 2], [8, 2], [10, 2], [12, 2]];
-    for (const [x, y] of spikes) set(buf, x, y, base);
-    for (let x = 6; x < 12; x++) set(buf, x, 6, base);
-    set(buf, 8, 6, skinBase); set(buf, 9, 6, skinBase);
-    for (let y = 6; y < 8; y++) { set(buf, HX0, y, base); set(buf, HX1, y, base); }
-    for (const [x, y] of spikes) set(buf, x, y, hi);
-  },
-  styleBald(buf, color, skinBase, a) {
-    const [shi, sbase, ssh] = shades(skinBase, 1.1, 0.82);
-    for (let x = 6; x <= 11; x++) set(buf, x, 2, sbase);
-    for (let x = 5; x <= 12; x++) set(buf, x, 3, sbase);
-    for (let x = HX0; x <= HX1; x++) set(buf, x, 4, sbase);
-    for (const x of [7, 8, 9]) set(buf, x, 2, shi);
-    set(buf, 6, 3, shi); set(buf, 7, 3, shi);
-    set(buf, 5, 3, ssh); set(buf, 12, 3, ssh); set(buf, HX1, 4, ssh);
-    const [, base, sh] = shades(color);
-    const top = a.recede ? 8 : 6;
-    for (let y = top; y <= 10; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-    for (let y = top; y <= 10; y++) { set(buf, HX0 - 1, y, sh); set(buf, HX1 + 1, y, sh); }
-  },
-};
-
-function drawFacial(buf, kind, color) {
-  const [, base, sh] = shades(color);
-  if (kind === "mustache") { for (const x of [6, 7, 8, 9, 10]) set(buf, x, 13, base); set(buf, 6, 12, base); set(buf, 10, 12, base); }
-  else if (kind === "mustacheSm") for (const x of [7, 8, 9]) set(buf, x, 13, base);
-  else if (kind === "stubble") for (const [x, y] of [[5, 14], [6, 15], [7, 15], [8, 15], [9, 15], [10, 15], [11, 14], [12, 13], [4, 13], [5, 15], [10, 15]]) set(buf, x, y, sh, 150);
-  else if (kind === "goatee") { for (const x of [8, 9]) set(buf, x, 15, base); set(buf, 8, 14, base); set(buf, 9, 14, base); for (const x of [7, 8, 9, 10]) set(buf, x, 13, base); }
-}
-
-function drawGlasses(buf) {
-  const frame = [60, 54, 62], glint = [236, 240, 246];
-  for (const x of [5, 6]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
-  set(buf, 4, 9, frame); set(buf, 7, 9, frame); set(buf, 4, 8, frame); set(buf, 7, 8, frame);
-  for (const x of [10, 11]) { set(buf, x, 8, frame); set(buf, x, 10, frame); }
-  set(buf, 9, 9, frame); set(buf, 12, 9, frame); set(buf, 9, 8, frame); set(buf, 12, 8, frame);
-  set(buf, 8, 8, frame); set(buf, 3, 9, frame); set(buf, 13, 9, frame);
-  set(buf, 4, 8, glint); set(buf, 9, 8, glint);
-}
-
-function bodyShape(buf, col, heavy) {
-  const [, base, sh] = shades(col);
-  const rows = heavy
-    ? [[19, 5, 12], [20, 3, 14], [21, 2, 15], [22, 1, 16], [23, 1, 16], [24, 0, 17], [25, 0, 17], [26, 0, 17], [27, 0, 17]]
-    : [[19, 6, 11], [20, 4, 13], [21, 3, 14], [22, 2, 15], [23, 2, 15], [24, 1, 16], [25, 1, 16], [26, 1, 16], [27, 1, 16]];
-  for (const [y, a, b] of rows) rect(buf, a, y, b, y, base);
-  const [lo, hi] = heavy ? [1, 16] : [2, 15];
-  for (let y = 22; y < 28; y++) { set(buf, lo, y, sh); set(buf, hi, y, sh); }
-}
-
-function drawClothing(buf, r) {
-  const [hi, base, sh] = shades(r.c1);
-  bodyShape(buf, r.c1, r.heavy);
-  if (r.cloth === "suit") {
-    const white = [238, 238, 236];
-    for (const [x, y] of [[8, 19], [9, 19], [7, 20], [8, 20], [9, 20], [10, 20], [8, 21], [9, 21]]) set(buf, x, y, white);
-    for (const [x, y] of [[6, 20], [7, 21], [11, 20], [10, 21], [6, 21], [11, 21]]) set(buf, x, y, sh);
-    if (r.tie) { for (let y = 20; y < 26; y++) { set(buf, 8, y, r.tie); set(buf, 9, y, r.tie); } set(buf, 8, 20, shades(r.tie)[0]); }
-    else for (let y = 22; y < 26; y++) { set(buf, 8, y, white); set(buf, 9, y, white); }
-  } else if (r.cloth === "dressshirt") {
-    for (const [x, y] of [[6, 19], [7, 19], [10, 19], [11, 19], [7, 20], [10, 20]]) set(buf, x, y, sh);
-    for (let y = 20; y < 27; y += 2) set(buf, 8, y, sh);
-    if (r.tie) for (let y = 19; y < 26; y++) { set(buf, 8, y, r.tie); set(buf, 9, y, r.tie); }
-  } else if (r.cloth === "polo") {
-    for (const [x, y] of [[6, 19], [7, 19], [10, 19], [11, 19]]) set(buf, x, y, hi);
-    set(buf, 8, 20, sh); set(buf, 8, 22, sh);
-    const accent = r.c2 ? shades(r.c2)[1] : hi;
-    for (const [x, y] of [[7, 20], [9, 20]]) set(buf, x, y, accent);
-  } else if (r.cloth === "blouse") {
-    const s = SKIN[r.skin];
-    for (const [x, y] of [[7, 19], [8, 19], [9, 19], [10, 19], [8, 20], [9, 20]]) set(buf, x, y, s.sh);
-    for (let x = 5; x < 13; x++) if (eq(rgbAt(buf, x, 20), base)) set(buf, x, 20, hi);
-  } else if (r.cloth === "cardigan") {
-    const inner = r.c2 ? shades(r.c2)[1] : [235, 233, 226];
-    for (let y = 19; y < 27; y++) { set(buf, 8, y, inner); set(buf, 9, y, inner); }
-    for (const [x, y] of [[6, 19], [7, 19], [10, 19], [11, 19]]) set(buf, x, y, sh);
-  } else if (r.cloth === "sweater") {
-    for (const [x, y] of [[6, 19], [7, 19], [8, 19], [9, 19], [10, 19], [11, 19]]) set(buf, x, y, sh);
+  if (m === "blocked") { set(5, 8, EYE); set(6, 9, EYE); set(12, 8, EYE); set(11, 9, EYE); }
+  else if (m === "working") { rect(6, 9, 7, 9, tone(r.hairc, 0.9)); rect(10, 9, 11, 9, tone(r.hairc, 0.9)); }
+  if (r.blush) { set(4, 13, BLUSH, 200); set(5, 13, BLUSH, 150); set(13, 13, BLUSH, 200); set(12, 13, BLUSH, 150); }
+  if (m === "blocked") { rect(8, 14, 9, 14, MOUTH); set(7, 15, MOUTH); set(10, 15, MOUTH); }
+  else if (m === "working") rect(8, 14, 9, 14, MOUTH);
+  else if (m === "done") { rect(7, 13, 10, 13, MOUTH); rect(8, 14, 9, 14, [235, 110, 110]); }
+  else { set(7, 13, MOUTH); rect(8, 14, 9, 14, MOUTH); set(10, 13, MOUTH); }
+  if (r.facial === "beard") { const b = tone(r.hairc, 1); rows([[13, 3, 4], [13, 13, 14], [14, 4, 6], [14, 11, 13], [15, 5, 12]], b); set(7, 14, b); set(10, 14, b); }
+  else if (r.facial === "stubble") for (const [x, y] of [[5, 14], [7, 15], [9, 15], [11, 15], [12, 14], [6, 15], [10, 15]]) set(x, y, tone(r.skin, 0.72), 180);
+  if (r.glasses) {
+    const g = [70, 64, 86], lens = [214, 232, 246];
+    for (const gx of [4, 9]) { rect(gx, 9, gx + 3, 9, g); rect(gx, 10, gx, 12, g); rect(gx + 3, 10, gx + 3, 12, g); rect(gx + 1, 13, gx + 2, 13, g); set(gx + (gx === 4 ? 2 : 1), 10, lens, 160); }
+    set(8, 10, g); set(3, 10, g); set(14, 10, g);
   }
 }
 
-const SHOE = [44, 40, 48];
-function drawSceneLegs(buf, pants, phase) {
-  const [, base, sh] = shades(pants);
-  for (const [lx0, lx1] of [[5, 7], [10, 12]]) { rect(buf, lx0, 25, lx1, 30, base); for (let y = 25; y <= 30; y++) set(buf, lx1, y, sh); }
-  const leftLow = phase !== 1, rightLow = phase !== 2;
-  rect(buf, 5, leftLow ? 31 : 30, 7, leftLow ? 31 : 30, SHOE);
-  rect(buf, 10, rightLow ? 31 : 30, 12, rightLow ? 31 : 30, SHOE);
-}
-
-function drawSceneTorso(buf, r, back) {
-  const [hi, base, sh] = shades(r.c1);
-  if (r.heavy) {
-    rect(buf, 3, 18, 14, 18, base); rect(buf, 2, 19, 15, 19, base); rect(buf, 2, 20, 15, 24, base);
-    for (let y = 20; y <= 24; y++) { set(buf, 2, y, sh); set(buf, 15, y, sh); set(buf, 14, y, sh); }
-  } else {
-    rect(buf, 4, 18, 13, 18, base); rect(buf, 3, 19, 14, 19, base); rect(buf, 4, 20, 13, 24, base);
-    for (let y = 20; y <= 24; y++) { set(buf, 3, y, sh); set(buf, 14, y, sh); set(buf, 13, y, sh); }
+// ---- hair ----
+function hairFront(r) {
+  const c = r.hairc, hi = tone(c, 1.35), sh = tone(c, 0.72), st = r.hair;
+  if (st === "bald") { const s = r.skin; set(6, 5, tone(s, 1.08)); set(7, 5, tone(s, 1.08)); rect(3, 8, 3, 11, c); rect(14, 8, 14, 11, c); return; }
+  if (st === "buzz") { rows([[3, 5, 12], [4, 4, 13], [5, 3, 14], [6, 3, 14]], tone(c, 0.9)); rect(3, 7, 3, 8, c); rect(14, 7, 14, 8, c); return; }
+  if (st === "afro") {
+    rows([[0, 5, 12], [1, 3, 14], [2, 2, 15], [3, 1, 16], [4, 1, 16], [5, 1, 16], [6, 1, 16], [7, 1, 4], [7, 13, 16], [8, 1, 3], [8, 14, 16], [9, 1, 3], [9, 14, 16], [10, 2, 2], [10, 15, 15]], c);
+    for (const [x, y] of [[4, 1], [8, 0], [12, 1], [2, 4], [15, 4]]) set(x, y, hi);
+    rect(5, 7, 12, 7, c); return;
   }
-  if (back) { rect(buf, 6, 18, 11, 18, sh); for (let y = 19; y <= 24; y++) set(buf, 8, y, sh); return; }
-  const skin = SKIN[r.skin];
-  if (r.cloth === "suit") {
-    const white = [238, 238, 236];
-    for (const [x, y] of [[8, 18], [9, 18], [7, 19], [8, 19], [9, 19], [10, 19], [8, 20], [9, 20]]) set(buf, x, y, white);
-    for (const [x, y] of [[6, 19], [7, 20], [11, 19], [10, 20]]) set(buf, x, y, sh);
-    if (r.tie) { for (let y = 19; y <= 24; y++) { set(buf, 8, y, r.tie); set(buf, 9, y, r.tie); } set(buf, 8, 19, shades(r.tie)[0]); }
-  } else if (r.cloth === "dressshirt") {
-    for (const [x, y] of [[6, 18], [7, 18], [10, 18], [11, 18], [7, 19], [10, 19]]) set(buf, x, y, sh);
-    if (r.tie) for (let y = 18; y <= 24; y++) { set(buf, 8, y, r.tie); set(buf, 9, y, r.tie); }
-    else for (let y = 20; y <= 24; y += 2) set(buf, 8, y, sh);
-  } else if (r.cloth === "polo") {
-    for (const [x, y] of [[6, 18], [7, 18], [10, 18], [11, 18]]) set(buf, x, y, hi);
-    set(buf, 8, 19, sh); set(buf, 8, 21, sh);
-  } else if (r.cloth === "blouse") {
-    for (const [x, y] of [[7, 18], [8, 18], [9, 18], [10, 18], [8, 19], [9, 19]]) set(buf, x, y, skin.sh);
-    for (let x = 5; x < 13; x++) if (eq(rgbAt(buf, x, 19), base)) set(buf, x, 19, hi);
-  } else if (r.cloth === "cardigan") {
-    const inner = r.c2 ? shades(r.c2)[1] : [235, 233, 226];
-    for (let y = 18; y <= 24; y++) { set(buf, 8, y, inner); set(buf, 9, y, inner); }
-    for (const [x, y] of [[6, 18], [7, 18], [10, 18], [11, 18]]) set(buf, x, y, sh);
-  } else if (r.cloth === "sweater") {
-    for (const [x, y] of [[6, 18], [7, 18], [8, 18], [9, 18], [10, 18], [11, 18]]) set(buf, x, y, sh);
-  }
+  // A rounded cap of hair over the top of the head.
+  rows([[2, 5, 12], [3, 4, 13], [4, 3, 14], [5, 2, 15], [6, 2, 15], [7, 2, 15]], c);
+  if (st === "curly") { for (const x of [3, 6, 9, 12]) { set(x, 1, c); set(x + 1, 1, c); } rect(2, 8, 3, 12, c); rect(14, 8, 15, 12, c); for (const x of [4, 8, 12]) set(x, 2, hi); }
+  if (st === "spiky") { for (const x of [4, 7, 10, 13]) { set(x, 1, c); set(x, 0, c); set(x + 1, 1, c); } }
+  if (st === "bun") { rows([[0, 7, 10], [1, 6, 11]], c); set(7, 0, hi); }
+  // Bangs and sides.
+  if (st === "fringe" || st === "bob" || st === "long") rect(3, 8, 14, 8, c);
+  else { rect(3, 8, 6, 8, c); set(7, 8, c); }
+  if (st === "bob" || st === "long") { rect(2, 8, 3, 15, c); rect(14, 8, 15, 15, c); set(2, 16, c); set(15, 16, c); }
+  else if (st !== "curly") { rect(2, 8, 3, 10, c); rect(14, 8, 15, 10, c); }
+  // Shine and shade.
+  rect(5, 3, 8, 3, hi); set(4, 4, hi);
+  for (let y = 4; y <= 7; y++) set(15, y, sh);
+  if (st === "fringe" || st === "bob" || st === "long") for (const x of [5, 9, 12]) set(x, 8, sh);
 }
-
-function drawHeadBack(buf, r) {
-  const s = SKIN[r.skin];
-  const rows = [[2, 6, 11], [3, 5, 12], [4, 4, 13], [5, 4, 13], [6, 4, 13], [7, 4, 13], [8, 4, 13], [9, 4, 13], [10, 4, 13], [11, 4, 13], [12, 4, 13], [13, 5, 12], [14, 6, 11]];
-  if (r.hair === "styleBald") {
-    const [shi, sbase, ssh] = shades(s.base, 1.1, 0.82);
-    for (const [y, a, b] of rows) rect(buf, a, y, b, y, sbase);
-    for (let y = 4; y <= 12; y++) { set(buf, 4, y, ssh); set(buf, 13, y, ssh); }
-    for (const [x, y] of [[7, 2], [8, 2], [9, 2], [8, 3], [9, 4], [9, 5]]) set(buf, x, y, shi);
-    const [, base, sh] = shades(r.hairc);
-    for (let x = 4; x <= 13; x++) { set(buf, x, 11, base); set(buf, x, 12, base); }
-    for (const x of [4, 13]) { set(buf, x, 11, sh); set(buf, x, 12, sh); }
-    rect(buf, 7, 14, 10, 14, s.sh); rect(buf, 7, 15, 10, 17, s.sh); rect(buf, 7, 15, 9, 15, s.base);
+// Hair that falls behind the shoulders (drawn before the body).
+function hairBehind(r) {
+  const c = tone(r.hairc, 0.85), st = r.hair;
+  if (st === "long") rect(2, 9, 15, 21, c);
+  if (st === "ponytail") { rect(15, 6, 16, 15, c); set(16, 16, c); }
+  if (st === "afro") rect(1, 8, 16, 12, c);
+}
+function hairBack(r) {
+  const c = r.hairc, hi = tone(c, 1.3), sh = tone(c, 0.75), st = r.hair, s = r.skin;
+  if (st === "bald" || st === "buzz") {
+    rows(HEAD, st === "buzz" ? tone(c, 0.9) : s);
+    rect(3, 11, 14, 13, st === "bald" ? c : tone(c, 0.9)); set(6, 5, tone(s, 1.1));
+    rect(7, 16, 10, 16, tone(s, 0.86));
     return;
   }
-  const [hi, base, sh] = shades(r.hairc);
-  for (const [y, a, b] of rows) rect(buf, a, y, b, y, base);
-  const len = r.hair === "styleFrame" ? (r.hairargs?.length ?? 17) : r.hair === "styleMessy" ? (r.hairargs?.length ?? 9) : 0;
-  for (let y = 11; y <= len; y++) { set(buf, HX0 - 1, y, base); set(buf, HX0, y, base); set(buf, HX1, y, base); set(buf, HX1 + 1, y, base); }
-  for (let y = 4; y <= 12; y++) { set(buf, 4, y, sh); set(buf, 13, y, sh); }
-  for (const [x, y] of [[5, 3], [12, 3], [5, 13], [12, 13], [6, 14], [11, 14]]) set(buf, x, y, sh);
-  for (const [x, y] of [[7, 2], [8, 2], [9, 2], [10, 2], [7, 3], [8, 3], [9, 3]]) set(buf, x, y, hi);
-  for (let y = 4; y <= 11; y++) set(buf, 9, y, hi);
-  for (let y = 4; y <= 12; y++) set(buf, 8, y, sh);
-  rect(buf, 7, 14, 10, 14, sh); rect(buf, 7, 15, 10, 17, s.sh); rect(buf, 7, 15, 9, 15, s.base);
+  rows(HEAD, c);
+  rows([[2, 5, 12], [3, 4, 13], [4, 3, 14], [5, 2, 15], [6, 2, 15], [7, 2, 15], [8, 2, 15], [9, 2, 15], [10, 2, 15]], c);
+  if (st === "afro") rows([[0, 5, 12], [1, 3, 14], [2, 2, 15], [3, 1, 16], [4, 1, 16], [5, 1, 16], [6, 1, 16], [7, 1, 16], [8, 1, 16], [9, 1, 16], [10, 1, 16], [11, 2, 15], [12, 2, 15]], c);
+  if (st === "curly") for (const x of [3, 6, 9, 12]) { set(x, 1, c); set(x + 1, 1, c); }
+  if (st === "spiky") for (const x of [4, 7, 10, 13]) { set(x, 1, c); set(x, 0, c); }
+  if (st === "bun") rows([[0, 7, 10], [1, 6, 11], [2, 6, 11]], c);
+  if (st === "long" || st === "bob") rect(2, 11, 15, st === "long" ? 21 : 16, c);
+  if (st === "ponytail") { rect(7, 13, 10, 20, c); rect(8, 21, 9, 22, c); }
+  rect(5, 3, 9, 3, hi); rect(4, 4, 6, 5, hi);
+  for (let y = 5; y <= 14; y++) set(14, y, sh);
+  if (st !== "long" && st !== "ponytail" && st !== "afro") rect(7, 16, 10, 16, tone(s, 0.86));
+}
+function headphones(r) {
+  const d = [58, 62, 74], d2 = [90, 96, 112];
+  rows([[1, 5, 12], [2, 4, 4], [2, 13, 13], [3, 3, 3], [3, 14, 14]], d);
+  rect(3, 4, 3, 8, d); rect(14, 4, 14, 8, d);
+  rect(1, 9, 3, 12, d); rect(14, 9, 16, 12, d); set(2, 10, d2); set(15, 10, d2);
 }
 
-function outlinePass(buf) {
-  const pts = [];
-  for (let y = 0; y < CUR_H; y++) for (let x = 0; x < CUR_W; x++) {
-    if (alphaAt(buf, x, y) !== 0) continue;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (alphaAt(buf, x + dx, y + dy) === 255) { pts.push([x, y]); break; }
+// ---- body ----
+function body(r, back, phase) {
+  const c = r.c1, sh = tone(c, 0.8), hi = tone(c, 1.15), s = r.skin;
+  // Arms swing a pixel while walking.
+  const la = phase === 1 ? 1 : phase === 2 ? -1 : 0, ra = -la;
+  const sleeve = r.cloth === "tee" ? 20 : 23;
+  for (const [ax, dy] of [[2, la], [14, ra]]) {
+    rect(ax, 18 + dy, ax + 1, Math.min(sleeve, 23) + dy, ax === 2 ? c : sh);
+    if (sleeve < 23) rect(ax, sleeve + 1 + dy, ax + 1, 23 + dy, s);
+    rect(ax, 24 + dy, ax + 1, 25 + dy, s);
   }
-  for (const [x, y] of pts) set(buf, x, y, OUTLINE);
+  rows([[17, 5, 12], [18, 4, 13], [19, 4, 13], [20, 4, 13], [21, 4, 13], [22, 4, 13], [23, 4, 13], [24, 4, 13], [25, 4, 13]], c);
+  rect(12, 18, 13, 25, sh); rect(4, 18, 4, 25, hi);
+  if (back) {
+    if (r.cloth === "hoodie") rows([[17, 6, 11], [18, 6, 11], [19, 7, 10]], sh);
+    else rect(6, 17, 11, 17, sh);
+    return;
+  }
+  const white = [244, 244, 242];
+  switch (r.cloth) {
+    case "tee": rect(7, 17, 10, 17, s); set(8, 18, s); set(9, 18, s); break;
+    case "hoodie": rows([[16, 5, 6], [16, 11, 12], [17, 5, 12]], sh); rect(7, 17, 10, 17, s); set(7, 18, white); set(7, 19, white); set(10, 18, white); set(10, 19, white); rect(6, 22, 11, 23, sh); break;
+    case "shirt": rect(7, 17, 10, 17, white); set(6, 17, white); set(11, 17, white); for (let y = 19; y <= 25; y += 2) set(8, y, sh); if (r.tie) rect(8, 18, 9, 23, r.tie); break;
+    case "suit": rows([[17, 7, 10], [18, 7, 10], [19, 8, 9]], white); rect(8, 18, 9, 23, r.tie || [200, 50, 60]); set(6, 18, sh); set(6, 19, sh); set(11, 18, sh); set(11, 19, sh); set(7, 20, sh); set(10, 20, sh); break;
+    case "cardigan": rect(7, 17, 10, 25, r.c2 || white); set(6, 20, sh); set(6, 23, sh); set(11, 20, sh); set(11, 23, sh); break;
+    case "sweater": rect(6, 17, 11, 17, sh); rect(4, 25, 13, 25, sh); for (const x of [6, 9, 12]) set(x, 21, hi); break;
+    case "polo": rect(6, 17, 11, 17, r.c2 || hi); rect(8, 18, 9, 19, r.c2 || sh); break;
+    default:
+  }
+}
+function legs(r, phase) {
+  const p = r.pants, psh = tone(p, 0.8), shoe = r.shoes;
+  const L = phase === 1 ? 1 : 0, Rr = phase === 2 ? 1 : 0;   // the lifted leg is a pixel shorter
+  rect(5, 26, 8, 29 - L, p); rect(9, 26, 12, 29 - Rr, psh);
+  set(8, 26, psh);
+  rect(4, 30 - L, 8, 31 - L, shoe); rect(9, 30 - Rr, 13, 31 - Rr, shoe);
+  set(4, 30 - L, tone(shoe, 1.3)); set(9, 30 - Rr, tone(shoe, 1.3));
 }
 
-function drawHeavyFace(buf, skin) {
-  const s = SKIN[skin];
-  for (let y = 11; y <= 15; y++) { set(buf, HX0 - 1, y, s.base); set(buf, HX1 + 1, y, s.base); }
-  set(buf, HX0 - 1, 15, s.sh); set(buf, HX1 + 1, 15, s.sh);
-  for (const x of [5, 6, 11, 12]) set(buf, x, 16, s.base);
-  rect(buf, 6, 17, 11, 18, s.base);
-  for (const x of [6, 7, 8, 9, 10, 11]) set(buf, x, 18, s.sh);
-  set(buf, 7, 17, s.sh); set(buf, 10, 17, s.sh);
+function outline() {
+  const pts = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (alpha(x, y) !== 0) continue;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (alpha(x + dx, y + dy) === 255) { pts.push([x, y]); break; }
+  }
+  for (const [x, y] of pts) set(x, y, OUTLINE);
 }
 
-function drawHeadGroup(buf, r) {
-  drawHead(buf, r.skin);
-  if (r.heavy) drawHeavyFace(buf, r.skin);
-  drawFace(buf, r.skin, r.brow, r.mouth, r.blush, r.lashes);
-  if (r.facial) drawFacial(buf, r.facial, r.hairc);
-  HAIR[r.hair](buf, r.hairc, SKIN[r.skin].base, r.hairargs || {});
-  if (r.glasses) drawGlasses(buf);
-}
-
-// ---------------- RedPi: deterministic recipes from name + role ----------------
+// ---------------- deterministic looks from name + role ----------------
 function hash(s) { let h = 2166136261; for (const c of String(s)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
-const HAIR_COLORS = [[40, 30, 24], [74, 51, 32], [120, 76, 42], [186, 154, 90], [24, 18, 22], [154, 82, 46], [170, 166, 156], [58, 42, 28]];
-const STYLES = ["styleShort", "styleFloppy", "styleFrame", "styleBun", "styleCurly", "styleMessy", "styleSpiky", "styleShort", "styleRecede", "styleBald"];
 // Role → clothing cut and colours, so a glance at the floor tells who does what.
 function roleLook(role) {
   const r = String(role || "").toLowerCase();
-  if (r === "ceo") return { cloth: "suit", c1: [34, 44, 38], tie: [214, 48, 64] };
-  if (/secur|pentest|red.?team|cyber/.test(r)) return { cloth: "suit", c1: [30, 30, 36], tie: [214, 48, 64] };
-  if (/review|qa|test|audit/.test(r)) return { cloth: "cardigan", c1: [196, 150, 60], c2: [236, 232, 220] };
-  if (/\bai\b|ml|agent|llm|data/.test(r)) return { cloth: "sweater", c1: [120, 90, 190] };
-  if (/front|ui|ux|design/.test(r)) return { cloth: "polo", c1: [40, 170, 200], c2: [26, 130, 160] };
-  if (/full.?stack/.test(r)) return { cloth: "polo", c1: [40, 150, 110], c2: [30, 110, 80] };
-  if (/devops|infra|sre|platform|ops/.test(r)) return { cloth: "polo", c1: [210, 110, 60], c2: [170, 80, 40] };
-  if (/back|api|server/.test(r)) return { cloth: "dressshirt", c1: [70, 150, 100], tie: [30, 70, 50] };
-  return { cloth: "dressshirt", c1: [110, 130, 150] };
+  if (r === "ceo") return { cloth: "suit", c1: hex("#2d3346"), tie: hex("#d6304a") };
+  if (/secur|pentest|red.?team|cyber/.test(r)) return { cloth: "hoodie", c1: hex("#2f3240") };
+  if (/review|qa|test|audit/.test(r)) return { cloth: "cardigan", c1: hex("#d9a441"), c2: hex("#f3eee2") };
+  if (/\bai\b|ml|agent|llm|data|research|analy/.test(r)) return { cloth: "sweater", c1: hex("#8a6ad6") };
+  if (/design|\bui\b|\bux\b|brand/.test(r)) return { cloth: "tee", c1: hex("#ef7b8f") };
+  if (/front/.test(r)) return { cloth: "hoodie", c1: hex("#3fb6d9") };
+  if (/full.?stack/.test(r)) return { cloth: "polo", c1: hex("#3fae7d"), c2: hex("#2e8a61") };
+  if (/devops|infra|sre|platform|ops/.test(r)) return { cloth: "polo", c1: hex("#ee8a4a"), c2: hex("#c96a2e") };
+  if (/writ|docs|content|market/.test(r)) return { cloth: "cardigan", c1: hex("#5f8f6e"), c2: hex("#efe7d6") };
+  if (/back|api|server/.test(r)) return { cloth: "shirt", c1: hex("#5b8fd9") };
+  return { cloth: "shirt", c1: hex("#7d93ad") };
 }
 
 export function recipeFor(name, role, mood = "ok") {
   const h = hash(`${name}|${role}`);
   const pick = (arr, salt) => arr[(h >>> salt) % arr.length];
+  const look = roleLook(role);
   const hair = pick(STYLES, 3);
-  const long = hair === "styleFrame" || hair === "styleBun" || hair === "styleCurly";
+  const dev = /develop|engineer|backend|frontend|full.?stack|devops|program|coder/.test(String(role).toLowerCase());
   return {
-    skin: pick(["light", "tan", "brown", "dark"], 0),
-    hairc: pick(HAIR_COLORS, 7),
-    hair,
-    hairargs: hair === "styleFrame" ? { length: 16 + ((h >>> 11) % 4), vol: 1 + ((h >>> 13) % 2) } : hair === "styleShort" ? { part: (h >>> 12) % 2 ? "L" : "R" } : {},
-    ...roleLook(role),
+    skin: pick(SKINS, 0), hairc: pick(HAIR_COLORS, 7), hair, ...look,
+    pants: look.cloth === "suit" ? tone(look.c1, 0.85) : pick(PANTS, 11), shoes: pick(SHOES, 13),
     glasses: (h >>> 17) % 3 === 0,
-    facial: !long && (h >>> 19) % 5 === 0 ? pick(["mustacheSm", "stubble", "goatee"], 21) : undefined,
-    lashes: long,
-    blush: long && (h >>> 23) % 2 === 0,
-    heavy: (h >>> 25) % 7 === 0,
-    brow: mood === "blocked" ? "angry" : mood === "working" ? "flat" : pick(["flat", "soft", "raised"], 27),
-    mouth: mood === "blocked" ? "frown" : mood === "done" ? "grin" : mood === "working" ? "neutral" : "smile",
+    facial: hair !== "long" && hair !== "bob" && (h >>> 19) % 6 === 0 ? pick(["beard", "stubble"], 21) : undefined,
+    blush: (h >>> 23) % 3 !== 0,
+    headphones: dev && hair !== "afro" && hair !== "bun" && (h >>> 25) % 3 === 0,
+    mood: mood === "blocked" ? "blocked" : mood === "working" ? "working" : mood === "done" ? "done" : "ok",
   };
 }
 
-function toCanvas(buf, w, h) {
+function compose(r, phase, back) {
+  buf = new Uint8ClampedArray(W * H * 4);
+  if (!back) hairBehind(r);
+  body(r, back, phase);
+  legs(r, phase);
+  if (back) { hairBack(r); if (r.headphones) { const d = [58, 62, 74]; rows([[1, 5, 12]], d); rect(1, 9, 2, 12, d); rect(15, 9, 16, 12, d); } }
+  else { head(r); face(r); hairFront(r); if (r.headphones) headphones(r); }
+  outline();
+  return buf;
+}
+
+function toCanvas(data, w, h, sy = 0) {
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
   const ctx = c.getContext("2d");
-  const img = ctx.createImageData(w, h);
-  img.data.set(buf);
-  ctx.putImageData(img, 0, 0);
+  const img = ctx.createImageData(W, H);
+  img.data.set(data);
+  ctx.putImageData(img, 0, -sy);
   return c;
-}
-
-function composePortrait(r) {
-  CUR_W = PORTRAIT_W; CUR_H = PORTRAIT_H;
-  const buf = new Uint8ClampedArray(PORTRAIT_W * PORTRAIT_H * 4);
-  drawClothing(buf, r);
-  rect(buf, 7, 18, 10, 19, SKIN[r.skin].sh);
-  drawHeadGroup(buf, r);
-  outlinePass(buf);
-  return buf;
-}
-
-function composeScene(r, phase, back) {
-  CUR_W = SCENE_W; CUR_H = SCENE_H;
-  const buf = new Uint8ClampedArray(SCENE_W * SCENE_H * 4);
-  drawSceneTorso(buf, r, back);
-  drawSceneLegs(buf, r.pants || (r.cloth === "suit" ? shades(r.c1)[2] : [54, 56, 70]), phase);
-  if (back) drawHeadBack(buf, r); else drawHeadGroup(buf, r);
-  outlinePass(buf);
-  return buf;
 }
 
 const portraitCache = new Map();
@@ -421,7 +231,7 @@ const sceneCache = new Map();
 /** Canvas with a person's 18×28 portrait (cached per name/role/mood). */
 export function portraitCanvas(name, role, mood = "ok") {
   const key = `${name}|${role}|${mood}`;
-  if (!portraitCache.has(key)) portraitCache.set(key, toCanvas(composePortrait(recipeFor(name, role, mood)), PORTRAIT_W, PORTRAIT_H));
+  if (!portraitCache.has(key)) portraitCache.set(key, toCanvas(compose(recipeFor(name, role, mood), 0, false), PORTRAIT_W, PORTRAIT_H));
   return portraitCache.get(key);
 }
 
@@ -447,8 +257,8 @@ export function sceneFrames(name, role, mood = "ok") {
   if (!sceneCache.has(key)) {
     const r = recipeFor(name, role, mood);
     sceneCache.set(key, {
-      front: [0, 1, 2].map((p) => toCanvas(composeScene(r, p, false), SCENE_W, SCENE_H)),
-      back: [0, 1, 2].map((p) => toCanvas(composeScene(r, p, true), SCENE_W, SCENE_H)),
+      front: [0, 1, 2].map((p) => toCanvas(compose(r, p, false), SCENE_W, SCENE_H)),
+      back: [0, 1, 2].map((p) => toCanvas(compose(r, p, true), SCENE_W, SCENE_H)),
     });
   }
   return sceneCache.get(key);

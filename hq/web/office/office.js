@@ -9,8 +9,8 @@
 // (MessageEnvelope.ts), the lit desk screen (DeskScreen.ts), and the rule that a
 // cheer needs real work behind it (CHEER_MIN_BUSY_MS). Rewritten for Canvas 2D.
 // The room art, layout, and data mapping are original RedPi code.
-import { buildMap, TILE } from "./map.js";
-import { drawDynamic, drawItem, paintStatic, palette, SORTED } from "./tiles.js";
+import { buildMap, department, TILE } from "./map.js";
+import { drawDynamic, drawItem, drawLabels, paintStatic, palette, SORTED } from "./tiles.js";
 import { sceneFrames, SCENE_H, SCENE_W } from "./people.js";
 import { findPath } from "./pathfinding.js";
 
@@ -22,6 +22,7 @@ const SEAT_CROP = 9;              // legs hidden behind the desk while seated
 const SIT_DROP = 6;
 const motionOK = () => !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const TOOL_ICONS = { read: "<", edit: ">", write: ">", bash: "$", grep: "?", find: "?", ls: "?", glob: "?", redpi_browser: "@", web: "@" };
+const STATUS_DOT = { work: "#3ddc84", board: "#3ddc84", desk: "#3ddc84", wait: "#ff4d5e", idle: "#ffc94d", rest: "#8fa2ff", gone: "#9aa1ad" };
 const KIND_COLOR = { aside: "#f0a6ff", chat: "#45e3ff", brief: "#b995ff", decision: "#ffc94d", system: "#ffc94d", task: "#3dff8f", command: "#ff4d5e", interrupt: "#ff4d5e" };
 
 // Where work happens: looking things up sends a person to the files room, builds and
@@ -57,25 +58,38 @@ function toolIcon(tool) {
 }
 
 // ---------- camera (port of Camera.ts: fit, clamp, lerp, focus, manual pan) ----------
+// As in WorkAdventure's camera, the view is bounded by the world and can never zoom out past
+// the point where the world fills it, so there is never empty space around the map. "Fit"
+// frames the building (the park around it fills the rest of the view).
 class Camera {
-  constructor() { this.x = 0; this.y = 0; this.zoom = 1; this.tx = 0; this.ty = 0; this.tz = 1; this.vw = 800; this.vh = 500; this.mw = 640; this.mh = 480; this.manual = false; }
-  setMap(w, h) { this.mw = w; this.mh = h; if (!this.manual) this.fit(true); }
-  setView(w, h) { this.vw = w; this.vh = h; if (!this.manual) this.fit(true); }
-  minZoom() { return Math.min(this.vw / this.mw, this.vh / this.mh); }
-  fit(snap) { this.manual = false; this.tx = this.mw / 2; this.ty = this.mh / 2; this.tz = this.minZoom(); if (snap) { this.x = this.tx; this.y = this.ty; this.zoom = this.tz; } }
-  focus(wx, wy, zoom) { this.manual = true; this.tx = wx; this.ty = wy; this.tz = Math.max(this.minZoom(), Math.min(6, zoom ?? Math.max(this.zoom, this.minZoom() * 1.8))); }
+  constructor() { this.x = 0; this.y = 0; this.zoom = 1; this.tx = 0; this.ty = 0; this.tz = 1; this.vw = 800; this.vh = 500; this.mw = 640; this.mh = 480; this.home = null; this.manual = false; }
+  setMap(w, h, home) { this.mw = w; this.mh = h; this.home = home || { x: 0, y: 0, w, h }; if (!this.manual) this.fit(true); else this.clampZoom(); }
+  setView(w, h) { this.vw = w; this.vh = h; if (!this.manual) this.fit(true); else this.clampZoom(); }
+  minZoom() { return Math.max(this.vw / this.mw, this.vh / this.mh); }
+  fitZoom() {
+    const h = this.home || { w: this.mw, h: this.mh };
+    return Math.max(this.minZoom(), Math.min(4, Math.min(this.vw / (h.w + TILE), this.vh / (h.h + TILE))));
+  }
+  clampZoom() { const lo = this.minZoom(); if (this.tz < lo) this.tz = lo; if (this.zoom < lo) this.zoom = lo; }
+  fit(snap) {
+    const h = this.home || { x: 0, y: 0, w: this.mw, h: this.mh };
+    this.manual = false; this.tx = h.x + h.w / 2; this.ty = h.y + h.h / 2; this.tz = this.fitZoom();
+    if (snap) { this.x = this.tx; this.y = this.ty; this.zoom = this.tz; }
+  }
+  focus(wx, wy, zoom) { this.manual = true; this.tx = wx; this.ty = wy; this.tz = Math.max(this.minZoom(), Math.min(6, zoom ?? Math.max(this.zoom, this.fitZoom() * 1.8))); }
   pan(dx, dy) { this.manual = true; this.tx -= dx / this.zoom; this.ty -= dy / this.zoom; this.x = this.tx; this.y = this.ty; }
   zoomAt(factor, sx, sy) {
     this.manual = true;
-    const wx = this.x + (sx - this.vw / 2) / this.zoom, wy = this.y + (sy - this.vh / 2) / this.zoom;
+    const { ox, oy } = this.offset();
+    const wx = (sx - ox) / this.zoom, wy = (sy - oy) / this.zoom;
     this.tz = this.zoom = Math.max(this.minZoom(), Math.min(6, this.zoom * factor));
     this.tx = this.x = wx - (sx - this.vw / 2) / this.zoom; this.ty = this.y = wy - (sy - this.vh / 2) / this.zoom;
   }
   update() {
     const k = motionOK() ? 0.1 : 1;
-    this.x += (this.tx - this.x) * k; this.y += (this.ty - this.y) * k; this.zoom += (this.tz - this.zoom) * k;
+    this.x += (this.tx - this.x) * k; this.y += (this.ty - this.y) * k; this.zoom = Math.max(this.minZoom(), this.zoom + (this.tz - this.zoom) * k);
   }
-  // Screen offset of the world origin, clamped so the map never drifts off-screen.
+  // Screen offset of the world origin, clamped so the view never leaves the world.
   offset() {
     let ox = this.vw / 2 - this.x * this.zoom, oy = this.vh / 2 - this.y * this.zoom;
     const sw = this.mw * this.zoom, sh = this.mh * this.zoom;
@@ -107,18 +121,22 @@ class Bubble {
   draw(ctx, x, y, t, maxX = Infinity) {
     if (this.state === "hidden") return;
     const label = this.thinking || this.talk ? ".".repeat(1 + (Math.floor(t / (this.talk ? 0.3 : 0.5)) % 3)) : this.text;
-    ctx.font = "bold 5px monospace";
-    const lines = wrap(ctx, label, 84);
-    const w = Math.ceil(Math.max(...lines.map((l) => ctx.measureText(l).width))) + 6, h = lines.length * 6 + 4;
+    ctx.font = "600 5px system-ui, sans-serif";
+    const lines = wrap(ctx, label, 90);
+    const w = Math.ceil(Math.max(...lines.map((l) => ctx.measureText(l).width))) + 8, h = lines.length * 6 + 5;
     // Keep the bubble inside the room so it never clips at the edges.
     const bx = Math.round(Math.max(2, Math.min(maxX - w - 2, x - w / 2))), by = Math.round(Math.max(2, y - h));
-    ctx.globalAlpha = this.alpha * 0.95;
-    const bg = this.talk ? "#0b2a33" : "#0b1510";   // small talk looks different from real text
-    ctx.fillStyle = bg; roundRect(ctx, bx, by, w, h, 2); ctx.fill();
-    ctx.fillStyle = bg; ctx.fillRect(Math.round(x) - 1, by + h, 3, 2);
+    // Speech is a white bubble; tool activity and thinking are dark, so made-up small talk
+    // (dots only) never looks like real text.
+    const speech = this.talk || /^[“→]/.test(this.text);
+    const bg = speech ? "#ffffff" : "#262b38";
+    ctx.globalAlpha = this.alpha * 0.96;
+    ctx.fillStyle = "rgba(20,24,40,0.18)"; roundRect(ctx, bx, by + 1, w, h, 3); ctx.fill();
+    ctx.fillStyle = bg; roundRect(ctx, bx, by, w, h, 3); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(Math.round(x) - 2, by + h - 0.5); ctx.lineTo(Math.round(x) + 2, by + h - 0.5); ctx.lineTo(Math.round(x), by + h + 2.5); ctx.closePath(); ctx.fill();
     ctx.globalAlpha = this.alpha;
-    ctx.fillStyle = "#d9f7e3"; ctx.textAlign = "left";
-    lines.forEach((l, i) => ctx.fillText(l, bx + 3, by + 7 + i * 6));
+    ctx.fillStyle = speech ? "#2b3040" : "#f1f3f8"; ctx.textAlign = "left";
+    lines.forEach((l, i) => ctx.fillText(l, bx + 4, by + 7.5 + i * 6));
     ctx.globalAlpha = 1;
   }
 }
@@ -262,6 +280,9 @@ class Person {
     } else if (prop === "controller") {
       const b = move ? Math.round(Math.sin(t * 9)) : 0;
       P("#1c1f24", x - 4, y - 13 + b, 8, 3); P("#ff4d5e", x + 2, y - 13 + b, 1, 1); P("#45e3ff", x - 3, y - 12 + b, 1, 1);
+    } else if (prop === "paddle") {
+      const swing = move ? Math.round(Math.sin(t * 5.03) * 2) : 0;
+      P("#d6453f", x + 4, y - 15 + swing, 4, 4); P("#7a4a2a", x + 5, y - 11 + swing, 2, 2);
     } else if (prop === "dumbbell") {
       const up = move ? Math.round((Math.sin(t * 3) + 1) * 4) : 0;
       for (const sx of [-8, 6]) { P("#8a979e", x + sx, y - 12 - up, 3, 1); P("#111", x + sx - 1, y - 13 - up, 1, 3); P("#111", x + sx + 3, y - 13 - up, 1, 3); }
@@ -273,19 +294,22 @@ class Person {
     const { x, y } = this.feet();
     const head = y - SCENE_H - 2;
     ctx.globalAlpha = this.alpha;
-    ctx.font = "bold 5px monospace"; ctx.textAlign = "center";
-    const w = Math.ceil(ctx.measureText(this.name).width) + 4;
-    ctx.fillStyle = selected ? "#3dff8f" : "rgba(8,17,12,0.8)"; ctx.fillRect(Math.round(x - w / 2), Math.round(y + 1), w, 7);
-    ctx.fillStyle = selected ? "#04130a" : "#d9f7e3"; ctx.fillText(this.name, Math.round(x), Math.round(y + 6));
+    // Name tag (a dark pill with a status dot), as in Gather and WorkAdventure.
+    ctx.font = "600 5px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const w = Math.ceil(ctx.measureText(this.name).width) + 11, tx = Math.round(x - w / 2), ty = Math.round(y + 1);
+    ctx.fillStyle = selected ? "#2f6fd6" : "rgba(32,36,48,0.86)"; roundRect(ctx, tx, ty, w, 7, 3.5); ctx.fill();
+    ctx.fillStyle = STATUS_DOT[this.mode] || STATUS_DOT.idle; ctx.beginPath(); ctx.arc(tx + 4, ty + 3.5, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.fillText(this.name, Math.round(x + 2.5), ty + 3.8);
+    ctx.textBaseline = "alphabetic";
     if (this.context && this.context.percent != null) {
       const pct = Math.max(0, Math.min(1, this.context.percent / 100));
-      ctx.fillStyle = "rgba(8,17,12,0.8)"; ctx.fillRect(Math.round(x - 8), Math.round(y + 9), 16, 2);
+      ctx.fillStyle = "rgba(32,36,48,0.6)"; ctx.fillRect(Math.round(x - 8), Math.round(y + 9), 16, 2);
       ctx.fillStyle = pct > 0.8 ? "#ff4d5e" : pct > 0.5 ? "#ffc94d" : "#3dff8f"; ctx.fillRect(Math.round(x - 8), Math.round(y + 9), Math.max(1, Math.round(16 * pct)), 2);
     }
     if (this.glyph) {
       const bob = motionOK() ? Math.round(Math.sin(t * 5) * 1.5) : 0;
       ctx.fillStyle = this.glyph.color; ctx.fillRect(Math.round(x - 4), Math.round(head - 10 + bob), 8, 9);
-      ctx.fillStyle = "#04130a"; ctx.font = "bold 7px monospace"; ctx.fillText(this.glyph.text, Math.round(x), Math.round(head - 3 + bob));
+      ctx.fillStyle = "#1d2130"; ctx.font = "800 7px system-ui, sans-serif"; ctx.fillText(this.glyph.text, Math.round(x), Math.round(head - 3 + bob));
     }
     if (this.flash > 0) { ctx.strokeStyle = "#3dff8f"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y - 16, 14, 0, Math.PI * 2); ctx.stroke(); }
     ctx.globalAlpha = 1;
@@ -366,15 +390,19 @@ export class Office {
     return forced || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   }
 
-  ensureMap(workerCount) {
-    const pods = Math.max(1, Math.ceil(workerCount / 4));
+  ensureMap(workers) {
+    const roles = workers.map((w) => w.role || "");
+    const key = roles.map((r) => department(r)).join(",");
     const theme = this.currentTheme();
-    if (this.map && this.pods === pods && this.theme === theme) return;
-    this.pods = pods; this.theme = theme;
-    this.map = buildMap(workerCount);
+    if (this.map && this.layoutKey === key && this.theme === theme) return;
+    const relayout = this.layoutKey !== key;
+    this.layoutKey = key; this.theme = theme;
+    if (relayout || !this.map) this.map = buildMap(roles);
     this.pal = palette(theme);
     this.staticLayer = paintStatic(this.map, this.pal);
-    this.camera.setMap(this.map.W * TILE, this.map.H * TILE);
+    const b = this.map.building;
+    this.camera.setMap(this.map.W * TILE, this.map.H * TILE, { x: b.x * TILE, y: b.y * TILE, w: b.w * TILE, h: b.h * TILE });
+    if (!relayout) return;
     // Existing people keep walking on the new map from where they stand.
     this.claims.clear(); this.meetings = [];
     for (const p of this.people.values()) {
@@ -581,7 +609,7 @@ export class Office {
     this.placing = !this.placedOnce;
     this.placedOnce = true;
     const { run, workers, tasks, messages } = data;
-    this.ensureMap(workers.length);
+    this.ensureMap(workers);
     const m = this.map;
     const now = Date.now();
     this.seatOwner = new Map(workers.map((w, i) => [i, w.id]));
@@ -610,7 +638,7 @@ export class Office {
       p.context = w.context;
       p.seatIndex = i;
       if (!w.alive || w.status === "stopped" || w.status === "failed") {
-        if (p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.glyph = null; p.bubble.hide(); p.goTo(m.entry, () => { p.leaving = true; }); }
+        if (p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.glyph = null; p.bubble.hide(); p.goTo(m.exit || m.entry, () => { p.leaving = true; }); }
         monitors.set(i, "off");
         return;
       }
@@ -668,7 +696,7 @@ export class Office {
       if (!this.placing && now - e.created < 60_000) p.bubble.show(`“${String(e.text).split("\n")[0]}”`);
     }
     // Anyone no longer in the team walks out.
-    for (const [id, p] of this.people) if (id !== "ceo" && !workers.some((w) => w.id === id) && p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.goTo(m.entry, () => { p.leaving = true; }); }
+    for (const [id, p] of this.people) if (id !== "ceo" && !workers.some((w) => w.id === id) && p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.goTo(m.exit || m.entry, () => { p.leaving = true; }); }
 
     // Messages: envelopes fly from sender to recipient, and the people talking meet.
     const newest = messages.length ? messages[messages.length - 1].id : 0;
@@ -723,7 +751,7 @@ export class Office {
     if (!this.active || document.hidden) return;           // paused while hidden: no background cost
     const dt = Math.min(0.05, (ts - this.last) / 1000); this.last = ts; this.t += dt;
     if (this.map) {
-      if (this.theme !== this.currentTheme()) this.ensureMap(this.data?.workers.length || 0);
+      if (this.theme !== this.currentTheme()) this.ensureMap(this.data?.workers || []);
       if (motionOK()) this.social();
       for (const p of this.people.values()) {
         this.think(p); p.update(dt);
@@ -738,6 +766,7 @@ export class Office {
       const here = [...this.people.values()].filter((p) => p.pose && !p.walking);
       this.state.gaming = here.some((p) => p.pose.game);
       this.state.treadmills = new Set(here.filter((p) => p.pose.treadmill).map((p) => `${p.tile.x},${p.tile.y}`));
+      this.state.pong = here.filter((p) => p.pose.prop === "paddle").length;
       this.meetings = this.meetings.filter((mt) => mt.members.size);
       this.state.meetingOn = this.meetings.some((mt) => mt.arrived > 0);
       for (const [id, p] of this.people) if (p.gone) this.people.delete(id);
@@ -753,7 +782,7 @@ export class Office {
   draw() {
     const { ctx, map, pal } = this;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = this.theme === "light" ? "#dfe8e1" : "#050b08";
+    ctx.fillStyle = pal.grass[0];
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     const { ox, oy } = this.camera.offset();
     const z = this.camera.zoom * this.dpr;
@@ -761,6 +790,7 @@ export class Office {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.staticLayer, 0, 0);
     drawDynamic(ctx, map, pal, this.t, this.state);
+    drawLabels(ctx, map, pal);
     // Depth-sort furniture and people by their bottom edge so people sit behind desks.
     const s = { ...this.state, typing: false };
     const list = [];

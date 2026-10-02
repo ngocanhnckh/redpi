@@ -558,25 +558,30 @@ The run page puts the live view (Office, Board, Timeline, Stats or Screenshots) 
 
 Every run has five views. **Auto-play** (the button beside the tabs) fades through them, ten seconds each: handy on a wall screen. It pauses while your pointer is over the view, clicking a tab restarts the ten seconds, and the choice is remembered.
 
-**🏢 Office** (default once workers exist): an animated pixel office where the team works.
+**🏢 Office** (default once workers exist): an animated pixel office where the team works, in a bright, cosy top-down style (all art is original and drawn in code).
 
-- The CEO plans at the whiteboard, then leads from a glass office; each worker has a desk in a pod of four.
+- The office is a building in a small park, with lawns and trees, a pond, a car park and a street with passing cars. The camera never shows past the edge of that world, so there is never an empty margin: the view opens on the whole building with the park filling the rest of the screen. The light theme is daytime; the dark theme is the same office at night, with lit windows, stars and glowing lamps.
+- Inside, cream-tiled corridors connect three bands of rooms:
+  - along the top: the CEO's glass office with the live whiteboard, the glass **Boardroom**, the **Library** (files), the **Server room**, and on wider floors a huddle room, a focus room, a wellness room and a studio
+  - in the middle: an open-plan zone per **department**, picked from each worker's role (Engineering, Design, Research & Data, Review & QA, Platform & Ops, Security, Docs & Content), labelled on the floor, with breakout nooks in the space left over
+  - along the bottom: the **Lobby** with the front door, reception, the NEEDS YOU mat and the YOU terminal; the **Café**; and the **Lounge**
+- The CEO plans at the whiteboard, then leads from the glass office; each worker has a desk in their department's zone.
 - Working people sit and type, their monitor lit; a bubble shows what they are doing right now (`$ pytest -q`, `> Report.tsx`, `< README.md`) or `...` while the model thinks.
 - Where they are follows the real tool calls:
-  - searching or reading the codebase (`grep`, `find`, `ls`, `read`, Jevgrep, `cd`/`rg`/`cat` in bash) sends them running to the **Files · Servers** room, where they stand at the shelves
-  - builds, tests, installs and deploys often take them to the server racks
+  - searching or reading the codebase (`grep`, `find`, `ls`, `read`, Jevgrep, `cd`/`rg`/`cat` in bash) sends them running to the **Library**, where they stand at the bookcases
+  - builds, tests, installs and deploys often take them to the racks in the **Server room**
   - writing code (`edit`, `write`) brings them straight back to the desk to type
 - Nobody sits still for long: every 20–45 seconds at the desk they take a short trip to the servers, the coffee machine, the window, the files, or a teammate's desk, then go back to typing.
-- Teammates talking meet in the glass **meeting room**. They sit facing each other across the table, the speaker's bubble shows the real message, a reply keeps the meeting going, and the room's screen lights up with the run's progress.
+- Teammates talking meet in the glass **Boardroom**. They sit facing each other across the table, the speaker's bubble shows the real message, a reply keeps the meeting going, and the room's screen lights up with the run's progress.
 - Idle people wander the lounge and now and then chat over coffee in pairs. The chat is shown as a `...` bubble, never invented text.
 - Anyone waiting on a long command (a build, Docker, a test suite, a background job) takes a seat in the **café** with a coffee and a "☕ waiting on …" bubble, and goes back to the desk when it finishes.
-- People with nothing left to do (their tasks are done, or the run is finished) head to the **recreation room** at the bottom: the couch and PlayStation, the treadmills and weights, or an armchair with a book. Everyone has their own spot (no two people ever share a seat or a chair, in the meeting room too), and they switch activities now and then.
-- Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`.
+- People with nothing left to do (their tasks are done, or the run is finished) head to the **Lounge** at the bottom: the couch and games console, the ping-pong table, the treadmills and weights, or an armchair or bean bag with a book (arcade cabinets and a pool table fill the corner). Everyone has their own spot (no two people ever share a seat or a chair, in the meeting room too), and they switch activities now and then.
+- Anyone blocked, parked, rate-limited, or waiting on a prompt walks to the red **NEEDS YOU** mat by the door with a `!`. Someone leaving the team walks out of the front door.
 - Every message flies as an envelope from sender to recipient (cyan chat, violet brief, amber decisions, red to or from you); a worker writing to you walks to the **YOU** terminal to post it.
-- The floor grows with the team: a desk pod for every four people, and café tables, rec-room armchairs and room on the NEEDS YOU mat for everyone, so nobody ends up sharing a seat or standing on someone else.
+- The floor grows with the team: department zones grow a bench of two desks at a time, and there are café tables, lounge seats and room on the NEEDS YOU mat for everyone, so nobody ends up sharing a seat or standing on someone else. The building keeps a wide-screen shape as it grows.
 - Finishing a task after real work (at least a minute busy) earns confetti.
-- Name tags carry a context gauge. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
-- The whiteboard shows the live board as sticky notes, and the windows run Matrix rain.
+- People are small chibi characters whose look comes from their name and whose clothes hint at their role (a hoodie, a cardigan, a suit for the CEO); their faces show their mood (focused, blocked, happy when done). Name tags are pills with a status dot (green working, amber idle, red needs you, blue resting) and a context gauge. Speech is a white bubble; tool activity and thinking are dark. Click a person or desk to open them; drag to pan, scroll to zoom, double-click to reset.
+- The whiteboard shows the live board as sticky notes, and clouds drift past the windows (stars at night).
 
 **📋 Board**: the live Kanban (to do, in progress, review, blocked, done), with your tickets marked by priority. Cards stay compact: long titles and notes are cut to a few lines, with the full text on hover. Click a card for its full history: who moved it, when, and why.
 
@@ -1228,7 +1233,7 @@ Smoke coverage includes:
 
 - automatic first-run provider onboarding
 - HQ watch: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each alert the CEO within seconds, escalate to you when they persist, clear when they stop; the CEO check-in carries the numbers
-- office floor scales with the team (1 to 40 people): a desk, café seat, rec-room spot and "needs you" spot for everyone, all reachable from the entrance, none shared
+- office floor scales with the team (1 to 40 people, one department or a mix): a desk, café seat, lounge spot and "needs you" spot for everyone, all reachable from the entrance, none shared
 - browser: slow API behind a spinner and late images are waited for, the page stays open between commands (a dialog survives), a never-settling page says what is loading, errors logged between commands are collected, phone width sticks, a down dev server is explained, `close` and `gc` leave no Chromium helper processes behind
 - context windows: real 9Router windows used as is, its 200k "unknown" default flagged, `/redpi-context` applies at once (Pi's footer and auto-compaction included), persists and resets
 - docker-dev: `init` detects Next/Vite/FastAPI/Django/Go with sized limits; a Node app runs limited in Docker, hot-reloads an edit, gets its own stack and port per worker, reaps orphaned children, reports an out-of-memory kill, keeps repo files owned by you, and `down` removes it (Docker part skipped without Docker)
@@ -1258,7 +1263,7 @@ Smoke coverage includes:
 - Decisions and lessons (in a temporary git repo): numbered ADRs with an index (five parallel writers get five numbers), supersede, lessons newest first without duplicates, the `redpi-hq adr`/`lesson` commands, and the lessons and decisions in every trusted session's prompt (never an untrusted one), capped
 - Job watcher (against a stub Pi): quick commands unchanged, short timeouts still kill, long commands move to the background with a report instead of blocking, `wait` returns on finish, finish and stuck messages wake the agent and reach HQ, stop needs a reason, Esc stops the whole job, and errors in the log are called out
 - Tickets: validation, attachments (stored privately, images inline, everything else downloads with a sandbox), the CEO told to act at once on urgent ones with who is free, assigning with a brief that carries the whole ticket, a worker spawned for a ticket without a plan, a ticket reopening a finished run; in the browser, filing one with an attachment (urgent first on the board, panel, timeline), Markdown rendered safely on the event board, and the form at phone width
-- Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the recreation room, each to their own spot; token use charts; the Screenshots tab with its lightbox
+- Office extras: people waiting on a build sit in the café with a coffee and go back when it ends; people with nothing left to do go to the lounge, each to their own spot; token use charts; the Screenshots tab with its lightbox
 - Multi-line paste in terminals without bracketed paste: three pasted lines reach the model as one prompt, and a line typed with Enter still submits (real Pi TUI)
 - Jev in the agent loop: read-only commands skip Jev, catastrophic ones are caught by rule, four safety questions in one call, you block or allow (once or for the session), workers never get a dialog, shadow/off/Jev-off/Jev-down behave; stale outputs pruned in one call with the newest kept and decisions persisted; the log keeps hashes only
 - Decision model (Jev), against a fake Jev and a fake model:
@@ -1326,7 +1331,7 @@ Yes. RedPi supports native providers and 9Router. 9Router is recommended for tea
 
 ## 🙏 Credits
 
-- The RedPi Office engine (pixel people, walking, camera, bubbles, envelopes, desk screens) and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The office room, furniture, and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets are not redistributable and are not included.
+- The RedPi Office engine (walking, camera, bubbles, envelopes, desk screens) and the tool waterfall are ported from [munder-difflin](https://github.com/chaitanyagiri/munder-difflin) (MIT), which builds on [the-office](https://github.com/shahar061/the-office) (ISC). The bounded, never-empty camera follows the approach of [WorkAdventure](https://github.com/workadventure/workadventure)'s camera (no code or assets copied). The building, park, furniture, characters and layout are original RedPi art drawn in code: munder-difflin's LimeZu tilesets and WorkAdventure's tilesets are not redistributable and are not included.
 - Worker resume, launch ids, closure reasons and handoffs, parked detection with a wake ladder, the doctor check, and the independent-review norms are adapted from designs in [OpenRig](https://github.com/mvschwarz/openrig) (Apache-2.0).
 - Prompt routing uses [Jev](https://openrouter.ai/blog/insights/what-is-jev/), TypeSafe's decision model; `redpi_jevgrep` runs [Jevgrep](https://github.com/dzhng/jevgrep) (MIT), installed from npm on demand, with usage guidance adapted from its agent skill.
 - [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) by Dietrich Gebert is installed as a companion Pi package for minimal-code mode.
