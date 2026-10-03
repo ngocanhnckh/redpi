@@ -613,6 +613,7 @@ Click a name to open that person, click a task id to see its history, and send a
 
 Around the views:
 
+- **Chat**, a Slack-like tab: channels on the left (**#team**: messages to everyone, and what you post there reaches the whole team; **#agents**: the team talking to each other, read-only; **#hq-notes**: HQ's alerts, check-ins and notes to the CEO, read-only), then a direct message with the CEO and with each teammate, each with a presence dot and what they are doing. People who left fold into "Left the team". Messages are grouped by sender with day dividers; long ones fold behind Show more. Unread counts show in the sidebar and on the tab, with a New line where you left off. The composer grows as you type (Enter sends, Shift+Enter for a new line, `@` mentions a teammate); in a DM, **Ask on the side** and **Interrupt + send** work as in the person's panel. Drafts survive live updates, older history loads on demand, ⤢ goes full screen (Esc leaves), and on a phone it is a conversation list, then the conversation.
 - your **Inbox** (the header's Inbox link for every project, and an Inbox tab on each run): everything that waits on you is a ticket with a status (*Waiting on you*, *Waiting on* the agent, *Approved*, *Declined*, *Resolved*) and a comment thread:
   - **blockers**: a task blocked on you (`waitingOn: "human"`). Reply to answer, or **Unblock** to send your answer and put the task back to work. Blocked again, the same ticket reopens with the new note.
   - **approvals**: a plan waiting for you (Approve, or Request changes with a comment), or a yes/no an agent asked with `redplan_ask_human`.
@@ -1243,6 +1244,7 @@ npm pack --dry-run
 Smoke coverage includes:
 
 - automatic first-run provider onboarding
+- chat: channels and direct messages, grouping, unread badges and the New line, @mentions, drafts kept through live updates, read-only channels, full screen, earlier history, phone layout
 - inbox: plan approvals, blockers on the human, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves when the work moves on; the browser UI (Needs you → ticket, live updates keep your draft, /inbox across projects, phone layout); `redplan_ask_human` from a live worker
 - dismissing workers: refused while they own work in progress; work handed over (with a brief) or returned to the board; reviews rerouted; the worker leaves quietly; a worker's `tmux kill-session` is blocked
 - HQ watch: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker, work left with nobody on it and unanswered questions each alert the CEO within seconds, escalate to you when they persist, clear when they stop; the CEO check-in carries the numbers

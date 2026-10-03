@@ -5,6 +5,7 @@ import { renderCharts } from "/static/charts.js";
 import { renderTimeline } from "/static/timeline.js";
 import { md, plain } from "/static/md.js";
 import { Inbox, inboxBadge } from "/static/inbox.js";
+import { Chat } from "/static/chat.js";
 
 const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
@@ -12,10 +13,10 @@ const projectId = location.pathname.startsWith("/projects/") ? location.pathname
 const inboxPage = location.pathname === "/inbox";
 const COLUMNS = [["todo", "To do"], ["in_progress", "In progress"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done"]];
 let renderedPanel = null;
-let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null, inboxHost = null, inboxView = null;
+let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null, inboxHost = null, inboxView = null, chatHost = null, chatView = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-const VIEWS = [["office", "Office"], ["board", "Board"], ["inbox", "Inbox"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
+const VIEWS = [["office", "Office"], ["board", "Board"], ["chat", "Chat"], ["inbox", "Inbox"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
 let view = { graph: "stats" }[store.get(`redpi-view-${runId}`)] || store.get(`redpi-view-${runId}`);
 if (view && !VIEWS.some(([k]) => k === view)) view = null;
 // Auto-play: the view fades through Office, Board, Timeline, Stats and Screenshots (10 s each; ?autoplay_ms= for tests).
@@ -27,6 +28,19 @@ const viewScroll = {};
 const holds = (w) => (state?.tasks || []).filter((t) => t.status !== "done" && (t.status === "review" ? t.reviewer_id === w.id : t.worker_id === w.id));
 // A worker who left holding nothing (finished, dismissed) is simply gone: no alert. Only leaving mid-task is "lost".
 const workerState = (w) => !w.alive ? (holds(w).length ? "lost" : w.left_reason === "dismissed" ? "dismissed" : "left") : w.needs_human || w.needs_input || w.parked ? "needs" : w.status === "working" ? "working" : w.status === "starting" ? "starting" : "idle";
+// A person's dot and one line on what they are up to (the chat sidebar and header).
+function presence(id) {
+  if (id === "ceo") {
+    const link = ["done", "cancelled"].includes(state.run.status) ? { ok: true } : ceoLink();
+    return { dot: link.ok ? "working" : "offline", label: link.ok ? (state.run.status === "awaiting_approval" ? "waiting for your approval" : state.run.status === "done" ? "run finished" : "coordinating the team") : "not connected: /reload its terminal" };
+  }
+  const w = state.workers.find((x) => x.id === id);
+  if (!w) return { dot: "left", label: "" };
+  const st = workerState(w), said = latestUpdate(id);
+  const label = st === "lost" ? `session ended while holding ${holds(w).map((t) => t.id).join(", ")}` : st === "left" || st === "dismissed" ? `${st === "dismissed" ? "dismissed" : "left"}${w.left_at ? ` ${ago(w.left_at)}` : ""}`
+    : said ? `“${plain(said.text).slice(0, 140)}”` : `${st}${w.current_task ? ` · ${w.current_task}` : ""}${w.activity?.text ? ` · ${w.activity.text}` : ""}`;
+  return { dot: st === "needs" ? "offline" : st, label };
+}
 const roleOf = (id) => id === "ceo" ? "ceo" : state?.workers.find((w) => w.id === id)?.role || "";
 function avatar(name, id, size = "") {
   if (id === "human") return `<span class="avatar you ${size}" aria-hidden="true">You</span>`;
@@ -281,12 +295,18 @@ function applyFilter() {
   app.querySelectorAll("[data-filter]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.filter === feedFilter)));
 }
 
+function updateChatTab() {
+  const unread = chatView?.unreadTotal() || 0, ctab = app.querySelector('[data-view="chat"]');
+  if (ctab) ctab.innerHTML = `Chat${unread ? ` <span class="tab-count quiet">${unread}</span>` : ""}`;
+}
+
 function updateTabs() {
   app.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : view === "inbox" ? "blockers, questions and approvals waiting on you · answer here" : "live project charts";
+  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : view === "inbox" ? "blockers, questions and approvals waiting on you · answer here" : view === "chat" ? "talk to the CEO and the team · #channels and direct messages" : "live project charts";
   const open = (state?.inbox || []).filter((i) => i.status === "open").length;
   const tab = app.querySelector('[data-view="inbox"]');
   if (tab) tab.innerHTML = `Inbox${open ? ` <span class="tab-count">${open}</span>` : ""}`;
+  updateChatTab();
 }
 
 function renderRun() {
@@ -307,6 +327,7 @@ function renderRun() {
       <div class="panel stat"><div class="v">${tasks.filter((t) => t.status === "in_progress").length}</div><div class="k">In progress</div></div>
       <div class="panel stat"><div class="v" style="${tasks.some((t) => t.status === "blocked") ? "color:var(--red)" : ""}">${tasks.filter((t) => t.status === "blocked").length}</div><div class="k">Blocked</div></div>
       <div class="panel stat"><div class="v">${workers.filter((w) => workerState(w) === "working").length}/${workers.filter((w) => w.alive).length}</div><div class="k">Workers active</div></div>`;
+  if (view !== "chat") ensureChat().update(state);
   updateTabs();
   renderView();
   renderFeed();
@@ -339,8 +360,8 @@ function scheduleAutoplay() {
   fill.style.animationPlayState = apHover ? "paused" : "running";
   if (apHover) return;
   apTimer = setTimeout(() => {
-    // The inbox is for answering, not watching: auto-play passes it by.
-    const cycle = VIEWS.filter(([k]) => k !== "inbox"), i = cycle.findIndex(([k]) => k === view);
+    // Chat and the inbox are for answering, not watching: auto-play passes them by.
+    const cycle = VIEWS.filter(([k]) => k !== "inbox" && k !== "chat"), i = cycle.findIndex(([k]) => k === view);
     switchView(cycle[(i + 1) % cycle.length][0], true);
     scheduleAutoplay();
   }, AUTOPLAY_MS);
@@ -353,6 +374,16 @@ function bindAutoplay() {
   panel.addEventListener("pointerenter", () => { apHover = true; if (autoplay) scheduleAutoplay(); });
   panel.addEventListener("pointerleave", () => { apHover = false; if (autoplay) scheduleAutoplay(); });
   scheduleAutoplay();
+}
+
+// The chat keeps counting unread messages while another view is showing (for the tab's badge).
+function ensureChat() {
+  if (!chatHost) {
+    chatHost = document.createElement("div");
+    chatHost.className = "chat-host";
+    chatView = new Chat(chatHost, { runId, avatar, presence, pendingText, onPerson: select, reload: loadRun, onUnread: updateChatTab });
+  }
+  return chatView;
 }
 
 function renderView() {
@@ -371,6 +402,15 @@ function renderView() {
     return;
   }
   office?.setActive(false);
+  chatView?.setActive(view === "chat");
+  if (view === "chat") {
+    ensureChat();
+    if (chatHost.parentNode !== body) body.replaceChildren(chatHost);
+    body.dataset.view = "chat";
+    chatView.setActive(true);
+    chatView.update(state);
+    return;
+  }
   if (view === "inbox") {
     if (!inboxHost) {
       inboxHost = document.createElement("div");
@@ -735,13 +775,15 @@ function bubble(m) {
   return `<div class="bub ${mine ? "me" : "them"}${m.kind === "interrupt" ? " int" : ""}"><div class="bub-meta">${esc(mine ? "You" : m.senderName)}${tag ? ` · ${esc(tag)}` : ""} · <span class="when" data-t="${m.created}">${ago(m.created)}</span></div><div class="bub-body${mine ? "" : " md"}">${mine ? esc(body) : md(body)}</div></div>`;
 }
 
-function pendingNote(id, name, msgs) {
+// What is happening with your last message to someone (a quick answer came, the full one is coming; they
+// are offline; ...), as plain text, or "" when nothing is pending. The drawer and the Chat view both show it.
+function pendingText(id, name, msgs) {
   const lastMine = [...msgs].reverse().find((m) => m.sender === "human");
   const after = lastMine ? msgs.filter((m) => m.id > lastMine.id && m.sender === id) : [];
   // The instant answer came; the full one follows when their live session finishes the turn.
   if (lastMine && lastMine.kind !== "aside" && after.length && after.every((m) => m.kind === "quick")) {
     if (Date.now() - lastMine.created > 45 * 60_000) return "";
-    return `<div class="bub them pending"><div class="bub-body">${esc(`${name}'s full answer follows when they finish what they're doing`)}<span class="dots">…</span></div></div>`;
+    return `${name}'s full answer follows when they finish what they're doing`;
   }
   if (!lastMine || after.length) return "";
   const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
@@ -750,7 +792,11 @@ function pendingNote(id, name, msgs) {
     : !link.ok ? link.text
     : lastMine.kind === "aside" ? (Date.now() - lastMine.created > 3 * 60_000 ? `${name} has not answered on the side after ${ago(lastMine.created).replace(/ ago$/, "")}. The model may be slow or failing; check ${name}'s terminal.` : `${name} is answering on the side…`)
       : `${name} has your message: a quick answer comes in a few seconds, the full one when they finish the current turn.`;
-  return `<div class="bub them pending"><div class="bub-body">${esc(text)}<span class="dots">…</span></div></div>`;
+  return text;
+}
+function pendingNote(id, name, msgs) {
+  const text = pendingText(id, name, msgs);
+  return text ? `<div class="bub them pending"><div class="bub-body">${esc(text)}<span class="dots">…</span></div></div>` : "";
 }
 
 function personSkeleton(id, tab) {

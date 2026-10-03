@@ -209,7 +209,7 @@ const lay = await page.evaluate(() => {
   const t = document.querySelector(".team-panel").getBoundingClientRect();
   return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, oldSections: !!document.querySelector(".charts-section, #graph-host"), tabs: [...document.querySelectorAll("[role=tab][data-view]")].map((b) => b.dataset.view).join(","), overflow: document.documentElement.scrollWidth > innerWidth };
 });
-if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,inbox,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
+if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,chat,inbox,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
 
 // The page never jumps on live updates: scrolled down with a half-typed message, updates
 // arrive (heartbeats, a new message), and the scroll position, focus and text stay.

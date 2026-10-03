@@ -1398,6 +1398,14 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
   return warning ? { id, warning } : { id };
 });
 
+// Older messages for the chat view (the run payload carries the latest 300).
+route("GET", "/api/runs/:id/messages", (_b, p, _res, url) => {
+  const before = Number(url.searchParams.get("before") || Number.MAX_SAFE_INTEGER);
+  const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 300)));
+  return all("SELECT * FROM (SELECT * FROM messages WHERE run_id = ? AND id < ? ORDER BY id DESC LIMIT ?) ORDER BY id", p.id, before, limit)
+    .map((m) => ({ ...m, senderName: participantName(p.id, m.sender), recipientName: participantName(p.id, m.recipient) }));
+});
+
 route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
   const who = url.searchParams.get("for");
   const after = Number(url.searchParams.get("after") || 0);
