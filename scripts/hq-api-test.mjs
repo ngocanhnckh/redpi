@@ -471,5 +471,68 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   if (bad.status !== 400 || !/Bo is not running/.test(bad.body.error)) fail("handing work to a worker who left should be refused", bad);
 }
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
+// The human's inbox: a plan to approve, a blocker on the human, questions and yes/no approvals are tickets with a
+// status and a thread; answering one reaches whoever must act, and tickets close themselves when the work moves on.
+{
+  const rid = (await api("POST", "/api/runs", { projectPath: "/tmp/demo-inbox", title: "Inbox" })).body.run.id;
+  const pv = await api("POST", `/api/runs/${rid}/plans`, { plan });
+  const items = async (status = "all") => (await api("GET", `/api/inbox?run=${rid}&status=${status}&thread=1`)).body;
+  const byKey = async (re) => (await items()).items.find((i) => re.test(i.title));
+  const act = (it, action, body) => api("POST", `/api/inbox/${it.id}`, { action, body });
+  const inboxOf = async (who) => (await api("GET", `/api/runs/${rid}/inbox?for=${who}&after=0`)).body;
+  const planItem = await byKey(/^Approve plan v1: Support chat/);
+  if (!planItem || planItem.kind !== "approval" || planItem.status !== "open" || !/4 tasks\. Approve here, or open the plan/.test(planItem.body)) fail("a plan waiting for approval should be an open approval ticket", planItem);
+  const approved = await act(planItem, "approve", "Ship it");
+  if (approved.status !== 200 || approved.body.status !== "approved") fail("approving the plan from the inbox", approved);
+  if ((await api("GET", `/api/runs/${rid}`)).body.tasks.length !== 4) fail("approving from the inbox should create the board");
+  if (!(await inboxOf("ceo")).some((m) => m.kind === "decision" && /Plan v1 APPROVED\. Comment: Ship it/.test(m.body))) fail("the CEO should get the approval");
+  const hire = async (name, role, taskIds = []) => (await api("POST", `/api/runs/${rid}/workers`, { name, role, cwd: "/tmp/demo-inbox", taskIds })).body;
+  const ana = await hire("Ana", "backend developer", ["T1", "T3"]);
+  const set = (task, body) => api("POST", `/api/runs/${rid}/tasks/${task}`, body);
+  await set("T1", { status: "in_progress", actor: ana.id, workerId: ana.id });
+  await set("T1", { status: "blocked", note: "Need the production API key for the payment provider.", waitingOn: "human", actor: ana.id });
+  const blocker = await byKey(/^T1 API skeleton/);
+  if (!blocker || blocker.kind !== "blocker" || blocker.status !== "open" || blocker.askedByName !== "Ana" || blocker.task.id !== "T1") fail("a blocker on the human should be an open ticket", blocker);
+  if ((await api("GET", "/api/projects")).body.find((p) => p.path === "/tmp/demo-inbox")?.inbox_open !== 1) fail("the project should count open tickets");
+  // A comment: the answer reaches Ana, and the ticket waits on her.
+  const c = await act(blocker, "comment", "It is in the vault under payments/prod.");
+  if (c.body.status !== "waiting" || c.body.thread.at(-1).body !== "It is in the vault under payments/prod.") fail("a comment should put the ticket in waiting with the comment in its thread", c.body);
+  if (!(await inboxOf(ana.id)).some((m) => m.kind === "command" && /^\[Inbox #\d+ · blocker T1: T1 API skeleton\] The human answered:\nIt is in the vault/.test(m.body))) fail("the owner should get the answer");
+  await api("POST", `/api/runs/${rid}/messages`, { from: ana.id, to: "human", kind: "reply", body: "Found it, thanks. Wiring it in." });
+  const t1 = (await items()).items.find((i) => i.id === blocker.id);
+  if (t1.status !== "waiting" || t1.thread.at(-1).author !== ana.id) fail("the worker's reply should land in the ticket's thread", t1);
+  const un = await act(blocker, "unblock", "Go ahead.");
+  if (un.body.status !== "resolved" || (await api("GET", `/api/runs/${rid}`)).body.tasks.find((t) => t.id === "T1").status !== "in_progress") fail("unblock should resolve the ticket and put the task back to work", un.body);
+  if (!(await inboxOf(ana.id)).some((m) => /The human unblocked T1\.\nGo ahead\.\n\nContinue T1 now\./.test(m.body))) fail("the owner should be told to continue");
+  // Blocked again: the same ticket reopens with the new note; moved on by the team: it closes itself.
+  await set("T1", { status: "blocked", note: "The key is rejected: 401.", waitingOn: "human", actor: ana.id });
+  const again = (await items()).items.filter((i) => i.kind === "blocker");
+  if (again.length !== 1 || again[0].status !== "open" || again[0].thread.at(-1).body !== "The key is rejected: 401.") fail("a task blocked again should reopen its ticket", again);
+  await set("T1", { status: "in_progress", note: "Rotated the key myself.", actor: ana.id });
+  if ((await items()).items.find((i) => i.kind === "blocker").resolution !== "Moved to in progress: Rotated the key myself.") fail("a blocker ticket should close itself when the task moves on");
+  // A question from an agent (a message ending in ?): a ticket; answering it in chat counts; the reply closes it.
+  await api("POST", `/api/runs/${rid}/messages`, { from: "ceo", to: "human", kind: "chat", body: "Should the chat keep history across sessions?" });
+  const q = await byKey(/^Should the chat keep history/);
+  if (!q || q.kind !== "question" || q.status !== "open" || q.askedByName !== "CEO") fail("a question to the human should be a ticket", q);
+  await api("POST", `/api/runs/${rid}/messages`, { from: "human", to: "ceo", kind: "command", body: "Yes, 30 days." });
+  if ((await byKey(/^Should the chat keep history/)).status !== "waiting") fail("answering in chat should move the question to waiting");
+  await api("POST", `/api/runs/${rid}/messages`, { from: "ceo", to: "human", kind: "quick", body: "Got it: 30 days." });
+  if ((await byKey(/^Should the chat keep history/)).status !== "waiting") fail("the instant answer should not close it");
+  await api("POST", `/api/runs/${rid}/messages`, { from: "ceo", to: "human", kind: "reply", body: "Done: history kept 30 days, told Ana." });
+  const qa = await byKey(/^Should the chat keep history/);
+  if (qa.status !== "resolved" || qa.resolution !== "Answered" || qa.thread.length !== 3) fail("the agent's answer should close the question with the whole thread", qa);
+  // A yes/no approval through redplan_ask_human's endpoint; follow-ups go to the same ticket.
+  const ask = await api("POST", `/api/runs/${rid}/inbox`, { from: ana.id, kind: "approval", body: "Drop the legacy sessions table? It has 2 rows, both test data.", taskId: "T3" });
+  if (ask.status !== 200) fail("an agent should be able to open a ticket", ask);
+  await api("POST", `/api/runs/${rid}/inbox`, { from: ana.id, itemId: ask.body.id, body: "Backup taken first." });
+  const ap = (await items()).items.find((i) => i.id === ask.body.id);
+  if (ap.kind !== "approval" || ap.task.id !== "T3" || ap.thread.length !== 1) fail("approval ticket with a follow-up", ap);
+  const no = await act(ap, "decline", "Keep it until the migration ships.");
+  if (no.body.status !== "declined" || !(await inboxOf(ana.id)).some((m) => /DECLINED by the human\. Keep it until the migration ships\. Do not do it/.test(m.body))) fail("declining should close it and tell the asker", no.body);
+  const counts = (await items("active")).body ?? (await items("active"));
+  if (counts.open !== 0) fail("nothing should be open now", counts);
+  if ((await act(ap, "comment", "")).status !== 400) fail("an empty comment should be refused");
+}
+
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, the human's inbox (plan approvals, blockers, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves), dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

@@ -4,16 +4,18 @@ import { Office } from "/static/office/office.js";
 import { renderCharts } from "/static/charts.js";
 import { renderTimeline } from "/static/timeline.js";
 import { md, plain } from "/static/md.js";
+import { Inbox, inboxBadge } from "/static/inbox.js";
 
 const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
 const projectId = location.pathname.startsWith("/projects/") ? location.pathname.split("/")[2] : null;
+const inboxPage = location.pathname === "/inbox";
 const COLUMNS = [["todo", "To do"], ["in_progress", "In progress"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done"]];
 let renderedPanel = null;
-let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null;
+let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null, inboxHost = null, inboxView = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-const VIEWS = [["office", "Office"], ["board", "Board"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
+const VIEWS = [["office", "Office"], ["board", "Board"], ["inbox", "Inbox"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
 let view = { graph: "stats" }[store.get(`redpi-view-${runId}`)] || store.get(`redpi-view-${runId}`);
 if (view && !VIEWS.some(([k]) => k === view)) view = null;
 // Auto-play: the view fades through Office, Board, Timeline, Stats and Screenshots (10 s each; ?autoplay_ms= for tests).
@@ -65,7 +67,7 @@ async function loadHome() {
   const active = projects.filter((p) => p.active_runs);
   if (homeFilter !== "all" && homeFilter !== "active") homeFilter = active.length ? "active" : "all";
   const online = projects.flatMap((p) => p.workers.filter((w) => w.alive));
-  const needs = projects.reduce((n, p) => n + p.awaiting_approval + p.workers.filter((w) => w.needsYou).length, 0);
+  const needs = projects.reduce((n, p) => n + (p.inbox_open || 0) + p.workers.filter((w) => w.needsYou).length, 0);
   const done = active.reduce((n, p) => n + p.done, 0), tasks = active.reduce((n, p) => n + p.tasks, 0);
   const focused = document.activeElement?.id === "psearch";
   app.innerHTML = `
@@ -101,7 +103,7 @@ async function loadHome() {
 function projectCard(p) {
   const [label, tone] = projectState(p);
   const live = p.workers.filter((w) => w.alive);
-  const needs = p.awaiting_approval + p.workers.filter((w) => w.needsYou).length;
+  const needs = (p.inbox_open || 0) + p.workers.filter((w) => w.needsYou).length;
   const faces = live.slice(0, 8).map((w) => `<img class="avatar sm ${w.needsYou ? "needs-ring" : ""}" alt="" title="${esc(w.name)} · ${esc(w.role)}${w.needsYou ? " · needs you" : ""}" src="${portraitUrl(w.name, w.role)}">`).join("");
   return `<a class="panel project-card ${p.active_runs ? "on" : ""}" href="/projects/${esc(p.id)}">
     <div class="pc-top"><span class="pc-name">${esc(p.name)}</span><span class="pill ${tone}">${esc(label)}</span></div>
@@ -163,25 +165,16 @@ function ceoLink() {
 }
 
 function needsYou() {
-  const { workers, tasks, messages } = state;
+  const { workers } = state;
   const items = [];
   const ceo = ["done", "cancelled"].includes(state.run.status) ? { ok: true } : ceoLink();
   if (!ceo.ok) items.push({ id: "ceo", level: "red", text: ceo.text });
-  const name = (id) => workers.find((w) => w.id === id)?.name || id;
-  // Only blockers waiting on you; the rest (a teammate, the CEO, something external) the team handles.
-  for (const t of tasks.filter((t) => t.status === "blocked" && t.blocked_on === "human")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
+  // Everything that waits on you is a ticket in the inbox: blockers on you, questions, approvals, alerts the CEO did not fix.
+  const KIND = { blocker: "Blocked", question: "Question", approval: "Approve", alert: "HQ watch" };
+  for (const it of (state.inbox || []).filter((i) => i.status === "open")) items.push({ ticket: it.id, level: it.kind === "question" ? "amber" : "red", text: `${KIND[it.kind] || it.kind}: ${it.title}${it.kind === "blocker" ? ` (${it.askedByName})` : it.kind === "question" ? ` (${it.askedByName})` : ""}`.slice(0, 300) });
   for (const w of workers) {
     if (!w.alive) { if (workerState(w) === "lost") items.push({ id: w.id, level: "amber", text: `${holds(w).map((t) => t.id).join(", ")} has nobody on it: ${w.name}'s session ended. The CEO has been told; resume ${w.name} or hand it on.`, action: "resume" }); }
     else if (w.needs_input) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_input.reason}` });
-    else if (w.needs_human) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_human}` });
-    else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
-  }
-  // HQ watch findings the CEO did not fix in time (a loop, burning tokens, a stalled board, ...).
-  for (const a of (state.alerts || []).filter((a) => a.escalated && !a.resolved)) items.push({ id: a.subject || "ceo", level: "red", text: `HQ watch: ${a.text}`.slice(0, 600) });
-  // Questions addressed to you that you have not answered yet. Only real questions: HQ marks a message as needing a reply when it asks one (or its sender says so);
-  // reports and status updates to you stay on the event board.
-  for (const m of messages.filter((m) => m.recipient === "human" && m.needs_reply && !["system", "aside", "task"].includes(m.kind))) {
-    if (!messages.some((r) => r.id > m.id && r.sender === "human" && r.kind !== "system" && r.recipient === m.sender)) items.push({ id: m.sender, level: "amber", text: `${m.senderName} asked you: ${m.body.slice(0, 140)}` });
   }
   return items.slice(0, 8);
 }
@@ -269,8 +262,9 @@ function buildRun() {
   $("draft").onkeydown = (e) => { if (e.key === "Enter") sendDraft(); };
   // One click handler for every region, since regions are re-rendered in place.
   app.onclick = (e) => {
-    const el = e.target.closest("[data-new-ticket],[data-shot],[data-view],[data-filter],[data-person],[data-task],[data-open]");
+    const el = e.target.closest("[data-new-ticket],[data-shot],[data-view],[data-filter],[data-person],[data-task],[data-open],[data-ticket]");
     if (!el || !app.contains(el)) return;
+    if (el.dataset.ticket) { switchView("inbox", false); inboxView?.select(Number(el.dataset.ticket), { reveal: true }); $("view-body").scrollIntoView?.({ block: "nearest" }); return; }
     if (el.dataset.newTicket) return openTicketForm();
     if (el.dataset.shot) return openShot(el.dataset.shot);
     if (el.dataset.view) { switchView(el.dataset.view, false); scheduleAutoplay(); }
@@ -289,7 +283,10 @@ function applyFilter() {
 
 function updateTabs() {
   app.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : "live project charts";
+  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : view === "inbox" ? "blockers, questions and approvals waiting on you · answer here" : "live project charts";
+  const open = (state?.inbox || []).filter((i) => i.status === "open").length;
+  const tab = app.querySelector('[data-view="inbox"]');
+  if (tab) tab.innerHTML = `Inbox${open ? ` <span class="tab-count">${open}</span>` : ""}`;
 }
 
 function renderRun() {
@@ -304,7 +301,7 @@ function renderRun() {
       <button class="btn primary new-ticket" data-new-ticket="1" title="Add work straight to the board: no plan or approval needed">+ New ticket</button>
       <span class="muted" style="margin-left:auto">updated ${ago(run.updated)}</span>`;
   const needs = needsYou();
-  $("needs-slot").innerHTML = needs.length ? `<div class="needs" role="region" aria-label="Needs you"><span class="needs-title">Needs you</span>${needs.map((n) => `<button class="needs-item ${n.level}" data-open="${esc(n.id || "")}" ${n.action ? `data-action="${n.action}"` : ""} title="${esc(n.text)}">${esc(n.text)}</button>`).join("")}</div>` : "";
+  $("needs-slot").innerHTML = needs.length ? `<div class="needs" role="region" aria-label="Needs you"><span class="needs-title">Needs you</span>${needs.map((n) => `<button class="needs-item ${n.level}" ${n.ticket ? `data-ticket="${n.ticket}"` : `data-open="${esc(n.id || "")}"`} ${n.action ? `data-action="${n.action}"` : ""} title="${esc(n.text)}">${esc(n.text)}</button>`).join("")}</div>` : "";
   $("stats").innerHTML = `
       <div class="panel stat"><div class="v">${done}/${tasks.length || "–"}</div><div class="k">Tasks done</div></div>
       <div class="panel stat"><div class="v">${tasks.filter((t) => t.status === "in_progress").length}</div><div class="k">In progress</div></div>
@@ -342,8 +339,9 @@ function scheduleAutoplay() {
   fill.style.animationPlayState = apHover ? "paused" : "running";
   if (apHover) return;
   apTimer = setTimeout(() => {
-    const i = VIEWS.findIndex(([k]) => k === view);
-    switchView(VIEWS[(i + 1) % VIEWS.length][0], true);
+    // The inbox is for answering, not watching: auto-play passes it by.
+    const cycle = VIEWS.filter(([k]) => k !== "inbox"), i = cycle.findIndex(([k]) => k === view);
+    switchView(cycle[(i + 1) % cycle.length][0], true);
     scheduleAutoplay();
   }, AUTOPLAY_MS);
 }
@@ -373,6 +371,17 @@ function renderView() {
     return;
   }
   office?.setActive(false);
+  if (view === "inbox") {
+    if (!inboxHost) {
+      inboxHost = document.createElement("div");
+      inboxHost.className = "inbox-host";
+      inboxView = new Inbox(inboxHost, { roleOf, onChanged: () => { loadRun(); inboxBadge(); } });
+    }
+    if (inboxHost.parentNode !== body) body.replaceChildren(inboxHost);
+    body.dataset.view = "inbox";
+    inboxView.update(state.inbox || []);
+    return;
+  }
   // Board, Timeline, Stats and Screenshots scroll inside the view; each keeps its own place.
   const top = body.dataset.view === view ? body.scrollTop : viewScroll[view] || 0;
   body.dataset.view = view;
@@ -925,7 +934,25 @@ async function renderTask(root, taskId) {
 function closePanel() { openPanel = null; renderedPanel = null; document.getElementById("drawer-root").innerHTML = ""; }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openPanel) closePanel(); });
 
-const refresh = () => (runId ? loadRun() : projectId ? loadProject() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
+const refresh = () => { inboxBadge(); return (runId ? loadRun() : projectId ? loadProject() : inboxPage ? loadInboxPage() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }); };
+
+// /inbox: every ticket waiting on you, across all projects.
+let pageInbox = null;
+async function loadInboxPage() {
+  const { items } = await api("GET", "/api/inbox?status=all&thread=1");
+  document.title = `Inbox${items.some((i) => i.status === "open") ? ` (${items.filter((i) => i.status === "open").length})` : ""} · RedPi HQ`;
+  document.getElementById("crumbs").textContent = "Your inbox: everything waiting on you, in every project";
+  if (!pageInbox) {
+    app.classList.add("inbox-page");
+    app.innerHTML = "";
+    pageInbox = new Inbox(app, { showRun: true, onChanged: () => { loadInboxPage(); inboxBadge(); } });
+    const want = Number((location.hash.match(/^#ticket-(\d+)$/) || [])[1]);
+    pageInbox.update(items);
+    if (want) pageInbox.select(want, { reveal: true });
+    return;
+  }
+  pageInbox.update(items);
+}
 refresh();
 live(runId, refresh);
 signedInAs();

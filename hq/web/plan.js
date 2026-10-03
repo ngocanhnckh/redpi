@@ -2,6 +2,7 @@ import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
 import { mountPanZoom, panZoomFrame } from "/static/panzoom.js";
 import { drawFlows, flowsView, wrapText } from "/static/flows.js";
+import { inboxBadge } from "/static/inbox.js";
 
 const planId = location.pathname.split("/")[2];
 const app = document.getElementById("app");
@@ -548,5 +549,6 @@ const cardCommentButton = (anchor, label, text = "💬") => `<button class="btn 
 function trim(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 function safeUrl(u) { return /^https?:\/\//i.test(u) ? u : "#"; }
 
-load().then(() => data && live(data.runId, load));
+load().then(() => data && live(data.runId, () => { load(); inboxBadge(); }));
 signedInAs();
+inboxBadge();

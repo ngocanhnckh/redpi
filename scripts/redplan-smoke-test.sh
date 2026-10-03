@@ -68,7 +68,8 @@ SCRIPTS = {
   "Peter": [
     # The kill guard: a worker trying to end a tmux session is blocked (a session name that does not exist, so a miss is harmless).
     ("message from Alex", [("bash", {"command": "tmux kill-session -t '=redplan-guard-probe-none'"}),
-                           ("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."})]),
+                           ("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."}),
+                           ("redplan_ask_human", {"question": "Should the CLI print colors by default?", "kind": "approval", "taskId": "T2"})]),
   ],
 }
 
@@ -265,6 +266,8 @@ try:
     wait("CEO received Peter's report", lambda: any(i == "CEO" and "message from Peter" in u for i, u, _ in requests))
     if not any(i == "Peter" and "Blocked by RedPlan: this command would kill agent sessions" in t for i, t in tool_texts):
         raise SystemExit("a worker's tmux kill-session should be blocked by the RedPlan guard")
+    wait("Peter's question in the human's inbox", lambda: any(i["kind"] == "approval" and i["askedByName"] == "Peter" and i["task"]["id"] == "T2" and i["title"] == "Should the CLI print colors by default?"
+                                                              for i in hq("GET", f"/api/inbox?run={run['id']}&status=all")["items"]), 30)
     # Peter started after Alex, so Peter's prompt must name Alex as a teammate with his task.
     peter_sys = [s for i, u, s in requests if i == "Peter"][-1]
     if "You are Peter, full-stack developer" not in peter_sys or "Alex (backend developer)" not in peter_sys or "T2 CLI client" not in peter_sys:

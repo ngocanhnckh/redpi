@@ -209,7 +209,7 @@ const lay = await page.evaluate(() => {
   const t = document.querySelector(".team-panel").getBoundingClientRect();
   return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, oldSections: !!document.querySelector(".charts-section, #graph-host"), tabs: [...document.querySelectorAll("[role=tab][data-view]")].map((b) => b.dataset.view).join(","), overflow: document.documentElement.scrollWidth > innerWidth };
 });
-if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
+if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,inbox,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
 
 // The page never jumps on live updates: scrolled down with a half-typed message, updates
 // arrive (heartbeats, a new message), and the scroll position, focus and text stay.
@@ -447,12 +447,15 @@ await page.goto(`${base}/runs/${run2}`);
 await page.waitForSelector('[data-view="stats"]');
 await page.click('[data-view="stats"]');
 await page.waitForSelector("#view-body .chart");
-// A blocker is readable in full: the Needs you item opens the person with the whole reason at the
-// top of their chat, and "Reply about T4" starts your answer.
-if (await page.locator(".needs-item", { hasText: "T3 blocked" }).count()) await fail("a blocker waiting on a teammate should not be under Needs you");
-const item = page.locator(".needs-item", { hasText: "T4 blocked" });
-if (!/END-OF-BLOCKER/.test(await item.getAttribute("title"))) await fail("the Needs you item should carry the full blocker as its tooltip");
+// A blocker is readable in full: the Needs you item opens its inbox ticket with the whole reason, and in
+// the person's chat the whole reason sits at the top, where "Reply about T4" starts your answer.
+if (await page.locator(".needs-item", { hasText: "Blocked: T3" }).count()) await fail("a blocker waiting on a teammate should not be under Needs you");
+const item = page.locator(".needs-item", { hasText: "Blocked: T4" });
 await item.click();
+await page.waitForSelector(".ib-detail.has .ib-body");
+if (!/END-OF-BLOCKER/.test(await page.textContent(".ib-detail .ib-body"))) await fail("the blocker's ticket should hold the full reason");
+await page.click('[data-view="stats"]');
+await page.click(`.member[data-person="${lee}"]`);
 await page.waitForSelector('.drawer[aria-label="Lee"] .block-card');
 const card = await page.evaluate(() => { const n = document.querySelector(".drawer .block-note"), r = n.getBoundingClientRect(); return { text: n.textContent, clipped: n.scrollHeight > n.clientHeight + 1 && getComputedStyle(n).overflowY !== "auto", visible: r.height > 40 && r.top >= 0 }; });
 if (!/END-OF-BLOCKER/.test(card.text) || card.clipped || !card.visible) await fail("the full blocker should be readable in Lee's chat", card);
@@ -578,10 +581,10 @@ await qp.waitForSelector("#needs-slot", { state: "attached" });
 // A worker's status report to you is not a question; a question is.
 await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Human: T1 is pushed and back in review, all five findings fixed." });
 await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Should refunds be full-amount only for now?" });
-await qp.waitForFunction(() => /Alex asked you: Should refunds/.test(document.getElementById("needs-slot").textContent));
-if (/Alex asked you: Human: T1 is pushed/.test(await qp.textContent("#needs-slot"))) await fail("a status report should not show as a question in Needs you");
+await qp.waitForFunction(() => /Question: Should refunds be full-amount only for now\? \(Alex\)/.test(document.getElementById("needs-slot").textContent));
+if (/Human: T1 is pushed/.test(await qp.textContent("#needs-slot"))) await fail("a status report should not show as a question in Needs you");
 await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: ids.Alex, body: "Yes, full amount only." });
-await qp.waitForFunction(() => !/Alex asked you/.test(document.getElementById("needs-slot").textContent)).catch(() => fail("answering a question should clear it from Needs you"));
+await qp.waitForFunction(() => !/Should refunds/.test(document.getElementById("needs-slot").textContent)).catch(() => fail("answering a question should clear it from Needs you"));
 await browser.close();
 console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO, token use charts, a Screenshots tab with a lightbox, markdown on the event board, tickets from the run page (urgent first, attachments, panel, timeline).");
 process.exit(0);

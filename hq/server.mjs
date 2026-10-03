@@ -139,6 +139,13 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
     subject TEXT, text TEXT NOT NULL, created INTEGER NOT NULL, seen INTEGER NOT NULL, escalated INTEGER, resolved INTEGER);
   CREATE INDEX IF NOT EXISTS alerts_run ON alerts (run_id, key);
+  CREATE TABLE IF NOT EXISTS human_items (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, key TEXT, kind TEXT NOT NULL, status TEXT NOT NULL,
+    title TEXT NOT NULL, body TEXT, asked_by TEXT NOT NULL, task_id TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL,
+    closed INTEGER, closed_by TEXT, resolution TEXT);
+  CREATE INDEX IF NOT EXISTS human_items_run ON human_items (run_id, key);
+  CREATE INDEX IF NOT EXISTS human_items_status ON human_items (status, updated);
+  CREATE TABLE IF NOT EXISTS human_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS human_comments_item ON human_comments (item_id);
 `);
 
 // Columns added after the first release: ALTER only when missing, so existing hubs upgrade in place.
@@ -273,7 +280,9 @@ function runView(runId) {
   const attachments = all("SELECT id, task_id, name, mime, bytes, created FROM attachments WHERE run_id = ? ORDER BY created", runId);
   const alerts = all("SELECT * FROM alerts WHERE run_id = ? AND (resolved IS NULL OR resolved > ?) ORDER BY id DESC LIMIT 50", runId, now() - 24 * 3600_000);
   const taskTokens = Object.fromEntries(all("SELECT task_id AS id, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id IS NOT NULL GROUP BY task_id", runId).map((x) => [x.id, x.n]));
-  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, taskTokens, now: now() };
+  // The human's tickets for this run: everything still open, and what closed in the last week, each with its thread.
+  const inbox = all("SELECT * FROM human_items WHERE run_id = ? AND (closed IS NULL OR closed > ?) ORDER BY updated DESC LIMIT 150", runId, now() - 7 * 86400_000).map((it) => itemView(it, true));
+  return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, taskTokens, inbox, now: now() };
 }
 
 function workerView(w) {
@@ -327,6 +336,119 @@ function routeBlocker(runId, task, actor, blockedOn, note) {
 // Blockers recorded before blocked_on existed get the same routing (so they leave Needs you unless they ask you).
 for (const t of all("SELECT * FROM tasks WHERE status = 'blocked' AND blocked_on IS NULL")) {
   try { run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", whoMustAct(t.run_id, t, null, t.note), t.run_id, t.id); } catch {}
+}
+
+// ---------- the human's inbox: everything that waits on a person, as tickets with a status and a thread ----------
+// kind: question (an agent asks you), approval (an agent wants a yes or no; a plan waiting for approval),
+// blocker (a task blocked on you), alert (an HQ watch finding the CEO did not fix in time, or a parked worker).
+// status: open (waiting on you), waiting (you answered; waiting on the agent), approved, declined, resolved (closed).
+const INBOX_KINDS = ["question", "approval", "blocker", "alert"];
+const INBOX_CLOSED = ["approved", "declined", "resolved"];
+function backfillInbox() {
+  const openHumanItemOnce = (runId, it) => { if (!one("SELECT id FROM human_items WHERE run_id = ? AND key = ?", runId, it.key)) openHumanItem(runId, it); };
+  const active = "SELECT id FROM runs WHERE status IN ('planning', 'awaiting_approval', 'approved', 'executing')";
+  for (const t of all(`SELECT * FROM tasks WHERE status = 'blocked' AND blocked_on = 'human' AND run_id IN (${active})`))
+    openHumanItemOnce(t.run_id, { kind: "blocker", key: `blocker:${t.id}`, askedBy: t.worker_id || "ceo", taskId: t.id, title: `${t.id} ${t.title}`, body: t.note || "" });
+  for (const pl of all(`SELECT * FROM plans WHERE status = 'pending' AND run_id IN (${active})`)) {
+    const plan = JSON.parse(pl.json);
+    openHumanItemOnce(pl.run_id, { kind: "approval", key: `plan:${pl.id}`, askedBy: "ceo", title: `Approve plan v${pl.version}: ${plan.title || "untitled"}`, body: `${plan.summary || ""}\n\nApprove here, or open the plan to read it in full and comment on any part of it.` });
+  }
+  for (const a of all(`SELECT * FROM alerts WHERE escalated IS NOT NULL AND resolved IS NULL AND run_id IN (${active})`))
+    openHumanItemOnce(a.run_id, { kind: "alert", key: `alert:${a.id}`, askedBy: "hq", title: firstLine(a.text), body: a.text });
+}
+function humanItem(id) { return one("SELECT * FROM human_items WHERE id = ?", id); }
+function humanComment(item, author, body) {
+  run("INSERT INTO human_comments (item_id, author, body, created) VALUES (?, ?, ?, ?)", item.id, author, String(body).slice(0, 20000), now());
+  run("UPDATE human_items SET updated = ? WHERE id = ?", now(), item.id);
+}
+function setItemStatus(item, status, by, resolution) {
+  const closed = INBOX_CLOSED.includes(status);
+  run("UPDATE human_items SET status = ?, updated = ?, closed = ?, closed_by = ?, resolution = ? WHERE id = ?",
+    status, now(), closed ? now() : null, closed ? by || null : null, closed ? resolution || null : null, item.id);
+  notify(item.run_id, "inbox");
+}
+// One ticket per key (a task's blocker, an alert, a plan): asked again, the same ticket reopens with the new
+// text in its thread, so the whole history of that blocker stays in one place.
+function openHumanItem(runId, { kind, title, body = "", askedBy, taskId = null, key = null }) {
+  const ex = key ? one("SELECT * FROM human_items WHERE run_id = ? AND key = ?", runId, key) : null;
+  if (ex) {
+    if (ex.status !== "open" || ex.body !== body) {
+      if (body && body !== ex.body) humanComment(ex, askedBy, body);
+      setItemStatus(ex, "open");
+    }
+    return ex.id;
+  }
+  const r = run("INSERT INTO human_items (run_id, key, kind, status, title, body, asked_by, task_id, created, updated) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+    runId, key, kind, String(title).slice(0, 200), String(body).slice(0, 20000), askedBy, taskId, now(), now());
+  notify(runId, "inbox");
+  return Number(r.lastInsertRowid);
+}
+function closeHumanItem(runId, key, status, by, resolution) {
+  const it = one("SELECT * FROM human_items WHERE run_id = ? AND key = ?", runId, key);
+  if (it && !INBOX_CLOSED.includes(it.status)) setItemStatus(it, status, by, resolution);
+}
+const firstLine = (text) => { const l = String(text || "").trim().split("\n")[0]; return l.length > 140 ? `${l.slice(0, 137)}…` : l; };
+// Who the human's answer goes to: the task's owner for a blocker, the CEO for alerts and plans, else whoever asked.
+function itemTarget(item) {
+  if (item.kind === "blocker" && item.task_id) return one("SELECT worker_id FROM tasks WHERE run_id = ? AND id = ?", item.run_id, item.task_id)?.worker_id || "ceo";
+  return item.asked_by === "hq" || item.asked_by === "human" ? "ceo" : item.asked_by;
+}
+const itemRef = (item) => `[Inbox #${item.id} · ${item.kind}${item.task_id ? ` ${item.task_id}` : ""}: ${item.title}]`;
+// An agent writing to the human: a follow-up on a ticket the human answered goes into that ticket's thread
+// (a question reopens it; an answer to a question closes it); a new question becomes a new ticket.
+function inboxFromMessage(runId, from, body, needsReply, msgId, kind) {
+  if (from === "human" || from === "hq") return;
+  const last = one(`SELECT * FROM human_items WHERE run_id = ? AND asked_by = ? AND status = 'waiting' AND updated > ? ORDER BY updated DESC LIMIT 1`, runId, from, now() - 6 * 3600_000)
+    || (from === "ceo" ? one(`SELECT * FROM human_items WHERE run_id = ? AND kind IN ('alert', 'approval') AND asked_by IN ('hq', 'ceo') AND status = 'waiting' AND updated > ? ORDER BY updated DESC LIMIT 1`, runId, now() - 6 * 3600_000) : null);
+  if (last) {
+    humanComment(last, from, body);
+    if (needsReply) setItemStatus(last, "open");
+    else if (kind === "quick") notify(runId, "inbox");   // the instant answer; the full one follows
+    else if (last.kind === "question") setItemStatus(last, "resolved", from, "Answered");
+    else notify(runId, "inbox");
+    return;
+  }
+  if (needsReply) openHumanItem(runId, { kind: "question", title: firstLine(body), body, askedBy: from, key: `msg:${msgId}` });
+}
+// The human writing straight to an agent (chat, not the inbox) answers that agent's open questions.
+function inboxFromHuman(runId, to, body) {
+  for (const it of all("SELECT * FROM human_items WHERE run_id = ? AND asked_by = ? AND kind = 'question' AND status = 'open'", runId, to)) {
+    humanComment(it, "human", body);
+    setItemStatus(it, "waiting");
+  }
+}
+const HARNESS_NOTE = (byHarness) => `\n\nHarness per task (the coding agent each task must run on): ${Object.entries(byHarness).map(([h, ids]) => `${HARNESSES[h].name}: ${ids.join(", ")}`).join("; ")}. A worker runs on one harness: give each worker only tasks of one harness and pass that harness to redplan_spawn_worker.`;
+const APPROVED_TEXT = (row, comment, drafts, notes, harnessNote) => `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""}${drafts.length ? `${notes}\n\nKeep these notes in mind while executing (put them in the relevant workers' briefs).` : ""}${harnessNote} Start execution: form the team and spawn workers.`;
+const CHANGES_TEXT = (row, comment, notes) => `Plan v${row.version}: CHANGES REQUESTED.${comment ? `\nOverall: ${comment}` : ""}${notes}\n\nRevise the plan and submit a new version with redplan_submit_plan. Address every numbered comment and say how in the plan's "changes" list (one line per comment, starting with its number, e.g. "#1 …"). If a comment is a question, answer it there too; if a comment is unclear, ask the human here before resubmitting.`;
+function decidePlan(planId, approve, comment) {
+  const row = one("SELECT * FROM plans WHERE id = ?", planId);
+  if (!row) throw httpError(404, "no such plan");
+  if (row.status !== "pending") throw httpError(409, `plan is already ${row.status}`);
+  comment = comment ? String(comment).trim().slice(0, 20000) || null : null;
+  const drafts = planComments(planId).filter((c) => c.status === "draft");
+  if (!approve && !comment && !drafts.length) throw httpError(400, "say what should change: add comments on the plan or an overall comment");
+  run("UPDATE plans SET status = ?, comment = ?, decided = ? WHERE id = ?", approve ? "approved" : "changes_requested", comment, now(), planId);
+  drafts.forEach((c, i) => run("UPDATE plan_comments SET status = 'sent', n = ?, sent = ? WHERE id = ?", i + 1, now(), c.id));
+  let harnessNote = "";
+  if (approve) {
+    const plan = JSON.parse(row.json);
+    const choices = harnessChoices(row.run_id);
+    const byHarness = {};
+    for (const story of plan.stories || []) for (const t of story.tasks || []) {
+      const h = taskHarness(choices, t);
+      (byHarness[h] ||= []).push(t.id);
+      run("INSERT OR REPLACE INTO tasks (run_id, id, story_id, title, status, worker_id, note, updated, harness) VALUES (?, ?, ?, ?, 'todo', NULL, NULL, ?, ?)", row.run_id, t.id, story.id, t.title, now(), h);
+    }
+    if (Object.keys(byHarness).some((h) => h !== DEFAULT_HARNESS)) {
+      harnessNote = HARNESS_NOTE(byHarness);
+    }
+  }
+  touchRun(row.run_id, approve ? "approved" : "planning");
+  const notes = drafts.length ? `\n\nComments from the plan page (${drafts.length}), each pointing at a place in plan v${row.version}:\n${feedbackText(drafts)}` : "";
+  addMessage(row.run_id, "human", "ceo", "decision", approve ? APPROVED_TEXT(row, comment, drafts, notes, harnessNote) : CHANGES_TEXT(row, comment, notes));
+  closeHumanItem(row.run_id, `plan:${row.id}`, approve ? "approved" : "declined", "human", approve ? `Approved${comment ? `: ${comment}` : ""}` : `Changes requested${comment ? `: ${comment}` : ""}`);
+  notify(row.run_id, "plan");
+  return planView(one("SELECT * FROM plans WHERE id = ?", planId));
 }
 
 // Token use per model call, from worker heartbeats and the CEO's events.
@@ -602,10 +724,11 @@ function watchRun(r) {
     if (!a.escalated && t - a.created >= ALERT_ESCALATE_MS) {
       run("UPDATE alerts SET escalated = ? WHERE id = ?", t, a.id);
       addMessage(r.id, "hq", "human", "system", `HQ watch: ${f.text} The CEO was told ${mins(t - a.created)} ago and it is still happening.`);
+      openHumanItem(r.id, { kind: "alert", key: `alert:${a.id}`, askedBy: "hq", taskId: null, title: firstLine(f.text), body: `${f.text}\n\nThe CEO was told ${mins(t - a.created)} ago and it is still happening. Comment here to tell the CEO what to do; it closes itself when the problem stops.` });
       addMessage(r.id, "human", "ceo", "system", `HQ watch, still happening after ${mins(t - a.created)} (the human has been told): ${f.text}`);
     }
   }
-  for (const a of openAlerts) if (!found.some((f) => f.key === a.key)) run("UPDATE alerts SET resolved = ? WHERE id = ?", t, a.id);
+  for (const a of openAlerts) if (!found.some((f) => f.key === a.key)) { run("UPDATE alerts SET resolved = ? WHERE id = ?", t, a.id); closeHumanItem(r.id, `alert:${a.id}`, "resolved", "hq", "The problem stopped"); }
   if (found.length || openAlerts.length) notify(r.id, "alert");
 }
 
@@ -737,6 +860,7 @@ function sweepParked() {
     else if (level === 3) {
       run("UPDATE workers SET needs_human = ? WHERE id = ?", `Idle ~${mins} min on ${tasks}; nudges to the worker and the CEO did not help.`, w.id);
       addMessage(w.run_id, w.id, "human", "system", `${w.name} needs you: idle ~${mins} min on ${tasks} after nudging the worker and the CEO.`);
+      openHumanItem(w.run_id, { kind: "alert", key: `parked:${w.id}`, askedBy: w.id, title: `${w.name} is stuck on ${tasks}`, body: `${w.name} has been idle ~${mins} min while owning ${tasks}. HQ nudged them, then the CEO; neither helped. Comment here to tell ${w.name} what to do, or open their terminal.` });
     } else continue;
     // Stamp without touching updated: the ladder keeps counting from the last real activity.
     run("UPDATE workers SET parked_level = ?, parked_at = ? WHERE id = ?", level, now(), w.id);
@@ -813,13 +937,14 @@ route("GET", "/api/projects", () => all(`SELECT p.*,
     (SELECT COUNT(*) FROM plans pl JOIN runs r ON r.id = pl.run_id WHERE r.project_id = p.id AND pl.status = 'pending') AS awaiting_approval,
     (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE}) AS tasks,
     (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE} AND t.status = 'done') AS done,
-    (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE} AND t.status = 'blocked') AS blocked
+    (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.id = t.run_id WHERE r.project_id = p.id AND r.status IN ${ACTIVE} AND t.status = 'blocked') AS blocked,
+    (SELECT COUNT(*) FROM human_items h JOIN runs r ON r.id = h.run_id WHERE r.project_id = p.id AND h.status = 'open') AS inbox_open
   FROM projects p ORDER BY active_runs > 0 DESC, updated DESC`).map((p) => {
   const workers = all(`SELECT w.id, w.name, w.role, w.status, w.alive, w.needs_human, w.needs_input, w.parked_level, w.run_id FROM workers w
     JOIN runs r ON r.id = w.run_id WHERE r.project_id = ? AND r.status IN ${ACTIVE} AND w.status != 'finished' ORDER BY w.created`, p.id);
   const latest = one("SELECT id, title, status, updated FROM runs WHERE project_id = ? ORDER BY (status IN " + ACTIVE + ") DESC, updated DESC LIMIT 1", p.id);
   return { ...p, latest, workers: workers.map((w) => ({ id: w.id, name: w.name, role: w.role, status: w.status, alive: !!w.alive,
-    needsYou: !!(w.needs_human || w.needs_input || w.parked_level > 0), runId: w.run_id })) };
+    needsYou: !!w.needs_input, runId: w.run_id })) };
 }));
 
 route("GET", "/api/projects/:id", (_b, p) => {
@@ -864,6 +989,10 @@ route("POST", "/api/runs/:id/plans", (b, p) => {
   const id = shortId("pln");
   run("INSERT INTO plans (id, run_id, version, json, schedule, warnings, status, created) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
     id, p.id, version, JSON.stringify(b.plan), JSON.stringify(schedule), JSON.stringify(warnings), now());
+  for (const old of all("SELECT id FROM plans WHERE run_id = ? AND status = 'superseded'", p.id)) closeHumanItem(p.id, `plan:${old.id}`, "resolved", "ceo", "Replaced by a newer version");
+  const stories = (b.plan.stories || []).length, ntasks = (b.plan.stories || []).reduce((n, st) => n + (st.tasks || []).length, 0);
+  openHumanItem(p.id, { kind: "approval", key: `plan:${id}`, askedBy: "ceo", title: `Approve plan v${version}: ${b.plan.title || "untitled"}`,
+    body: `${b.plan.summary || ""}\n\n${stories} ${stories === 1 ? "story" : "stories"}, ${ntasks} ${ntasks === 1 ? "task" : "tasks"}. Approve here, or open the plan to read it in full and comment on any part of it.` });
   touchRun(p.id, "awaiting_approval");
   notify(p.id, "plan");
   return planView(one("SELECT * FROM plans WHERE id = ?", id));
@@ -979,37 +1108,9 @@ route("DELETE", "/api/plans/:id/comments/:cid", (_b, p) => {
 });
 
 route("POST", "/api/plans/:id/decision", (b, p) => {
-  const row = one("SELECT * FROM plans WHERE id = ?", p.id);
-  if (!row) return notFound();
-  if (row.status !== "pending") throw httpError(409, `plan is already ${row.status}`);
-  const approve = b.decision === "approve";
-  if (!approve && b.decision !== "changes") throw httpError(400, "decision must be approve or changes");
-  const comment = b.comment ? String(b.comment).trim().slice(0, 20000) || null : null;
-  const drafts = planComments(p.id).filter((c) => c.status === "draft");
-  if (!approve && !comment && !drafts.length) throw httpError(400, "say what should change: add comments on the plan or an overall comment");
-  run("UPDATE plans SET status = ?, comment = ?, decided = ? WHERE id = ?", approve ? "approved" : "changes_requested", comment, now(), p.id);
-  drafts.forEach((c, i) => run("UPDATE plan_comments SET status = 'sent', n = ?, sent = ? WHERE id = ?", i + 1, now(), c.id));
-  let harnessNote = "";
-  if (approve) {
-    const plan = JSON.parse(row.json);
-    const choices = harnessChoices(row.run_id);
-    const byHarness = {};
-    for (const story of plan.stories || []) for (const t of story.tasks || []) {
-      const h = taskHarness(choices, t);
-      (byHarness[h] ||= []).push(t.id);
-      run("INSERT OR REPLACE INTO tasks (run_id, id, story_id, title, status, worker_id, note, updated, harness) VALUES (?, ?, ?, ?, 'todo', NULL, NULL, ?, ?)", row.run_id, t.id, story.id, t.title, now(), h);
-    }
-    if (Object.keys(byHarness).some((h) => h !== DEFAULT_HARNESS)) {
-      harnessNote = `\n\nHarness per task (the coding agent each task must run on): ${Object.entries(byHarness).map(([h, ids]) => `${HARNESSES[h].name}: ${ids.join(", ")}`).join("; ")}. A worker runs on one harness: give each worker only tasks of one harness and pass that harness to redplan_spawn_worker.`;
-    }
-  }
-  touchRun(row.run_id, approve ? "approved" : "planning");
-  const notes = drafts.length ? `\n\nComments from the plan page (${drafts.length}), each pointing at a place in plan v${row.version}:\n${feedbackText(drafts)}` : "";
-  addMessage(row.run_id, "human", "ceo", "decision", approve
-    ? `Plan v${row.version} APPROVED.${comment ? ` Comment: ${comment}` : ""}${drafts.length ? `${notes}\n\nKeep these notes in mind while executing (put them in the relevant workers' briefs).` : ""}${harnessNote} Start execution: form the team and spawn workers.`
-    : `Plan v${row.version}: CHANGES REQUESTED.${comment ? `\nOverall: ${comment}` : ""}${notes}\n\nRevise the plan and submit a new version with redplan_submit_plan. Address every numbered comment and say how in the plan's "changes" list (one line per comment, starting with its number, e.g. "#1 …"). If a comment is a question, answer it there too; if a comment is unclear, ask the human here before resubmitting.`);
-  notify(row.run_id, "plan");
-  return planView(one("SELECT * FROM plans WHERE id = ?", p.id));
+  if (!one("SELECT id FROM plans WHERE id = ?", p.id)) return notFound();
+  if (b.decision !== "approve" && b.decision !== "changes") throw httpError(400, "decision must be approve or changes");
+  return decidePlan(p.id, b.decision === "approve", b.comment);
 });
 
 route("POST", "/api/runs/:id/workers", (b, p) => {
@@ -1078,6 +1179,7 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   if (b.launchId && w.launch_id && b.launchId !== w.launch_id) return { ok: false, stale: true, stop: `A newer launch of ${w.name} replaced this process.` };
   const ending = b.status === "stopped";
   if (!ending && !w.alive) setAlive(w, 1);
+  if (w.needs_human) closeHumanItem(w.run_id, `parked:${w.id}`, "resolved", w.id, `${w.name} is active again`);
   run(`UPDATE workers SET status = COALESCE(?, status), current_task = COALESCE(?, current_task), last_message = COALESCE(?, last_message), activity = COALESCE(?, activity),
     session_file = COALESCE(?, session_file), context = COALESCE(?, context), parked_level = 0, parked_at = NULL, needs_human = NULL, updated = ? WHERE id = ?`,
     b.status ?? null, b.currentTask ?? null, b.lastMessage != null ? String(b.lastMessage).slice(0, 8000) : null, b.activity ? JSON.stringify(b.activity) : null,
@@ -1120,7 +1222,8 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
     if (!target) throw httpError(400, `no worker ${b.assignTo} in this run`);
     if (t.worker_id && t.worker_id !== target.id && actor !== "ceo" && actor !== "human") throw httpError(409, `${p.task} belongs to ${participantName(p.id, t.worker_id)}: hand it off instead (handoffTo, with a note)`);
     if (!note) throw httpError(400, "assigning needs a note: the brief (what to do, acceptance criteria, how to verify)");
-    run("UPDATE tasks SET worker_id = ?, status = CASE WHEN status = 'done' THEN status ELSE 'todo' END, updated = ? WHERE run_id = ? AND id = ?", target.id, now(), p.id, p.task);
+    run("UPDATE tasks SET worker_id = ?, status = CASE WHEN status = 'done' THEN status ELSE 'todo' END, blocked_on = NULL, updated = ? WHERE run_id = ? AND id = ?", target.id, now(), p.id, p.task);
+    closeHumanItem(p.id, `blocker:${p.task}`, "resolved", actor, `Reassigned to ${target.name}`);
     run("UPDATE workers SET stop_requested = NULL, stop_at = NULL WHERE id = ?", target.id);
     recordTransition(p.id, p.task, t.status, t.status === "done" ? "done" : "todo", actor, `Assigned to ${target.name}`, target.id);
     addMessage(p.id, actor, target.id, "brief", `${ticketText(p.id, one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", p.id, p.task), "You now own")}\n\nBrief: ${note}\n\nStart now${t.priority === "urgent" ? " (URGENT: put it before anything else)" : ""}: move it to in_progress, do it, verify it, then move it to review with how you verified it.`, true);
@@ -1136,10 +1239,11 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
     if (!note) throw httpError(400, "a handoff needs a note: what is done and what the new owner should do next");
     db.exec("BEGIN");
     try {
-      run("UPDATE tasks SET worker_id = ?, status = 'todo', note = ?, updated = ? WHERE run_id = ? AND id = ?", target.id, note, now(), p.id, p.task);
+      run("UPDATE tasks SET worker_id = ?, status = 'todo', note = ?, blocked_on = NULL, updated = ? WHERE run_id = ? AND id = ?", target.id, note, now(), p.id, p.task);
       recordTransition(p.id, p.task, t.status, "todo", actor, note, target.id);
       db.exec("COMMIT");
     } catch (e) { db.exec("ROLLBACK"); throw e; }
+    closeHumanItem(p.id, `blocker:${p.task}`, "resolved", actor, `Handed to ${target.name}`);
     addMessage(p.id, actor, target.id, "chat", `Handing ${p.task} (${t.title}) to you. ${note}`);
     addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: handed off to ${target.name} (${note})`);
     notify(p.id, "task");
@@ -1180,6 +1284,9 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   }
   if (b.status) run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", blockedOn, p.id, p.task);
   if (b.status === "blocked" && (b.status !== t.status || blockedOn !== t.blocked_on)) routeBlocker(p.id, t, actor, blockedOn, note);
+  // A blocker on the human is a ticket in their inbox; it closes itself when the task moves on.
+  if (b.status === "blocked" && blockedOn === "human") openHumanItem(p.id, { kind: "blocker", key: `blocker:${p.task}`, askedBy: t.worker_id || actor, taskId: p.task, title: `${p.task} ${t.title}`, body: note });
+  else if (b.status) closeHumanItem(p.id, `blocker:${p.task}`, "resolved", actor, b.status === "blocked" ? `Now waiting on ${participantName(p.id, blockedOn)}` : `Moved to ${b.status.replace("_", " ")}${note ? `: ${note}` : ""}`);
   if (b.status && b.status !== t.status) {
     recordTransition(p.id, p.task, t.status, b.status, actor, note, b.status === "blocked" ? blockedOn : null);
     addMessage(p.id, actor, "all", "task", `${p.task} ${t.title}: ${t.status} → ${b.status}${note ? ` (${note})` : ""}`);
@@ -1286,6 +1393,8 @@ route("POST", "/api/runs/:id/messages", (b, p) => {
     if (n >= PAIR_WARN) warning = `You and ${other} have exchanged ${n} messages in the last hour. Wrap up: settle it in this message, or ask the CEO to decide. Do not reply to acknowledgements.`;
   }
   const id = addMessage(p.id, from, to, kind, body, needsReply);
+  if (to === "human" && ["chat", "reply", "quick"].includes(kind)) inboxFromMessage(p.id, from, body, needsReply && kind !== "quick", id, kind);
+  else if (from === "human" && to !== "all" && ["chat", "command"].includes(kind)) inboxFromHuman(p.id, to, body);
   return warning ? { id, warning } : { id };
 });
 
@@ -1295,6 +1404,90 @@ route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
   if (!who) throw httpError(400, "for is required");
   return all(`SELECT * FROM messages WHERE run_id = ? AND id > ? AND sender != ? AND (recipient = ? OR recipient = 'all') AND kind != 'task' ORDER BY id LIMIT 100`, p.id, after, who, who)
     .map((m) => ({ ...m, senderName: participantName(p.id, m.sender) }));
+});
+
+// ---------- the human's inbox ----------
+function itemView(it, withComments = false) {
+  const r = one("SELECT r.title, r.project_id, p.name AS project FROM runs r JOIN projects p ON p.id = r.project_id WHERE r.id = ?", it.run_id) || {};
+  const task = it.task_id ? one("SELECT id, title, status, worker_id FROM tasks WHERE run_id = ? AND id = ?", it.run_id, it.task_id) : null;
+  const n = one("SELECT COUNT(*) AS n, MAX(created) AS last FROM human_comments WHERE item_id = ?", it.id);
+  const target = itemTarget(it);
+  const view = { ...it, askedByName: participantName(it.run_id, it.asked_by), target, targetName: participantName(it.run_id, target), runTitle: r.title, projectId: r.project_id, project: r.project,
+    task, comments: n.n, lastComment: n.last, closedByName: it.closed_by ? participantName(it.run_id, it.closed_by) : null };
+  if (withComments) view.thread = all("SELECT * FROM human_comments WHERE item_id = ? ORDER BY id", it.id).map((c) => ({ ...c, authorName: participantName(it.run_id, c.author) }));
+  return view;
+}
+const INBOX_FILTER = { open: "status = 'open'", waiting: "status = 'waiting'", active: "status IN ('open', 'waiting')", closed: "status IN ('approved', 'declined', 'resolved')", all: "1 = 1" };
+route("GET", "/api/inbox", (_b, _p, _res, url) => {
+  const where = INBOX_FILTER[url.searchParams.get("status") || "active"] || INBOX_FILTER.active;
+  const runId = url.searchParams.get("run");
+  if (url.searchParams.get("count") === "1") { const c = one("SELECT SUM(status = 'open') AS open, SUM(status = 'waiting') AS waiting FROM human_items"); return { open: c.open || 0, waiting: c.waiting || 0 }; }
+  const rows = all(`SELECT * FROM human_items WHERE ${where} ${runId ? "AND run_id = ?" : ""} ORDER BY status = 'open' DESC, updated DESC LIMIT 300`, ...(runId ? [runId] : []));
+  const counts = one(`SELECT SUM(status = 'open') AS open, SUM(status = 'waiting') AS waiting FROM human_items ${runId ? "WHERE run_id = ?" : ""}`, ...(runId ? [runId] : []));
+  return { items: rows.map((it) => itemView(it, url.searchParams.get("thread") === "1")), open: counts.open || 0, waiting: counts.waiting || 0 };
+});
+route("GET", "/api/inbox/:id", (_b, p) => { const it = humanItem(Number(p.id)); return it ? itemView(it, true) : notFound(); });
+// An agent asks the human (a question, or a yes/no approval), or follows up on a ticket it asked before.
+route("POST", "/api/runs/:id/inbox", (b, p) => {
+  if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
+  const from = String(b.from || "ceo"), body = String(b.body || "").trim();
+  if (!body) throw httpError(400, "body is required: the question, with what you need and the options you see");
+  if (b.itemId) {
+    const it = humanItem(Number(b.itemId));
+    if (!it || it.run_id !== p.id) throw httpError(404, `no inbox ticket #${b.itemId} in this run`);
+    humanComment(it, from, body);
+    setItemStatus(it, "open");
+    return { id: it.id, status: "open" };
+  }
+  const kind = b.kind === "approval" ? "approval" : "question";
+  if (b.taskId && !one("SELECT id FROM tasks WHERE run_id = ? AND id = ?", p.id, String(b.taskId))) throw httpError(400, `no task ${b.taskId} in this run`);
+  const id = openHumanItem(p.id, { kind, title: b.title ? String(b.title) : firstLine(body), body, askedBy: from, taskId: b.taskId ? String(b.taskId) : null });
+  return { id, status: "open" };
+});
+// The human acts on a ticket: comment (the answer goes to whoever must act), approve or decline,
+// unblock (the task goes back to work with the answer), resolve, or reopen.
+route("POST", "/api/inbox/:id", (b, p) => {
+  const it = humanItem(Number(p.id));
+  if (!it) return notFound();
+  const action = String(b.action || "comment"), text = String(b.body || "").trim().slice(0, 20000);
+  const target = itemTarget(it);
+  const tell = (msg) => { if (target && target !== "human") addMessage(it.run_id, "human", target, "command", `${itemRef(it)} ${msg}`, true); };
+  if (action === "comment") {
+    if (!text) throw httpError(400, "write a comment first");
+    humanComment(it, "human", text);
+    tell(`The human answered:\n${text}\n\nAct on it now. Reply with redplan_send to the human (your reply lands in this ticket); if you need more from them, ask with redplan_ask_human (itemId ${it.id}).`);
+    setItemStatus(it, "waiting");
+  } else if (action === "approve" || action === "decline") {
+    if (it.kind === "approval" && String(it.key || "").startsWith("plan:")) {
+      if (text) humanComment(it, "human", text);
+      decidePlan(it.key.slice(5), action === "approve", text);
+    } else {
+      if (text) humanComment(it, "human", text);
+      run("UPDATE human_items SET updated = ? WHERE id = ?", now(), it.id);
+      tell(`${action === "approve" ? "APPROVED" : "DECLINED"} by the human.${text ? ` ${text}` : ""}${action === "approve" ? " Go ahead." : " Do not do it; find another way or ask the CEO."}`);
+      setItemStatus(it, action === "approve" ? "approved" : "declined", "human", `${action === "approve" ? "Approved" : "Declined"}${text ? `: ${text}` : ""}`);
+    }
+  } else if (action === "unblock") {
+    if (text) humanComment(it, "human", text);
+    const t = it.task_id ? one("SELECT * FROM tasks WHERE run_id = ? AND id = ?", it.run_id, it.task_id) : null;
+    if (t && t.status === "blocked") {
+      const to = t.worker_id ? "in_progress" : "todo";
+      const why = `Unblocked by the human${text ? `: ${text}` : ""}`;
+      run("UPDATE tasks SET status = ?, blocked_on = NULL, note = ?, updated = ? WHERE run_id = ? AND id = ?", to, why, now(), it.run_id, t.id);
+      recordTransition(it.run_id, t.id, "blocked", to, "human", why, null);
+      addMessage(it.run_id, "human", "all", "task", `${t.id} ${t.title}: blocked → ${to} (${why})`);
+      if (t.worker_id) addMessage(it.run_id, "human", t.worker_id, "command", `${itemRef(it)} The human unblocked ${t.id}.${text ? `\n${text}` : ""}\n\nContinue ${t.id} now.`, true);
+      else addMessage(it.run_id, "human", "ceo", "system", `The human unblocked ${t.id} (${t.title}); it is back in todo with nobody on it: assign it.${text ? ` Their note: ${text}` : ""}`);
+      notify(it.run_id, "task");
+    } else tell(`The human marked this unblocked.${text ? ` ${text}` : ""}`);
+    setItemStatus(it, "resolved", "human", `Unblocked${text ? `: ${text}` : ""}`);
+  } else if (action === "resolve") {
+    if (text) { humanComment(it, "human", text); tell(`The human closed this ticket: ${text}`); }
+    setItemStatus(it, "resolved", "human", text ? `Closed: ${text}` : "Closed by you");
+  } else if (action === "reopen") {
+    setItemStatus(it, "open");
+  } else throw httpError(400, "action must be comment, approve, decline, unblock, resolve or reopen");
+  return itemView(humanItem(it.id), true);
 });
 
 // ---------- tickets: work the human adds straight to the board, no plan or approval ----------
@@ -1450,7 +1643,7 @@ const server = createServer(async (req, res) => {
       url.searchParams.delete("t");
       return send(res, 302, "", { location: url.pathname + (url.search || ""), ...(ok ? { "set-cookie": `redpi_hq=${encodeURIComponent(TOKEN)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000` } : {}) });
     }
-    if (req.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/runs/") || url.pathname.startsWith("/projects/"))) return serveFile(res, "dashboard.html");
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/inbox" || url.pathname.startsWith("/runs/") || url.pathname.startsWith("/projects/"))) return serveFile(res, "dashboard.html");
     if (req.method === "GET" && url.pathname.startsWith("/plans/")) return serveFile(res, "plan.html");
     if (req.method === "GET" && url.pathname === "/api/events") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
@@ -1481,6 +1674,8 @@ server.on("error", (e) => {
   if (e.code === "EADDRINUSE") { console.error(`RedPi HQ: port ${PORT} in use, exiting`); process.exit(0); }
   throw e;
 });
+// Tickets for what already waited on the human before the inbox existed (once per key).
+try { backfillInbox(); } catch (e) { console.error("inbox backfill:", e.message); }
 server.listen(PORT, HOST, () => {
   writeFileSync(join(HQ_DIR, "hq.pid"), `${process.pid}\n`);
   console.log(`RedPi HQ ${VERSION} listening on ${HOST}:${PORT} (db ${join(HQ_DIR, "hq.db")})`);

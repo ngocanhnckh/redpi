@@ -55,6 +55,8 @@ if (!/decide the open question yourself/.test(chatter.body)) fail("the alert sho
 await until("escalated to the human", async () => (await state()).messages.find((m) => m.sender === "hq" && m.recipient === "human" && /talking in circles.*The CEO was told \d+ min ago and it is still happening/.test(m.body)));
 const esc = (await state()).alerts.find((a) => a.kind === "chatter");
 if (!esc?.escalated || esc.resolved) fail("the chatter alert should be open and escalated", esc);
+const ticket = (await state()).inbox.find((i) => i.kind === "alert" && i.key === `alert:${esc.id}`);
+if (!ticket || ticket.status !== "open" || !/talking in circles/.test(ticket.title)) fail("an escalated alert should be an open ticket in the human's inbox", ticket);
 if ((await ceoInbox()).filter((m) => /talking in circles/.test(m.body)).length !== 2) fail("the CEO should hear once, then once more at escalation (not every minute)");
 
 // 2. Burning tokens without moving a card.
@@ -97,6 +99,7 @@ if (!(cardTokens.T2 >= 230000 && cardTokens.T1 >= 120000)) fail("the board shoul
 
 // It clears itself when the pattern stops: the chatter falls out of the two-hour window.
 await until("chatter alert resolved", async () => (await state()).alerts.find((a) => a.kind === "chatter")?.resolved, 3 * HOUR);
+if ((await state()).inbox.find((i) => i.key === `alert:${esc.id}`)?.resolution !== "The problem stopped") fail("the alert's ticket should close itself when the problem stops");
 // 7. Check-in: the numbers and what to look for, on the schedule.
 const checkin = await until("check-in", async () => (await ceoInbox()).reverse().find((m) => /^Check-in \(every/.test(m.body) && /Tokens per task so far/.test(m.body)), 8000);
 for (const want of [/card moves? since the last one/, /Board: todo \d+; in progress \d+/, /in review 1: T1 waiting on Ria/, /Open alerts: /, /Tokens per task so far: T2 2\d\dk, T1 1\d\dk/, /post the human a 2-3 line status/, /do nothing and do not reply/]) if (!want.test(checkin.body)) fail(`check-in should include ${want}`, checkin.body);

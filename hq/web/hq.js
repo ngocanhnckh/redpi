@@ -41,6 +41,8 @@ export function live(runId, onChange) {
 }
 
 export function toast(msg) {
+  // One at a time: a newer message replaces the one still showing instead of stacking on it.
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
   const el = document.createElement("div");
   el.className = "toast";
   el.textContent = msg;

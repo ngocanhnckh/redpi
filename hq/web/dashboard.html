@@ -106,7 +106,7 @@
   .lb-nav.prev { left: 10px; } .lb-nav.next { right: 10px; }
   .lb-count { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); color: #cfd; font-size: 12px; }
   .view-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
-  #view-hint { flex: 1; min-width: 0; text-align: right; }
+  #view-hint { flex: 1; min-width: 0; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 640px) { #view-hint { display: none; } .viewtabs button { padding: 5px 8px; } .view-panel .panel-head { padding: 8px 10px; } }
   .autoplay { margin-left: auto; background: none; border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .autoplay[aria-pressed="true"] { color: var(--green); border-color: var(--green-dim); background: var(--panel-2); }
@@ -323,6 +323,54 @@
   .events { font-family: var(--mono); font-size: 12px; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
   .events .ev { display: grid; grid-template-columns: 64px 70px minmax(0, 1fr); gap: 8px; color: var(--muted); }
   .events .ev span:last-child { color: var(--text); overflow-wrap: anywhere; }
+  #view-body > .inbox-host { height: 100%; }
+  .tab-count { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; margin-left: 3px; border-radius: 999px; background: var(--red); color: #fff; font-size: 10.5px; font-weight: 700; line-height: 1; }
+  /* The human's inbox: a ticket list beside the open ticket (stacked on narrow screens). */
+  .ib { display: grid; grid-template-columns: minmax(320px, 1.15fr) minmax(0, 1fr); gap: 10px; height: 100%; min-height: 0; }
+  .inbox-page .ib { height: calc(100vh - 150px); min-height: 480px; }
+  .ib-side { display: flex; flex-direction: column; min-height: 0; gap: 8px; container-type: inline-size; }
+  .ib-tabs { flex-wrap: wrap; }
+  .ib-list { overflow-y: auto; min-height: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  .ib-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 130px 64px; gap: 10px; align-items: center; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--border); background: none; text-align: left; cursor: pointer; }
+  .ib-row:last-child { border-bottom: 0; }
+  .ib-row:hover { background: var(--panel-2); } .ib-row.on { background: color-mix(in srgb, var(--green) 9%, var(--panel)); box-shadow: inset 3px 0 0 var(--green); }
+  .ib-row.open .ib-title b { color: var(--text); } .ib-row:not(.open) .ib-title b { font-weight: 600; color: var(--muted); }
+  .ib-headrow { cursor: default; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); padding: 6px 12px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  .ib-headrow:hover { background: var(--panel); }
+  .ib-status { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .ib-title { display: grid; gap: 2px; min-width: 0; } .ib-tline { display: flex; gap: 6px; align-items: center; min-width: 0; }
+  .ib-tline b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .ib-kind { font-size: 10.5px; padding: 0 7px; } .ib-sub { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ib-from { display: flex; gap: 6px; align-items: center; min-width: 0; font-size: 13px; } .ib-from > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ib-when { font-size: 12px; text-align: right; }
+  .ib-none { border: 0; }
+  .ib-detail { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  .ib-pick { margin: auto; padding: 24px; }
+  .ib-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: grid; align-content: start; gap: 10px; }
+  .ib-dh { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; } .ib-back { display: none; padding: 2px 10px; }
+  .ib-dt { margin: 0; font-size: 17px; line-height: 1.35; overflow-wrap: anywhere; }
+  .ib-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12.5px; }
+  .ib-body { padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+  .ib-thread { display: grid; gap: 10px; }
+  .ib-c { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; }
+  .ib-cb { padding: 7px 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); min-width: 0; }
+  .ib-c.me .ib-cb { background: color-mix(in srgb, var(--green) 8%, var(--panel)); border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+  .ib-cm { font-size: 12px; margin-bottom: 2px; }
+  .ib-res { font-size: 12.5px; border-top: 1px dashed var(--border); padding-top: 8px; }
+  .ib-compose { border-top: 1px solid var(--border); padding: 10px 12px; display: grid; gap: 8px; }
+  .ib-compose textarea { resize: vertical; min-height: 64px; }
+  .ib-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; } .ib-hint { margin-left: auto; font-size: 11.5px; }
+  /* A narrow list (the run's Inbox tab, a phone): the title gets the full width, status and sender below it. */
+  @container (max-width: 700px) {
+    .ib-row { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "title title title" "status from when"; row-gap: 5px; }
+    .ib-row > span:first-child { grid-area: status; } .ib-row > .ib-title { grid-area: title; } .ib-row > .ib-from { grid-area: from; font-size: 12px; } .ib-row > .ib-when { grid-area: when; }
+    .ib-headrow { display: none; }
+  }
+  @media (max-width: 899px) {
+    .ib { grid-template-columns: minmax(0, 1fr); }
+    .ib-detail:not(.has) { display: none; } .ib-detail.has { position: fixed; inset: 0; z-index: 60; border-radius: 0; }
+    .ib-back { display: inline-flex; }
+  }
   @media (max-width: 1100px) { .run-main { grid-template-columns: minmax(0, 1fr); } .feed-panel { height: 70vh; min-height: 420px; } }
   @media (max-width: 640px) { #view-body { height: 62vh; } .needs { top: 52px; } }
   @media (max-width: 640px) { .composer { grid-template-columns: 1fr; } }
@@ -332,6 +380,7 @@
 <header class="top">
   <span class="brand"><span class="r">Red</span><span class="p">Pi</span> <span class="hq">// HQ</span></span>
   <span class="crumbs" id="crumbs"></span>
+  <a class="btn inbox-link" href="/inbox" aria-label="Inbox">Inbox <span class="badge" id="inbox-count" hidden></span></a>
   <a class="btn" href="/">All projects</a>
   <span class="account" id="account"></span>
 </header>
