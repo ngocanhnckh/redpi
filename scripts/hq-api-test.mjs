@@ -534,5 +534,64 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   if ((await act(ap, "comment", "")).status !== 400) fail("an empty comment should be refused");
 }
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, the human's inbox (plan approvals, blockers, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves), dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
+// Managers: the CEO spawns a manager for an area; the manager spawns its own people (who report to it), may
+// only take its own team's tasks, gets its people's blockers and release notes (not the CEO), may dismiss only
+// its own people, hears once when its whole area is done, and its team falls back to the CEO when it leaves.
+{
+  const rid = (await api("POST", "/api/runs", { projectPath: "/tmp/demo-managers", title: "Managers" })).body.run.id;
+  const pv = await api("POST", `/api/runs/${rid}/plans`, { plan: { ...plan, review: "self" } });
+  await api("POST", `/api/plans/${pv.body.id}/decision`, { decision: "approve" });
+  const spawn = async (b) => (await api("POST", `/api/runs/${rid}/workers`, { cwd: "/tmp/demo-managers", ...b }));
+  const inboxOf = async (who) => (await api("GET", `/api/runs/${rid}/inbox?for=${who}&after=0`)).body;
+  const st = async () => (await api("GET", `/api/runs/${rid}`)).body;
+  const beat = (w) => api("POST", `/api/workers/${w.id}/heartbeat`, { status: "idle" });
+  const nina = (await spawn({ name: "Nina", role: "backend manager", isManager: true, team: "Backend", taskIds: ["T1", "T2"], brief: "Lead the backend." })).body;
+  const omar = (await spawn({ name: "Omar", role: "frontend manager", isManager: true, team: "Frontend", taskIds: ["T3"] })).body;
+  for (const w of [nina, omar]) await beat(w);
+  if (!nina.is_manager || nina.team !== "Backend") fail("a manager should be recorded with its team", nina);
+  // Nina spawns Ben for T1 (hers): Ben reports to her; she cannot take Omar's T3.
+  const ben = (await spawn({ name: "Ben", role: "backend developer", from: nina.id, taskIds: ["T1"], brief: "Build T1." })).body;
+  await beat(ben);
+  if (ben.manager_id !== nina.id) fail("a manager's spawn should report to them", ben);
+  if (!(await inboxOf(ben.id)).some((m) => m.kind === "brief" && m.sender === nina.id)) fail("the brief should come from the manager");
+  const steal = await spawn({ name: "Cal", role: "frontend developer", from: nina.id, taskIds: ["T3"] });
+  if (steal.status !== 409 || !/T3 belongs to another team/.test(steal.body.error)) fail("a manager should not take another team's task", steal.body);
+  const mgrOfMgr = await spawn({ name: "Max", role: "manager", from: nina.id, isManager: true });
+  if (mgrOfMgr.status !== 400) fail("only the CEO spawns managers", mgrOfMgr.body);
+  const detail = (await api("GET", `/api/workers/${nina.id}`)).body;
+  if (detail.reports.map((r) => r.name).join() !== "Ben" || detail.teamTasks.map((t) => t.id).join() !== "T1,T2") fail("a manager's detail should list its team and area", detail);
+  if ((await api("GET", `/api/workers/${ben.id}`)).body.manager?.name !== "Nina") fail("a report's detail should name its manager");
+  // Ben blocks on the CEO: it goes to Nina, not the CEO; "manager" works as waitingOn too.
+  const set = (task, body) => api("POST", `/api/runs/${rid}/tasks/${task}`, body);
+  await set("T1", { status: "in_progress", actor: ben.id, workerId: ben.id });
+  const ceoBefore = (await inboxOf("ceo")).length;
+  await set("T1", { status: "blocked", note: "Which database schema version?", waitingOn: "manager", actor: ben.id });
+  if ((await st()).tasks.find((t) => t.id === "T1").blocked_on !== nina.id) fail("waitingOn manager should mean Nina");
+  await set("T1", { status: "in_progress", note: "Answered.", actor: ben.id });
+  await set("T1", { status: "blocked", note: "Need a decision on the retry policy.", waitingOn: "ceo", actor: ben.id });
+  if (!(await inboxOf(nina.id)).some((m) => m.kind === "system" && /T1 API skeleton is blocked \(Ben\), waiting on you \(their manager\)/.test(m.body))) fail("a report's blocker should go to their manager");
+  if ((await inboxOf("ceo")).slice(ceoBefore).some((m) => /T1 API skeleton is blocked/.test(m.body))) fail("the CEO should not get a managed worker's team blocker");
+  // Nina hands T2 (hers) to Ben; she may not dismiss Omar; she may dismiss Ben once his work is done.
+  const assign = await set("T2", { assignTo: "Ben", note: "Build the agent next.", actor: nina.id });
+  if (assign.status !== 200 || assign.body.worker_id !== ben.id) fail("a manager should assign its own task to its report", assign.body);
+  const notMine = await api("POST", `/api/workers/${omar.id}/dismiss`, { reason: "x", actor: nina.id });
+  if (notMine.status !== 403) fail("a manager should not dismiss someone outside its team", notMine.body);
+  await set("T1", { status: "done", note: "tests pass", actor: ben.id });
+  await set("T2", { status: "in_progress", actor: ben.id, workerId: ben.id });
+  await set("T2", { status: "done", note: "tests pass", actor: ben.id });
+  if (!(await inboxOf(ben.id)).some((m) => /send Nina a short final report/.test(m.body))) fail("a report's release note should point at its manager");
+  const teamDone = (await inboxOf(nina.id)).filter((m) => /Every task in your team's area is done \(T1, T2\)/.test(m.body));
+  if (teamDone.length !== 1) fail("the manager should hear once that its area is done", teamDone.length);
+  const laid = await api("POST", `/api/workers/${ben.id}/dismiss`, { reason: "Backend is done.", actor: nina.id });
+  if (laid.status !== 200) fail("a manager should dismiss its own report", laid.body);
+  // Omar leaves with a report still on his team: the report now answers to the CEO and is told so.
+  const fay = (await spawn({ name: "Fay", role: "frontend developer", from: omar.id, taskIds: ["T3"] })).body;
+  await beat(fay);
+  const gone = await api("POST", `/api/workers/${omar.id}/dismiss`, { reason: "Merging teams.", actor: "ceo" });
+  if (gone.status !== 200 || gone.body.team.join() !== "Fay" || gone.body.teamNowReportsTo !== "CEO") fail("dismissing a manager should hand its team to the CEO", gone.body);
+  if ((await st()).workers.find((w) => w.id === fay.id).manager_id !== null) fail("Fay should report to the CEO now");
+  if (!(await inboxOf(fay.id)).some((m) => /Omar, your manager, has left the team\. You now report to the CEO/.test(m.body))) fail("Fay should be told who she reports to now");
+}
+
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, the human's inbox (plan approvals, blockers, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves), managers (spawn their own team, own-team tasks only, get their people's blockers and release notes, dismiss only their people, hear when their area is done, hand their team back to the CEO when they leave), dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

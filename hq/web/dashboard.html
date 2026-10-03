@@ -295,6 +295,8 @@
   .team { display: grid; gap: 8px; }
   .member { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-align: left; width: 100%; }
   .member:hover { border-color: var(--green-dim); }
+  .member.manager { border-left: 3px solid var(--amber); } .member.report { margin-left: 18px; border-left: 2px solid color-mix(in srgb, var(--amber) 40%, transparent); }
+  .cx-item.report { padding-left: 26px; }
   .member.gone { opacity: .62; } .member.gone.lost { opacity: 1; border-color: color-mix(in srgb, var(--red) 45%, transparent); }
   .past-team { grid-column: 1 / -1; } .past-team > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 2px; }
   .past-team > .team { margin-top: 6px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }

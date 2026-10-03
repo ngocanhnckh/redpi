@@ -34,6 +34,11 @@ await ceoIn();
 setInterval(ceoIn, 20_000).unref();
 const hire = async (name, role) => { const w = await api("POST", `/api/runs/${runId}/workers`, { name, role, cwd: "/tmp/shop" }); await api("POST", `/api/workers/${w.id}/heartbeat`, { status: "working" }); return w; };
 const alex = await hire("Alex", "backend developer"), mia = await hire("Mia", "frontend developer");
+// A manager with one report: both show as a team (the report under its manager).
+const nina = await api("POST", `/api/runs/${runId}/workers`, { name: "Nina", role: "security manager", cwd: "/tmp/shop", isManager: true, team: "Security" });
+await api("POST", `/api/workers/${nina.id}/heartbeat`, { status: "idle" });
+const ben = await api("POST", `/api/runs/${runId}/workers`, { name: "Ben", role: "security engineer", cwd: "/tmp/shop", from: nina.id });
+await api("POST", `/api/workers/${ben.id}/heartbeat`, { status: "working" });
 const send = (from, to, body, kind = "chat") => api("POST", `/api/runs/${runId}/messages`, { from, to, body, kind, needsReply: false });
 // Old history: more than the run payload carries (300), so "Load earlier" has something to load.
 for (let i = 1; i <= 320; i++) await send("ceo", "human", `Status ${i}: all good.`);
@@ -64,7 +69,10 @@ await page.click('[data-view="chat"]');
 await page.waitForSelector(".cx-item[data-conv='dm:ceo'].on");
 // Sidebar: channels, then a direct message with the CEO and each teammate.
 const side = await page.$$eval(".cx-item", (els) => els.map((e) => e.dataset.conv));
-if (side.join() !== `team,agents,hq,dm:ceo,dm:${alex.id},dm:${mia.id}`) await fail("the sidebar should list channels then direct messages", side);
+if (side.join() !== `team,agents,hq,dm:ceo,dm:${nina.id},dm:${ben.id},dm:${alex.id},dm:${mia.id}`) await fail("the sidebar should list channels, then managers with their teams, then the rest", side);
+if (!(await page.$(`.cx-item.report[data-conv="dm:${ben.id}"]`)) || !/manages Security/.test(await page.getAttribute(`.cx-item[data-conv="dm:${nina.id}"]`, "title"))) await fail("a report should sit under its manager");
+const team = await page.$$eval("#team .member", (els) => els.map((e) => `${e.dataset.person}:${e.classList.contains("manager") ? "M" : e.classList.contains("report") ? "R" : "-"}`));
+if (team.slice(1, 3).join() !== `${nina.id}:M,${ben.id}:R`) await fail("the team panel should show the manager, then their team", team);
 // Grouping: the CEO's back-to-back messages share one header.
 const lastGroup = await page.$$eval(".cx-g", (gs) => { const g = gs.at(-1); return { name: g.querySelector(".cx-gh b, .cx-from")?.textContent, n: g.querySelectorAll(".cx-m").length }; });
 if (lastGroup.name !== "CEO" || lastGroup.n < 2) await fail("consecutive messages from one sender should be grouped", lastGroup);
@@ -146,5 +154,5 @@ await phone.waitForSelector(".cx-side .cx-item");
 const real = errors.filter((e) => !/Failed to load resource.*(401|404)/.test(e));
 if (real.length) await fail("console errors", real);
 await browser.close();
-console.log("Chat UI test passed: channels and direct messages, grouped messages with day dividers, unread badges in the sidebar and on the tab, the New line, @mentions, drafts kept through live updates, Enter sends with a pending note, read-only #agents with Show more, #team posts to everyone, full screen, earlier history, and the phone layout.");
+console.log("Chat UI test passed: channels and direct messages (managers with their teams), grouped messages with day dividers, unread badges in the sidebar and on the tab, the New line, @mentions, drafts kept through live updates, Enter sends with a pending note, read-only #agents with Show more, #team posts to everyone, full screen, earlier history, and the phone layout.");
 process.exit(0);

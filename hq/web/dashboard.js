@@ -41,6 +41,14 @@ function presence(id) {
     : said ? `“${plain(said.text).slice(0, 140)}”` : `${st}${w.current_task ? ` · ${w.current_task}` : ""}${w.activity?.text ? ` · ${w.activity.text}` : ""}`;
   return { dot: st === "needs" ? "offline" : st, label };
 }
+// The org chart order: each manager followed by their team, then everyone reporting to the CEO directly.
+function orgOrder(workers) {
+  const byId = new Map(workers.map((w) => [w.id, w]));
+  const lead = (w) => (w.manager_id && byId.has(w.manager_id) ? w.manager_id : null);
+  const out = [];
+  for (const m of workers.filter((w) => w.is_manager)) out.push(m, ...workers.filter((w) => lead(w) === m.id));
+  return [...out, ...workers.filter((w) => !w.is_manager && !lead(w))];
+}
 const roleOf = (id) => id === "ceo" ? "ceo" : state?.workers.find((w) => w.id === id)?.role || "";
 function avatar(name, id, size = "") {
   if (id === "human") return `<span class="avatar you ${size}" aria-hidden="true">You</span>`;
@@ -381,7 +389,7 @@ function ensureChat() {
   if (!chatHost) {
     chatHost = document.createElement("div");
     chatHost.className = "chat-host";
-    chatView = new Chat(chatHost, { runId, avatar, presence, pendingText, onPerson: select, reload: loadRun, onUnread: updateChatTab });
+    chatView = new Chat(chatHost, { runId, avatar, presence, pendingText, onPerson: select, reload: loadRun, onUnread: updateChatTab, order: orgOrder });
   }
   return chatView;
 }
@@ -700,10 +708,12 @@ function renderTeam() {
   // Each card says what the person last told us they are doing, in their words; else the live tool.
   const doing = (id, fallback) => { const u = latestUpdate(id); return u ? `<div class="doing said" title="${esc(plain(u.text))}">“${esc(plain(u.text))}”</div>` : `<div class="doing">${esc(fallback)}</div>`; };
   // The team is who is here (or left mid-task, so you see it); everyone who left with nothing on them is folded away.
-  const current = workers.filter((w) => w.alive || workerState(w) === "lost"), past = workers.filter((w) => !current.includes(w));
+  const current = orgOrder(workers.filter((w) => w.alive || workerState(w) === "lost")), past = workers.filter((w) => !current.includes(w));
+  const managerName = (w) => workers.find((m) => m.id === w.manager_id)?.name;
   const card = (w) => { const st = workerState(w), gone = !w.alive;
     const what = st === "lost" ? `session ended while holding ${holds(w).map((t) => t.id).join(", ")}` : gone ? `${st === "dismissed" ? "dismissed" : "left"}${w.left_at ? ` ${ago(w.left_at)}` : ""}` : `${w.current_task ? `${w.current_task} · ` : ""}${w.activity?.text || w.last_message || w.status}`;
-    return `<button class="member${gone ? ` gone ${st}` : ""}" data-person="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
+    const report = w.manager_id && current.some((m) => m.id === w.manager_id);
+    return `<button class="member${gone ? ` gone ${st}` : ""}${w.is_manager ? " manager" : ""}${report ? " report" : ""}" data-person="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.is_manager ? ` <span class="pill amber harness-pill">manages ${esc(w.team || "a team")}</span>` : report ? ` <span class="faint" style="font-size:11px">→ ${esc(managerName(w))}</span>` : ""}${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
       ${gone ? `<div class="doing">${esc(what)}</div>` : doing(w.id, what)}</span><span class="dot ${st === "needs" ? "offline" : st}" title="${st}"></span></button>`; };
   $("team").innerHTML = `<button class="member" data-person="ceo">${avatar("CEO", "ceo")}<span><span class="name">CEO</span> <span class="role">lead Pi session</span>${doing("ceo", run.status === "awaiting_approval" ? "waiting for your approval" : run.status === "planning" ? "planning" : run.status === "done" ? "run finished" : "coordinating the team")}</span><span class="dot working"></span></button>
     ${current.map(card).join("")}

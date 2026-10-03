@@ -69,7 +69,7 @@ export class Chat {
   // The conversations: channels, then a direct message with the CEO and each teammate (people who left fold away).
   convs() {
     const s = this.state, w = s.workers || [];
-    const dm = (id, name, role, past) => ({ key: `dm:${id}`, id, name, role, past, dm: true,
+    const dm = (id, name, role, past, report = false) => ({ key: `dm:${id}`, id, name, role, past, report, dm: true,
       filter: (m) => (m.sender === "human" && m.recipient === id && m.kind !== "system") || (m.sender === id && m.recipient === "human") });
     return [
       { key: "team", name: "team", about: "Messages to everyone. What you post here reaches the whole team.", to: "all",
@@ -79,7 +79,8 @@ export class Chat {
       { key: "hq", name: "hq-notes", about: "HQ's notes: watch alerts, check-ins, reviews ready, and what it told the CEO. Read-only.", readOnly: true, muted: true,
         filter: (m) => isHqNote(m) && m.recipient !== "all" && !(m.sender !== "human" && m.sender !== "hq" && m.recipient === "human") },
       dm("ceo", "CEO", "lead Pi session", false),
-      ...w.map((x) => dm(x.id, x.name, x.role, !x.alive && this.ctx.presence(x.id).dot !== "lost")),
+      ...(this.ctx.order ? this.ctx.order(w) : w).map((x) => dm(x.id, x.name, x.is_manager ? `${x.role} · manages ${x.team || "a team"}` : x.role, !x.alive && this.ctx.presence(x.id).dot !== "lost",
+        !!x.manager_id && w.some((m) => m.id === x.manager_id && m.alive))),
     ];
   }
 
@@ -114,7 +115,7 @@ export class Chat {
       const n = c.key === this.conv && this.active ? 0 : this.unread(c, all);
       const pres = c.dm && c.id !== "ceo" ? this.ctx.presence(c.id) : c.dm ? this.ctx.presence("ceo") : null;
       const lead = c.dm ? `<span class="cx-face">${this.ctx.avatar(c.name, c.id, "sm")}<span class="dot ${pres.dot}"></span></span>` : `<span class="cx-hash">#</span>`;
-      return `<button class="cx-item${c.key === this.conv ? " on" : ""}${n ? " unread" : ""}${c.past ? " past" : ""}" data-conv="${esc(c.key)}" aria-current="${c.key === this.conv}" title="${esc(c.dm ? `${c.name} · ${c.role}${pres ? ` · ${pres.label}` : ""}` : c.about)}">
+      return `<button class="cx-item${c.key === this.conv ? " on" : ""}${n ? " unread" : ""}${c.past ? " past" : ""}${c.report && !c.past ? " report" : ""}" data-conv="${esc(c.key)}" aria-current="${c.key === this.conv}" title="${esc(c.dm ? `${c.name} · ${c.role}${pres ? ` · ${pres.label}` : ""}` : c.about)}">
         ${lead}<span class="cx-name">${esc(c.name)}</span>${n && !c.muted ? `<span class="cx-badge">${n}</span>` : ""}</button>`;
     };
     const chans = convs.filter((c) => !c.dm), dms = convs.filter((c) => c.dm && !c.past), past = convs.filter((c) => c.past);

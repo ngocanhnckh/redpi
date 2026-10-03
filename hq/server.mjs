@@ -170,6 +170,8 @@ for (const [table, col, type] of [
   // How a worker left: "finished" (nothing left to do), "dismissed" (laid off by the CEO), or "lost"
   // (its session ended while it still owned work). Cleared when it comes back.
   ["workers", "left_reason", "TEXT"], ["workers", "left_at", "INTEGER"],
+  // Managers: a worker who leads a team (is_manager, team) and the workers who report to them (manager_id).
+  ["workers", "is_manager", "INTEGER NOT NULL DEFAULT 0"], ["workers", "team", "TEXT"], ["workers", "manager_id", "TEXT"], ["workers", "team_done_at", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -227,6 +229,18 @@ function participantName(runId, id) {
   if (id === "human") return "You";
   if (id === "all") return "Everyone";
   return one("SELECT name FROM workers WHERE id = ? AND run_id = ?", id, runId)?.name || id;
+}
+
+// Who a worker answers to: their manager while that manager is running, else the CEO.
+function leadOf(runId, workerId) {
+  const w = workerId && workerId.startsWith("wkr_") ? one("SELECT manager_id FROM workers WHERE id = ? AND run_id = ?", workerId, runId) : null;
+  const m = w?.manager_id ? one("SELECT id FROM workers WHERE id = ? AND alive = 1 AND stop_requested IS NULL", w.manager_id) : null;
+  return m ? m.id : "ceo";
+}
+// Does this actor lead (or is it) the worker? The CEO and the human lead everyone.
+function leads(actor, workerId) {
+  if (actor === "ceo" || actor === "human" || actor === workerId) return true;
+  return !!(workerId && one("SELECT id FROM workers WHERE id = ? AND manager_id = ?", workerId, actor));
 }
 
 function addMessage(runId, sender, recipient, kind, body, needsReply = false) {
@@ -312,6 +326,7 @@ function whoMustAct(runId, task, waitingOn, note) {
   if (want) {
     if (["human", "you", "user", "owner"].includes(want)) return "human";
     if (want === "ceo" || want === "external") return want;
+    if (["manager", "lead", "my manager"].includes(want)) return leadOf(runId, task.worker_id);
     const w = team.find((x) => x.id === waitingOn || x.name.toLowerCase() === want);
     if (w) return w.id;
     throw httpError(400, `waitingOn must be a teammate's name, "ceo", "human", or "external" (team: ${team.map((x) => x.name).join(", ") || "none"})`);
@@ -329,8 +344,13 @@ function routeBlocker(runId, task, actor, blockedOn, note) {
   const owner = one("SELECT name FROM workers WHERE id = ?", task.worker_id)?.name || "the owner";
   const target = blockedOn && blockedOn.startsWith("wkr_") ? one("SELECT id, name FROM workers WHERE id = ?", blockedOn) : null;
   if (target) addMessage(runId, task.worker_id || actor, target.id, "chat", `${task.id} (${task.title}) is blocked waiting on you. ${note}`);
-  const who = target ? target.name : blockedOn === "human" ? "the human" : blockedOn === "external" ? "something outside the team" : "you (the CEO)";
-  addMessage(runId, "human", "ceo", "system", `${task.id} ${task.title} is blocked (${owner}), waiting on ${who}. ${blockedOn === "human" ? "The human sees it under Needs you." : "Get it unblocked inside the team: have the teammate act now, or reassign the work. Ask the human only if it truly needs their decision."} Reason: ${note}`.slice(0, 4000));
+  // The CEO hears it, or the owner's manager when they have one (the manager handles their team's blockers).
+  const lead = leadOf(runId, task.worker_id);
+  if (target && target.id === lead) return;
+  const who = target ? target.name : blockedOn === "human" ? "the human" : blockedOn === "external" ? "something outside the team" : lead === "ceo" ? "you (the CEO)" : "you (their manager)";
+  const text = `${task.id} ${task.title} is blocked (${owner}), waiting on ${who}. ${blockedOn === "human" ? "The human has it in their inbox." : `Get it unblocked inside the team: have the teammate act now, or reassign the work.${lead === "ceo" ? "" : " Escalate to the CEO only what crosses teams."} Ask the human only if it truly needs their decision.`} Reason: ${note}`.slice(0, 4000);
+  addMessage(runId, "human", lead, "system", text);
+  if (lead !== "ceo" && blockedOn === "human") addMessage(runId, "human", "ceo", "system", `FYI: ${text}`.slice(0, 4000));
 }
 
 // Blockers recorded before blocked_on existed get the same routing (so they leave Needs you unless they ask you).
@@ -505,9 +525,12 @@ function tokenMilestone(runId, workerId, task, added) {
 // before (it comes back to them after their findings), else the reviewer with the shortest queue.
 function routeReview(runId, t, note) {
   const owner = t.worker_id ? one("SELECT * FROM workers WHERE id = ?", t.worker_id) : null;
-  const reviewers = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL AND id != ?", runId, t.worker_id || "").filter((w) => REVIEWER_RE.test(w.role));
+  let reviewers = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL AND id != ?", runId, t.worker_id || "").filter((w) => REVIEWER_RE.test(w.role));
+  // A team with its own reviewer reviews its own work.
+  const mine = owner?.manager_id ? reviewers.filter((w) => w.manager_id === owner.manager_id) : [];
+  if (mine.length && !reviewers.some((w) => w.id === t.reviewer_id && mine.includes(w))) reviewers = mine;
   if (!reviewers.length) {
-    addMessage(runId, "human", "ceo", "system", `${t.id} ${t.title} is ready for review and no reviewer is running. Spawn an independent reviewer now (redplan_spawn_worker, role "independent reviewer"; about one per three builders), or review it yourself.`);
+    addMessage(runId, "human", leadOf(runId, t.worker_id), "system", `${t.id} ${t.title} is ready for review and no reviewer is running. Spawn an independent reviewer now (redplan_spawn_worker, role "independent reviewer"; about one per three builders), or review it yourself.`);
     return null;
   }
   const load = (w) => one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND reviewer_id = ? AND status = 'review' AND id != ?", runId, w.id, t.id).n;
@@ -717,7 +740,8 @@ function watchRun(r) {
     }
     if (!a) {
       run("INSERT INTO alerts (run_id, key, kind, subject, text, created, seen) VALUES (?, ?, ?, ?, ?, ?, ?)", r.id, f.key, f.kind, f.subject, f.text, t, t);
-      addMessage(r.id, "human", "ceo", "system", `HQ watch: ${f.text}`);
+      // A finding about someone in a manager's team goes to that manager first; the CEO hears it if it persists.
+      addMessage(r.id, "human", leadOf(r.id, f.subject), "system", `HQ watch: ${f.text}`);
       continue;
     }
     run("UPDATE alerts SET seen = ?, text = ? WHERE id = ?", t, f.text, a.id);
@@ -725,7 +749,9 @@ function watchRun(r) {
       run("UPDATE alerts SET escalated = ? WHERE id = ?", t, a.id);
       addMessage(r.id, "hq", "human", "system", `HQ watch: ${f.text} The CEO was told ${mins(t - a.created)} ago and it is still happening.`);
       openHumanItem(r.id, { kind: "alert", key: `alert:${a.id}`, askedBy: "hq", taskId: null, title: firstLine(f.text), body: `${f.text}\n\nThe CEO was told ${mins(t - a.created)} ago and it is still happening. Comment here to tell the CEO what to do; it closes itself when the problem stops.` });
-      addMessage(r.id, "human", "ceo", "system", `HQ watch, still happening after ${mins(t - a.created)} (the human has been told): ${f.text}`);
+      const lead = leadOf(r.id, a.subject);
+      addMessage(r.id, "human", "ceo", "system", `HQ watch, still happening after ${mins(t - a.created)} (the human has been told${lead === "ceo" ? "" : `; ${participantName(r.id, lead)}, their manager, was told first`}): ${f.text}`);
+      if (lead !== "ceo") addMessage(r.id, "human", lead, "system", `HQ watch, still happening after ${mins(t - a.created)}; the CEO and the human have been told: ${f.text}`);
     }
   }
   for (const a of openAlerts) if (!found.some((f) => f.key === a.key)) { run("UPDATE alerts SET resolved = ? WHERE id = ?", t, a.id); closeHumanItem(r.id, `alert:${a.id}`, "resolved", "hq", "The problem stopped"); }
@@ -750,7 +776,8 @@ function checkinText(runId, since) {
     `Board: todo ${count("todo").length}; ${line("in_progress", "in progress", (x) => name(x.worker_id))}; ${line("review", "in review", (x) => `waiting on ${x.reviewer_id ? name(x.reviewer_id) : "a reviewer"}`)}; ${line("blocked", "blocked", (x) => name(x.worker_id))}; done ${count("done").length}.`,
     idle.length ? `Idle builders: ${idle.map((w) => w.name).join(", ")}.` : "",
     (() => {
-      const spare = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId).filter((w) => !heldWork(runId, w.id).length && now() - w.updated > 10 * 60_000);
+      const spare = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId).filter((w) => !heldWork(runId, w.id).length && now() - w.updated > 10 * 60_000
+        && !(w.is_manager && one("SELECT 1 AS x FROM workers WHERE manager_id = ? AND alive = 1 AND stop_requested IS NULL", w.id)));
       const reviewsLeft = tasks.some((x) => x.status !== "done");
       const lay = spare.filter((w) => !(REVIEWER_RE.test(w.role) && reviewsLeft));
       return lay.length ? `Nothing left for: ${lay.map((w) => w.name).join(", ")}. If no more work is coming for them, dismiss them (redplan_dismiss_worker) so the team stays small.` : "";
@@ -782,7 +809,20 @@ function maybeReleaseWorker(runId, workerId) {
   const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND worker_id = ? AND status != 'done'", runId, workerId).n;
   const reviewer = /review|qa|audit/i.test(w.role) && one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status IN ('review', 'in_progress', 'todo', 'blocked')", runId).n > 0;
   if (open || reviewer) return;
-  addMessage(runId, "human", workerId, "system", "All your tasks are done. If you have not yet, send the CEO a short final report (what changed, how you verified it, anything left), then wait: do not start new work, do not reopen tasks, and do not reply to status updates. Do not close your session yourself: the CEO dismisses you when the team no longer needs you, and you are woken if someone asks you something.");
+  if (w.is_manager) return;
+  const lead = leadOf(runId, workerId), leadName = lead === "ceo" ? "the CEO" : participantName(runId, lead);
+  addMessage(runId, "human", workerId, "system", `All your tasks are done. If you have not yet, send ${leadName} a short final report (what changed, how you verified it, anything left), then wait: do not start new work, do not reopen tasks, and do not reply to status updates. Do not close your session yourself: ${leadName} dismisses you when the team no longer needs you, and you are woken if someone asks you something.`);
+}
+
+// A manager whose whole area is done hears it once: dismiss the team, report to the CEO, wait.
+function maybeTeamDone(runId, workerId) {
+  const w = workerId ? one("SELECT * FROM workers WHERE id = ? AND run_id = ?", workerId, runId) : null;
+  const m = w ? (w.is_manager ? w : w.manager_id ? one("SELECT * FROM workers WHERE id = ?", w.manager_id) : null) : null;
+  if (!m || !m.alive || m.team_done_at) return;
+  const tasks = all("SELECT id, status FROM tasks WHERE run_id = ? AND (worker_id = ? OR worker_id IN (SELECT id FROM workers WHERE manager_id = ?))", runId, m.id, m.id);
+  if (!tasks.length || tasks.some((t) => t.status !== "done")) return;
+  run("UPDATE workers SET team_done_at = ? WHERE id = ?", now(), m.id);
+  addMessage(runId, "human", m.id, "system", `Every task in your team's area is done (${tasks.map((t) => t.id).join(", ")}). Dismiss your reports who have nothing left (redplan_dismiss_worker, name "idle"), send the CEO one short final report for your area (what was delivered, how it was verified, anything left or risky), then wait for the CEO.`);
 }
 
 // The run is done (or cancelled): ask every worker to close; HQ closes any still open after a grace period.
@@ -856,7 +896,7 @@ function sweepParked() {
     const mins = Math.max(1, Math.round((now() - w.updated) / 60000));
     const level = w.parked_level + 1;
     if (level === 1) addMessage(w.run_id, "human", w.id, "system", `You still own in-progress work (${tasks}) but have been idle for ~${mins} min. Continue it, mark it blocked with the reason, or hand it off.`);
-    else if (level === 2) addMessage(w.run_id, "human", "ceo", "system", `${w.name} is parked: idle ~${mins} min while owning ${tasks}, and did not respond to a nudge. Check on them, reassign, or resume them.`);
+    else if (level === 2) addMessage(w.run_id, "human", leadOf(w.run_id, w.id), "system", `${w.name} is parked: idle ~${mins} min while owning ${tasks}, and did not respond to a nudge. Check on them, reassign, or resume them.`);
     else if (level === 3) {
       run("UPDATE workers SET needs_human = ? WHERE id = ?", `Idle ~${mins} min on ${tasks}; nudges to the worker and the CEO did not help.`, w.id);
       addMessage(w.run_id, w.id, "human", "system", `${w.name} needs you: idle ~${mins} min on ${tasks} after nudging the worker and the CEO.`);
@@ -1121,13 +1161,27 @@ route("POST", "/api/runs/:id/workers", (b, p) => {
   if (!HARNESS_IDS.includes(harness)) throw httpError(400, `harness must be one of ${HARNESS_IDS.join(", ")}`);
   const mismatched = all("SELECT id, harness FROM tasks WHERE run_id = ?", p.id).filter((t) => (b.taskIds || []).map(String).includes(t.id) && t.harness !== harness);
   if (mismatched.length) throw httpError(400, `a worker runs on one harness: ${mismatched.map((t) => `${t.id} is set to ${HARNESSES[t.harness]?.name || t.harness}`).join(", ")}, not ${HARNESSES[harness].name}`);
+  // A manager leads a team; a worker may report to a manager (a manager spawning someone becomes their manager).
+  const from = String(b.from || "ceo");
+  let managerId = b.managerId ? String(b.managerId) : from.startsWith("wkr_") ? from : null;
+  if (managerId) {
+    const m = one("SELECT * FROM workers WHERE run_id = ? AND (id = ? OR lower(name) = lower(?))", p.id, managerId, managerId);
+    if (!m || !m.is_manager) throw httpError(400, `${b.managerId || from} is not a manager in this run`);
+    if (b.isManager) throw httpError(400, "a manager reports to the CEO: only the CEO spawns managers");
+    managerId = m.id;
+  }
+  if (from.startsWith("wkr_")) {
+    const notMine = (b.taskIds || []).map(String).filter((t) => { const o = one("SELECT worker_id FROM tasks WHERE run_id = ? AND id = ?", p.id, t)?.worker_id; return o && !leads(from, o); });
+    if (notMine.length) throw httpError(409, `${notMine.join(", ")} belong${notMine.length === 1 ? "s" : ""} to another team: ask the CEO to move ${notMine.length === 1 ? "it" : "them"} to you first`);
+  }
   const id = shortId("wkr");
-  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated, harness) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)`,
-    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now(), harness);
+  run(`INSERT INTO workers (id, run_id, name, role, cwd, branch, tmux, status, launch_id, created, updated, harness, is_manager, team, manager_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, ?)`,
+    id, p.id, String(b.name), String(b.role), String(b.cwd), b.branch || null, b.tmux || null, b.launchId || null, now(), now(), harness,
+    b.isManager ? 1 : 0, b.isManager ? String(b.team || b.role).slice(0, 60) : null, managerId);
   for (const t of b.taskIds || []) run("UPDATE tasks SET worker_id = ?, updated = ? WHERE run_id = ? AND id = ?", id, now(), p.id, String(t));
   // Tickets carry the human's own description and attachments: the brief always includes them.
   const tickets = (b.taskIds || []).map((t) => one("SELECT * FROM tasks WHERE run_id = ? AND id = ? AND kind = 'ticket'", p.id, String(t))).filter(Boolean);
-  if (b.brief) addMessage(p.id, "ceo", id, "brief", tickets.length ? `${b.brief}\n\n${tickets.map((t) => ticketText(p.id, t)).join("\n\n")}` : b.brief);
+  if (b.brief) addMessage(p.id, from, id, "brief", tickets.length ? `${b.brief}\n\n${tickets.map((t) => ticketText(p.id, t)).join("\n\n")}` : b.brief);
   touchRun(p.id, "executing");
   notify(p.id, "worker");
   return { ...workerView(one("SELECT * FROM workers WHERE id = ?", id)), warnings: loadWarnings(p.id) };
@@ -1164,11 +1218,15 @@ route("PATCH", "/api/workers/:id", (b, p) => {
 route("GET", "/api/workers/:id", (_b, p) => {
   const w = one("SELECT * FROM workers WHERE id = ?", p.id);
   if (!w) return notFound();
-  const teammates = all("SELECT id, name, role, status, current_task FROM workers WHERE run_id = ? AND id != ?", w.run_id, w.id);
+  const teammates = all("SELECT id, name, role, status, current_task, is_manager, team, manager_id FROM workers WHERE run_id = ? AND id != ? AND alive = 1", w.run_id, w.id);
   const tasks = all("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ?", w.run_id, w.id);
   const events = all("SELECT * FROM (SELECT * FROM events WHERE worker_id = ? ORDER BY id DESC LIMIT 120) ORDER BY id", w.id);
   const brief = one("SELECT id, body FROM messages WHERE run_id = ? AND recipient = ? AND kind = 'brief' ORDER BY id LIMIT 1", w.run_id, w.id);
-  return { worker: workerView(w), teammates, tasks, events, run: one("SELECT * FROM runs WHERE id = ?", w.run_id), review: planReview(w.run_id), brief: brief?.body || null,
+  // A manager sees their team and its whole area; a report knows who they answer to.
+  const manager = w.manager_id ? one("SELECT id, name, role, team, alive FROM workers WHERE id = ?", w.manager_id) : null;
+  const reports = w.is_manager ? all("SELECT id, name, role, status, alive, current_task, stop_requested FROM workers WHERE manager_id = ? ORDER BY created", w.id) : [];
+  const teamTasks = w.is_manager ? all("SELECT * FROM tasks WHERE run_id = ? AND (worker_id = ? OR worker_id IN (SELECT id FROM workers WHERE manager_id = ?)) ORDER BY rowid", w.run_id, w.id, w.id) : [];
+  return { worker: workerView(w), teammates, tasks, events, run: one("SELECT * FROM runs WHERE id = ?", w.run_id), review: planReview(w.run_id), brief: brief?.body || null, manager, reports, teamTasks,
     lastMessageId: one("SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE run_id = ?", w.run_id).id };
 });
 
@@ -1220,7 +1278,7 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   if (b.assignTo) {
     const target = one("SELECT * FROM workers WHERE run_id = ? AND (id = ? OR lower(name) = lower(?))", p.id, String(b.assignTo), String(b.assignTo));
     if (!target) throw httpError(400, `no worker ${b.assignTo} in this run`);
-    if (t.worker_id && t.worker_id !== target.id && actor !== "ceo" && actor !== "human") throw httpError(409, `${p.task} belongs to ${participantName(p.id, t.worker_id)}: hand it off instead (handoffTo, with a note)`);
+    if (t.worker_id && t.worker_id !== target.id && !leads(actor, t.worker_id)) throw httpError(409, `${p.task} belongs to ${participantName(p.id, t.worker_id)}: hand it off instead (handoffTo, with a note)`);
     if (!note) throw httpError(400, "assigning needs a note: the brief (what to do, acceptance criteria, how to verify)");
     run("UPDATE tasks SET worker_id = ?, status = CASE WHEN status = 'done' THEN status ELSE 'todo' END, blocked_on = NULL, updated = ? WHERE run_id = ? AND id = ?", target.id, now(), p.id, p.task);
     closeHumanItem(p.id, `blocker:${p.task}`, "resolved", actor, `Reassigned to ${target.name}`);
@@ -1296,10 +1354,11 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
     }
   }
   if (b.status === "in_progress" && actor.startsWith("wkr_")) run("UPDATE workers SET current_task = ?, updated = ? WHERE id = ?", p.task, now(), actor);
+  if (b.status && b.status !== "done" && t.status === "done" && t.worker_id) run("UPDATE workers SET team_done_at = NULL WHERE id = (SELECT COALESCE(manager_id, id) FROM workers WHERE id = ?)", t.worker_id);
   const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status != 'done'", p.id).n;
   if (!open && b.status === "done") addMessage(p.id, "human", "ceo", "system", "All tasks are done. Integrate the work (merge worktrees), run the full verification, do a final review, then report to the human and finish the run (redplan_finish_run), which closes the workers' sessions.");
   if (b.status === "done" && t.status !== "done") {
-    if (t.worker_id) maybeReleaseWorker(p.id, t.worker_id);
+    if (t.worker_id) { maybeReleaseWorker(p.id, t.worker_id); maybeTeamDone(p.id, t.worker_id); }
     // A reviewer with nothing left to review is done too.
     for (const r of all("SELECT id FROM workers WHERE run_id = ? AND id != ?", p.id, t.worker_id || "")) maybeReleaseWorker(p.id, r.id);
   }
@@ -1328,6 +1387,7 @@ route("POST", "/api/workers/:id/dismiss", (b, p) => {
   if (w.left_reason === "dismissed") return { ok: true, name: w.name, already: true, handedOver: [], returned: [], rerouted: [] };
   const reason = String(b.reason || "").trim().slice(0, 500) || "The team no longer needs you for this run.";
   const actor = String(b.actor || "ceo");
+  if (!leads(actor, w.id) || actor === w.id) throw httpError(403, `Only the CEO${w.manager_id ? ` or ${participantName(w.run_id, w.manager_id)}, ${w.name}'s manager,` : ""} can dismiss ${w.name}.`);
   const own = all("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ? AND status != 'done'", w.run_id, w.id);
   const reviews = all("SELECT * FROM tasks WHERE run_id = ? AND reviewer_id = ? AND status = 'review'", w.run_id, w.id);
   let target = null;
@@ -1342,6 +1402,7 @@ route("POST", "/api/workers/:id/dismiss", (b, p) => {
     throw httpError(409, `${w.name} still owns ${building.map((t) => `${t.id} (${t.status.replace("_", " ")})`).join(", ")}. Hand it over (handoffTo: a teammate) or put it back on the board unassigned (returnToBoard: true), then dismiss.`);
   }
   const handedOver = [], returned = [];
+  const team = w.is_manager ? all("SELECT id, name FROM workers WHERE manager_id = ? AND alive = 1 AND stop_requested IS NULL", w.id) : [];
   db.exec("BEGIN");
   try {
     for (const t of building) {
@@ -1359,6 +1420,8 @@ route("POST", "/api/workers/:id/dismiss", (b, p) => {
     run("UPDATE workers SET left_reason = 'dismissed', left_at = ?, stop_requested = ?, stop_at = ?, updated = ? WHERE id = ?",
       now(), `You have been dismissed from this run: ${reason}`, now() - STOP_GRACE_MS + 60_000, now(), w.id);
     run("INSERT INTO events (worker_id, kind, text, created) VALUES (?, 'session', ?, ?)", w.id, `Dismissed by ${participantName(w.run_id, actor)}: ${reason}`, now());
+    // A manager's team stays: its people report to the new owner of the work (if a manager), else to the CEO.
+    if (w.is_manager) run("UPDATE workers SET manager_id = ? WHERE manager_id = ?", target?.is_manager ? target.id : null, w.id);
     db.exec("COMMIT");
   } catch (e) { db.exec("ROLLBACK"); throw e; }
   if (target && handedOver.length) {
@@ -1368,8 +1431,10 @@ route("POST", "/api/workers/:id/dismiss", (b, p) => {
   // Their reviews go to another reviewer (routeReview skips a worker asked to stop).
   const rerouted = reviews.map((t) => routeReview(w.run_id, { ...t, reviewer_id: null }, t.note)?.name).filter(Boolean);
   if (w.alive) addMessage(w.run_id, "human", w.id, "system", `You have been dismissed from this run: ${reason} Your session is closing now. Do not reply.`);
+  const newLead = target?.is_manager ? target : null;
+  for (const r of team) addMessage(w.run_id, "human", r.id, "system", `${w.name}, your manager, has left the team. You now report to ${newLead ? `${newLead.name} (${newLead.team || newLead.role})` : "the CEO"}: send them your reports, questions and blockers.`);
   notify(w.run_id, "worker"); notify(w.run_id, "task");
-  return { ok: true, name: w.name, handedOver, returned, rerouted, wasRunning: !!w.alive };
+  return { ok: true, name: w.name, handedOver, returned, rerouted, wasRunning: !!w.alive, team: team.map((r) => r.name), teamNowReportsTo: team.length ? (newLead ? newLead.name : "CEO") : null };
 });
 
 route("POST", "/api/runs/:id/messages", (b, p) => {

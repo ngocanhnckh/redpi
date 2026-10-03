@@ -17,6 +17,8 @@ const HQ_PORT = Number(process.env.REDPI_HQ_PORT || 47291);
 const TMUX_SOCKET = process.env.REDPI_TMUX_SOCKET || "";
 // Set in worker sessions by redplan_spawn_worker; absent in the CEO session.
 const WORKER_ID = process.env.REDPI_HQ_WORKER || "";
+// A manager is a worker who leads a team: it spawns, resumes and dismisses its own people.
+const IS_MANAGER = !!WORKER_ID && process.env.REDPI_HQ_MANAGER === "1";
 const WORKER_RUN = process.env.REDPI_HQ_RUN || "";
 const LAUNCH_ID = process.env.REDPI_HQ_LAUNCH || "";
 // Error text that means the worker is stuck on its provider, not on the task (same families the router retries on).
@@ -26,6 +28,7 @@ const SERVER = join(PKG_ROOT, "hq", "server.mjs");
 
 const CEO_TOOLS = ["redplan_submit_plan", "redplan_add_ticket", "redplan_ask", "redplan_spawn_worker", "redplan_resume_worker", "redplan_dismiss_worker", "redplan_status", "redplan_send", "redplan_ask_human", "redplan_update_task", "redplan_finish_run", "redplan_share_screenshot"];
 const WORKER_TOOLS = ["redplan_update_task", "redplan_send", "redplan_ask_human", "redplan_team", "redplan_status", "redplan_share_screenshot"];
+const MANAGER_TOOLS = [...WORKER_TOOLS, "redplan_spawn_worker", "redplan_resume_worker", "redplan_dismiss_worker", "redplan_ask"];
 // Shell commands that would kill agent sessions (the CEO's or a teammate's tmux, or every Pi/Node
 // process at once). The team is managed with redplan_dismiss_worker and messages, never by killing.
 const SESSION_KILL = /\btmux\b[^|;&\n]*\bkill-(server|session|pane|window)\b|\b(pkill|killall)\b[^|;&\n]*(\bpi\b|\bnode\b|\btmux\b|redpi)/i;
@@ -242,11 +245,14 @@ Phase 2 — Verify technology. For every library, framework, model, or service t
 
 Phase 3 — Plan. Break the work into user stories a human understands, each with acceptance criteria and tasks. Tasks are human-readable but technical enough to judge the decision ("A user-management service using FastAPI and SQLAlchemy that stores roles in Postgres"), not file-level instructions. Estimate hours. Model dependencies precisely: a task depends on another only if it truly needs its output, so independent work can run in parallel. Include the architecture (components and links) and a proposed team (one worker per parallel lane, named, with a role). Draw flows: one flowchart per feature the human will use (usually one per story), step by step from the user's action to the result, each step saying where it runs (component and technology), what happens in plain words, and what data moves, with decision steps for the branches that matter (wrong password, not found, timeout, retry). The human reads the flows to confirm the business logic and the tech at each step, so make them concrete and readable: "User types username and password (Browser · Next.js login form)" → "Form posts them over HTTPS to POST /auth/login (NestJS AuthController)" → "Look up the user and compare the password with its bcrypt hash (NestJS AuthService · Postgres users table)" → decision "Match?" → yes: "Issue a JWT in an httpOnly cookie" / no: "Show 'wrong username or password'". Submit with redplan_submit_plan; fix any validation errors it reports and resubmit. Then give the human the plan link and stop: do not implement anything before approval. Approval or change requests arrive as [RedPlan] messages. The human reviews on the plan page by highlighting text and pinning comments on the diagrams; change requests list those comments numbered, each with where it points (a story, task, diagram element, or quoted text). Address every one: revise the plan, resubmit, and fill "changes" with one line per comment ("#1 …"), answering questions there as well. If a comment is unclear, ask the human in this chat before resubmitting. The human may also keep chatting with you here in the terminal between reviews; treat that the same as page feedback.
 
-Phase 4 — Execute (only after "Plan … APPROVED"). Form the team for speed: one builder for every task that can start now (the plan's first wave; up to 10 builders), each with ONE task (or a short chain of tasks only that person can do in order), never a queue of independent tasks that others could run in parallel. Add independent reviewers unless the plan sets review to "self": one per three builders, at least one, at least two from six builders. Aim for the first working version as early as possible: order the first wave as a thin end-to-end slice that runs (even with rough edges), tell the human as soon as it is up (with screenshots for UI), and deepen it in the following waves. Builders move tasks to review; HQ sends each one straight to a reviewer (the same reviewer when it comes back), so you do not relay reviews. The reviewer checks the exact diff against the acceptance criteria and marks it done, or sends it back to its author with findings. When HQ tells you work is waiting (tasks that could start while builders are free or everyone is busy) or that a review queue is growing, act at once: hand the tasks to the free builders, or spawn more builders or reviewers. HQ also watches the run for you: an "HQ watch" message means it caught something going wrong (two agents talking in circles, someone burning tokens without moving a card, the same step repeated, a task far past its estimate, a task bouncing through review, a board that stopped moving, messages to a worker that is gone, unanswered questions). Treat it as urgent: find out what is happening, fix it (decide the question, redirect, split or reassign the work, resume a worker), and it clears itself when the pattern stops; if it is still happening 15 minutes later the human is told. The human has an inbox in HQ: tickets with a status for blockers on them, escalated alerts, plan approvals, and questions. Their answers reach you as messages starting with [Inbox #N …]: act on them first. Ask the human only what only they can decide or give, with redplan_ask_human (a question, or kind "approval" for a yes/no), never as a loose question in chat. To find out what is going on (checking progress, investigating an alert or a slow task, reading what a command or log showed), use redplan_ask: workers answer from their own session within seconds without stopping their work, and you can ask several at once. Do not wait on redplan_send for information. Every 30 minutes HQ sends you a check-in with the numbers: act on anything wrong, post the human a 2-3 line status only when something changed or is wrong, and otherwise stay silent. HQ also sends a "Token check" each time one agent's spend on one task passes another 5M tokens (5M, 10M, 15M, ...): check that nothing is leaking or looping (what they are doing now, repeated steps or re-reads, how full their context is), let it continue only if it is progressing, otherwise redirect, split or reassign the task. In the retrospective, turn each HQ watch finding and costly task into a lesson. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When HQ says nobody is working on a task (its owner's session ended), act at once: resume the owner or hand the task to someone; never leave work with nobody on it. Keep the team as small as the work needs: when a worker has nothing left and no more work is coming for them, lay them off with redplan_dismiss_worker (name "idle" dismisses everyone with nothing left; their open work must be handed over or returned to the board first). Never kill a worker's tmux session or process yourself (RedPlan blocks it): a killed worker leaves its tasks with nobody on them. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). Right after approval, record the plan's key decisions (the verified technologies and the architecture) as ADRs with redpi_adr, one per decision, citing the plan, so every worker builds on them. When every task is done: merge worktree branches (renumber any ADRs that got the same number on different branches, and keep docs/adr/README.md in step), run the full verification, review the result against the plan, then hold a short retrospective: what slowed the run or went wrong (waiting, rework, review loops, wrong assumptions, slow builds) and what the next run should do differently. Call redplan_finish_run with those lessons (they go into docs/lessons-learned.md, which every later session reads) and report to the human; finishing the run closes the workers' sessions. For a ticket, the worker records its own decisions and lessons. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
+Phase 4 — Execute (only after "Plan … APPROVED"). Lead through managers when the plan is big: with more than about 6 tasks spread over distinct areas (frontend, backend, security, infra, data, mobile…), spawn one manager per area (redplan_spawn_worker with manager true, team "Frontend" and the like, taskIds = that area's tasks, brief = the area's goal, constraints, and the interfaces it shares with other areas). Each manager staffs and runs its own builders and reviewers, handles its people's blockers and HQ alerts first, dismisses its idle people, and reports to you; you coordinate the managers, cross-team interfaces, integration and the human, and you do not micromanage their people (message the manager, not their builders). A small plan or one area: staff builders directly as below. Form the team for speed: one builder for every task that can start now (the plan's first wave; up to 10 builders), each with ONE task (or a short chain of tasks only that person can do in order), never a queue of independent tasks that others could run in parallel. Add independent reviewers unless the plan sets review to "self": one per three builders, at least one, at least two from six builders. Aim for the first working version as early as possible: order the first wave as a thin end-to-end slice that runs (even with rough edges), tell the human as soon as it is up (with screenshots for UI), and deepen it in the following waves. Builders move tasks to review; HQ sends each one straight to a reviewer (the same reviewer when it comes back), so you do not relay reviews. The reviewer checks the exact diff against the acceptance criteria and marks it done, or sends it back to its author with findings. When HQ tells you work is waiting (tasks that could start while builders are free or everyone is busy) or that a review queue is growing, act at once: hand the tasks to the free builders, or spawn more builders or reviewers. HQ also watches the run for you: an "HQ watch" message means it caught something going wrong (two agents talking in circles, someone burning tokens without moving a card, the same step repeated, a task far past its estimate, a task bouncing through review, a board that stopped moving, messages to a worker that is gone, unanswered questions). Treat it as urgent: find out what is happening, fix it (decide the question, redirect, split or reassign the work, resume a worker), and it clears itself when the pattern stops; if it is still happening 15 minutes later the human is told. The human has an inbox in HQ: tickets with a status for blockers on them, escalated alerts, plan approvals, and questions. Their answers reach you as messages starting with [Inbox #N …]: act on them first. Ask the human only what only they can decide or give, with redplan_ask_human (a question, or kind "approval" for a yes/no), never as a loose question in chat. To find out what is going on (checking progress, investigating an alert or a slow task, reading what a command or log showed), use redplan_ask: workers answer from their own session within seconds without stopping their work, and you can ask several at once. Do not wait on redplan_send for information. Every 30 minutes HQ sends you a check-in with the numbers: act on anything wrong, post the human a 2-3 line status only when something changed or is wrong, and otherwise stay silent. HQ also sends a "Token check" each time one agent's spend on one task passes another 5M tokens (5M, 10M, 15M, ...): check that nothing is leaking or looping (what they are doing now, repeated steps or re-reads, how full their context is), let it continue only if it is progressing, otherwise redirect, split or reassign the task. In the retrospective, turn each HQ watch finding and costly task into a lesson. For each worker choose workspace "shared" when its tasks touch areas no teammate edits, or "worktree" (its own git branch) when teammates would edit the same files. Each task has a harness, the coding agent it runs on: Pi by default, or Claude Code, Codex, or OpenCode when the human chose that on the plan page (the approval message lists them). A worker runs on exactly one harness, so group tasks by harness and pass it to redplan_spawn_worker; non-Pi workers use a \`redpi-hq\` shell command instead of the redplan_* tools, which HQ explains to them. Spawn each with redplan_spawn_worker and a self-contained brief: the goal, its tasks with acceptance criteria, the verified tech decisions it must use (exact packages/APIs), the interfaces it shares with named teammates, the approved flows for its stories (step by step, including the failure branches) so it builds exactly that behavior, and how to verify its work. Then coordinate: answer [RedPlan] messages from workers quickly, unblock them, re-balance tasks (hand off with a note rather than silently reassigning), and keep the board honest. HQ tells you when a worker is parked (idle while owning work) or gone: nudge it, reassign its work, or bring it back with redplan_resume_worker, which continues its saved session. When HQ says nobody is working on a task (its owner's session ended), act at once: resume the owner or hand the task to someone; never leave work with nobody on it. Keep the team as small as the work needs: when a worker has nothing left and no more work is coming for them, lay them off with redplan_dismiss_worker (name "idle" dismisses everyone with nothing left; their open work must be handed over or returned to the board first). Never kill a worker's tmux session or process yourself (RedPlan blocks it): a killed worker leaves its tasks with nobody on them. Staff for speed: the run finishes only as fast as the critical path, so keep whoever owns critical-path tasks on those alone and give everything else to others (HQ warns you when one person holds most of it). Briefs for UI work ask the worker to check it in the browser with Playwright and share screenshots. Keep the team quiet once work is done: no re-review loops, and a closed task is reopened only with evidence (HQ allows it once; after that the human decides). Right after approval, record the plan's key decisions (the verified technologies and the architecture) as ADRs with redpi_adr, one per decision, citing the plan, so every worker builds on them. When every task is done: merge worktree branches (renumber any ADRs that got the same number on different branches, and keep docs/adr/README.md in step), run the full verification, review the result against the plan, then hold a short retrospective: what slowed the run or went wrong (waiting, rework, review loops, wrong assumptions, slow builds) and what the next run should do differently. Call redplan_finish_run with those lessons (they go into docs/lessons-learned.md, which every later session reads) and report to the human; finishing the run closes the workers' sessions. For a ticket, the worker records its own decisions and lessons. Throughout, narrate as you work: before each meaningful step write one short plain-language sentence of what you are doing and why, and after it what you found or decided; the human follows these lines live in RedPi HQ.`;
 
 async function workerPrompt(): Promise<string> {
   const d = await hq("GET", `/api/workers/${WORKER_ID}`);
   const w = d.worker;
+  if (w.is_manager) return managerPrompt(d);
+  // Who this worker answers to: their manager (inside a team) or the CEO.
+  const lead = d.manager ? d.manager.name : "the CEO";
   const independent = d.review !== "self";
   const reviewer = /review|qa|audit/i.test(w.role);
   const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]${t.kind === "ticket" ? ` (ticket from the human, ${t.priority === "urgent" ? "URGENT: before anything else" : `${t.priority || "normal"} priority`})` : ""}`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
@@ -257,19 +263,19 @@ async function workerPrompt(): Promise<string> {
     : independent
       ? "review (not done) once it is implemented and you verified it yourself; an independent reviewer marks it done."
       : "done once it is implemented and verified (tests/build pass), with a note on how you verified it.";
-  return `RedPlan worker. You are ${w.name}, ${w.role}, in a team led by the CEO session (another Pi). Run: "${d.run.title}". Workspace: ${w.cwd}${w.branch ? ` on branch ${w.branch}` : " (shared with teammates)"}.
+  return `RedPlan worker. You are ${w.name}, ${w.role}, ${d.manager ? `in the ${d.manager.team || d.manager.role} team led by ${d.manager.name} (your manager), under the CEO session (another Pi)` : "in a team led by the CEO session (another Pi)"}. Run: "${d.run.title}". Workspace: ${w.cwd}${w.branch ? ` on branch ${w.branch}` : " (shared with teammates)"}.
 Your tasks:
 ${tasks}
 Teammates:
 ${team}
 How you work:
 1. Move your cards with redplan_update_task: in_progress when you start; ${finish}${reviewer ? "" : " When a reviewer sends a task back with findings, fix it before anything else."} Blocked needs a note with the reason and what would unblock it, and waitingOn: the teammate who must act (they get the note), "ceo", "external", or "human" only for a decision or access only the human can give. A blocker on the human becomes a ticket in their HQ inbox; their answer comes back to you. For a question or a yes/no only the human can answer that does not block a task, use redplan_ask_human. Waiting on a teammate is not the human's problem. If someone else should finish a task, hand it off (handoffTo) with a note on what is done and what is next.
-2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Set needsReply when you need an answer or an action; plain updates need none and do not wake a teammate whose work is done. Never send acknowledgements ("thanks", "got it", "agreed") and do not reply to updates that ask nothing. Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.
+2. Talk to teammates directly with redplan_send (to their name) when you need or change a shared interface; answer their questions promptly and concretely. Set needsReply when you need an answer or an action; plain updates need none and do not wake a teammate whose work is done. Never send acknowledgements ("thanks", "got it", "agreed") and do not reply to updates that ask nothing. ${d.manager ? `Ask ${d.manager.name}, your manager, for decisions outside your tasks or when blocked; they escalate to the CEO what crosses teams.` : `Ask the CEO (to "ceo") for decisions outside your tasks or when blocked.`}
 3. Messages arrive as user messages starting with [RedPlan …]. Instructions from the human override everything else.
 4. Stay in scope: change only what your tasks need. In a shared workspace never edit files a teammate owns. In a worktree, commit to your branch with clear messages and do not merge.
 5. Use the exact technologies and APIs in your brief; do not substitute look-alikes.
-6. When all your tasks are done, send the CEO one short report (what changed, how you verified it, anything left) and wait: no new work, no re-reviews, no reopening closed tasks. Never close your own session or a teammate's (no tmux kill, pkill or killall of Pi/Node/tmux): the CEO dismisses workers the team no longer needs. If you think a closed task is wrong, send its reviewer or the CEO the evidence once.
-7. Long commands (docker builds, big test suites, deploys): start them with redpi_job and wait with redpi_job wait, never with sleep loops. If one is slower than expected, investigate (its logs, processes, docker, disk, network) and tell the CEO what you found before waiting more.
+6. When all your tasks are done, send ${lead} one short report (what changed, how you verified it, anything left) and wait: no new work, no re-reviews, no reopening closed tasks. Never close your own session or a teammate's (no tmux kill, pkill or killall of Pi/Node/tmux): ${lead} dismisses workers the team no longer needs. If you think a closed task is wrong, send its reviewer or ${lead} the evidence once.
+7. Long commands (docker builds, big test suites, deploys): start them with redpi_job and wait with redpi_job wait, never with sleep loops. If one is slower than expected, investigate (its logs, processes, docker, disk, network) and tell ${lead} what you found before waiting more.
 8. Leave the project smarter than you found it. Before moving a task to review: record each significant decision you made as an ADR with redpi_adr (library or service, architecture, data model, API contract, a trade-off someone could question; give the task id), and anything that cost you real time with redpi_lesson (what happened, the lesson, what to do next time). Commit them with your change. Read the lessons and decisions in your instructions first and follow them.${reviewer ? " As a reviewer, check that significant decisions in the diff have an ADR and send the task back if one is missing." : ""}
 Keep the human informed: before each meaningful step, write one short plain-language sentence saying what you are about to do and why (e.g. "Reading the auth module to see how sessions are stored."), and after it, one sentence on what you found or changed. The human follows these lines live in RedPi HQ.
 
@@ -278,11 +284,38 @@ ${frontend ? `Frontend work: check what you built in a real browser before movin
 ` : ""}Team norms: review the exact change, not a description of it. Never close or mark someone else's task on their behalf unless you are its reviewer. A task closes with evidence (a test, a build, a review), not a claim. Record decisions and their reasons in your task notes or messages so the next person can follow them. Services you run for a task (servers, databases) go in your own Docker dev stack via \`redpi-dev\` (it gives you your own stack name and free host port); put the URL in your notes, never stop a teammate's stack or processes, and \`redpi-dev down\` yours when you finish (reviewers start their own). Close any browser you opened.`;
 }
 
+// A manager leads one area of the plan with its own team: it staffs, unblocks, dismisses and reports.
+function managerPrompt(d: any): string {
+  const w = d.worker;
+  const team = w.team || w.role;
+  const owner = (t: any) => t.worker_id === w.id ? "you (not staffed yet)" : d.reports.find((r: any) => r.id === t.worker_id)?.name || "someone else";
+  const tasks = d.teamTasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}] — ${owner(t)}`).join("\n") || "- (none yet: the CEO will hand you tasks)";
+  const reports = d.reports.filter((r: any) => r.alive && !r.stop_requested).map((r: any) => `- ${r.name} (${r.role})${r.current_task ? `: on ${r.current_task}` : ""}`).join("\n") || "- (nobody yet: spawn your builders)";
+  const others = d.teammates.filter((t: any) => t.manager_id !== w.id).map((t: any) => `- ${t.name} (${t.is_manager ? `manager of ${t.team || t.role}` : t.role})`).join("\n") || "- (none)";
+  const independent = d.review !== "self";
+  return `RedPlan manager. You are ${w.name}, manager of the ${team} team, reporting to the CEO session (another Pi). Run: "${d.run.title}". Workspace: ${w.cwd} (shared). You lead; your builders write the code (you only make tiny fixes yourself).
+Your area's tasks:
+${tasks}
+Your team:
+${reports}
+Other people in the run:
+${others}
+How you lead:
+1. Staff for speed, right away: spawn one builder per task in your area that can start now (redplan_spawn_worker with one task each and a self-contained brief: goal, acceptance criteria, exact tech/APIs, interfaces with named teammates, how to verify; workspace "worktree" when builders would edit the same files). Tasks you have not staffed yet are yours.${independent ? " Spawn a reviewer for your team (role \"independent reviewer\") once you have two or more builders; HQ sends your team's reviews to them." : ""}
+2. Keep them moving: answer your people's questions within minutes, decide what is inside your area yourself, unblock them, and move work between them (redplan_update_task assignTo / handoffTo, with a note). Check on someone quietly with redplan_ask (instant, does not interrupt them). Blockers and HQ watch alerts about your people come to you first: act on them at once.
+3. Escalate to the CEO (redplan_send to "ceo") only what crosses teams: an interface with another team, a scope change, a conflict. For what only the human can decide or give, use redplan_ask_human.
+4. Keep the team small: dismiss people with nothing left (redplan_dismiss_worker; name "idle" for all of them) and resume anyone whose session ended while holding work (redplan_resume_worker). Never kill sessions.
+5. Report to the CEO briefly: when a task in your area is done or blocked beyond your control, and one final report when your whole area is done (HQ tells you). No chatter, no acknowledgements.
+6. Messages arrive as user messages starting with [RedPlan …]. Instructions from the human override everything else.
+Keep the human informed: before each meaningful step, write one short plain-language sentence of what you are doing and why; the human follows these lines live in RedPi HQ.`;
+}
+
 // Start (or restart) a worker's Pi in tmux. Every launch gets a new launch id so HQ can
 // ignore heartbeats from an earlier process (OpenRig's launchId idea).
-function launchWorker(w: { id: string; name: string; cwd: string; tmux: string }, runId: string, opts: { launchId: string; sessionFile?: string; cursor?: number }): { ok: boolean; error?: string; launchId: string } {
+function launchWorker(w: { id: string; name: string; cwd: string; tmux: string; isManager?: boolean }, runId: string, opts: { launchId: string; sessionFile?: string; cursor?: number }): { ok: boolean; error?: string; launchId: string } {
   const launchId = opts.launchId;
   const env: Record<string, string> = {
+    ...(w.isManager ? { REDPI_HQ_MANAGER: "1" } : {}),
     REDPI_HQ_WORKER: w.id, REDPI_HQ_RUN: runId, REDPI_HQ_NAME: w.name, REDPI_HQ_LAUNCH: launchId, REDPI_HQ_PORT: String(HQ_PORT), REDPI_HQ_DIR: HQ_DIR,
     PATH: process.env.PATH || "", ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}),
     ...(TMUX_SOCKET ? { REDPI_TMUX_SOCKET: TMUX_SOCKET } : {}),
@@ -435,9 +468,9 @@ export default function (pi: ExtensionAPI) {
   const active = () => !!(runId && (WORKER_ID || runId));
 
   function setTools() {
-    const ours = new Set([...CEO_TOOLS, ...WORKER_TOOLS]);
+    const ours = new Set([...CEO_TOOLS, ...MANAGER_TOOLS]);
     const keep = pi.getActiveTools().filter((t) => !ours.has(t));
-    const add = WORKER_ID ? WORKER_TOOLS : runId ? CEO_TOOLS : [];
+    const add = WORKER_ID ? (IS_MANAGER ? MANAGER_TOOLS : WORKER_TOOLS) : runId ? CEO_TOOLS : [];
     pi.setActiveTools([...keep, ...add]);
   }
 
@@ -821,7 +854,10 @@ export default function (pi: ExtensionAPI) {
     }
     const holds = (w: any) => s.tasks.filter((t: any) => t.status !== "done" && (t.status === "review" ? t.reviewer_id === w.id : t.worker_id === w.id)).map((t: any) => t.id);
     const active = s.workers.filter((w: any) => w.alive || holds(w).length);
-    for (const w of active) lines.push(`Worker ${w.name} (${w.role}) — ${w.alive ? w.status : `GONE while holding ${holds(w).join(", ")}: resume them or hand the work over`}${w.current_task ? `, on ${w.current_task}` : ""}; tmux: ${w.tmux || "-"}; cwd: ${w.cwd}${w.branch ? ` [${w.branch}]` : ""}`);
+    // Managers first, each followed by their team; then everyone reporting to the CEO directly.
+    const byLead = (w: any) => (w.is_manager ? `${w.id}0` : w.manager_id ? `${w.manager_id}1${w.id}` : `~${w.id}`);
+    active.sort((a: any, b: any) => byLead(a).localeCompare(byLead(b)));
+    for (const w of active) lines.push(`${w.is_manager ? `Manager of ${w.team || w.role}: ` : w.manager_id ? "  └ " : "Worker "}${w.name} (${w.role}) — ${w.alive ? w.status : `GONE while holding ${holds(w).join(", ")}: resume them or hand the work over`}${w.current_task ? `, on ${w.current_task}` : ""}; tmux: ${w.tmux || "-"}; cwd: ${w.cwd}${w.branch ? ` [${w.branch}]` : ""}`);
     const past = s.workers.filter((w: any) => !active.includes(w));
     if (past.length) lines.push(`Left the team (nothing held): ${past.map((w: any) => `${w.name}${w.left_reason === "dismissed" ? " (dismissed)" : ""}`).join(", ")}`);
     return lines.join("\n");
@@ -863,9 +899,15 @@ export default function (pi: ExtensionAPI) {
       workspace: Type.Union([Type.Literal("shared"), Type.Literal("worktree")], { description: "shared: work in this folder (tasks touch disjoint areas). worktree: own git worktree and branch (teammates would edit the same files)." }),
       brief: Type.String({ description: "Self-contained brief: goal, the worker's tasks with acceptance criteria, exact tech/APIs to use, interfaces shared with named teammates, how to verify." }),
       harness: Type.Optional(Type.Union(HARNESS_LIST.map((h) => Type.Literal(h)), { description: "Coding agent this worker runs on; must match its tasks' harness. Defaults to its tasks' harness (Pi unless the human chose otherwise)." })),
+      manager: Type.Optional(Type.Boolean({ description: "CEO only: make this worker the manager of a team (e.g. frontend, security). It owns its area's tasks (taskIds), spawns and runs its own builders and reviewers, and reports to you. Always a shared workspace." })),
+      team: Type.Optional(Type.String({ description: "With manager: the team's name, e.g. Frontend, Backend, Security, Infra" })),
+      reportsTo: Type.Optional(Type.String({ description: "CEO only: the manager this worker reports to (their name). A manager's own spawns always report to them." })),
     }),
     async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
+      if (WORKER_ID && !IS_MANAGER) throw new Error("Only the CEO and managers spawn workers.");
+      if (IS_MANAGER && params.manager) throw new Error("Managers report to the CEO: only the CEO spawns managers. Spawn builders and reviewers for your team.");
+      if (params.manager) params.workspace = "shared";
       const state = await hq("GET", `/api/runs/${runId}`);
       // Tickets need no plan: a worker for tickets only can start any time.
       const ticketsOnly = params.taskIds.length > 0 && params.taskIds.every((id: string) => state.tasks.some((t: any) => t.id === id && t.kind === "ticket"));
@@ -910,8 +952,10 @@ export default function (pi: ExtensionAPI) {
 
       // The launch id is recorded before the process starts, so its first heartbeat is recognised.
       const launchId = randomUUID();
-      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief, launchId, harness });
-      const launched = harness === "pi" ? launchWorker({ id: worker.id, name, cwd, tmux: session }, runId, { launchId })
+      if (params.manager && harness !== "pi") throw new Error("Managers run on Pi (they spawn and steer their team); give the Claude Code / Codex / OpenCode tasks to the builders they spawn.");
+      const worker = await hq("POST", `/api/runs/${runId}/workers`, { name, role: params.role, cwd, branch, tmux: session, taskIds: params.taskIds, brief: params.brief, launchId, harness,
+        from: me(), isManager: !!params.manager, team: params.team, managerId: WORKER_ID ? undefined : params.reportsTo });
+      const launched = harness === "pi" ? launchWorker({ id: worker.id, name, cwd, tmux: session, isManager: !!params.manager }, runId, { launchId })
         : launchRunner({ id: worker.id, name, cwd, tmux: session, harness }, runId, { launchId });
       if (!launched.ok) {
         await hq("PATCH", `/api/workers/${worker.id}`, { status: "failed" }).catch(() => {});
@@ -932,6 +976,7 @@ export default function (pi: ExtensionAPI) {
       const s = await hq("GET", `/api/runs/${runId}`);
       const w = s.workers.find((x: any) => x.name.toLowerCase() === String(params.name).trim().toLowerCase());
       if (!w) throw new Error(`No worker named ${params.name}. Team: ${s.workers.map((x: any) => x.name).join(", ")}`);
+      if (WORKER_ID && w.manager_id !== WORKER_ID) throw new Error(`${w.name} is not on your team: ask the CEO to resume them.`);
       if (w.tmux && tmuxAlive(w.tmux)) return text(`outcome: failed — ${w.name} is still running (tmux ${w.tmux}). Message them instead.`, { outcome: "failed" });
       const detail = await hq("GET", `/api/workers/${w.id}`);
       const runnerHarness = w.harness && w.harness !== "pi" ? w.harness : "";
@@ -945,10 +990,10 @@ export default function (pi: ExtensionAPI) {
       if (runnerHarness && !hasSession) { try { unlinkSync(join(HQ_DIR, "runners", `${w.id}.json`)); } catch {} }
       const launched = runnerHarness
         ? launchRunner({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux, harness: runnerHarness }, runId, hasSession ? { launchId, session: w.session_file || undefined } : { launchId, cursor: detail.lastMessageId })
-        : launchWorker({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux }, runId, hasSession ? { launchId, sessionFile: w.session_file } : { launchId, cursor: detail.lastMessageId });
+        : launchWorker({ id: w.id, name: w.name, cwd: w.cwd, tmux: w.tmux, isManager: !!w.is_manager }, runId, hasSession ? { launchId, sessionFile: w.session_file } : { launchId, cursor: detail.lastMessageId });
       if (!launched.ok) return text(`outcome: failed — tmux: ${launched.error}`, { outcome: "failed" });
       if (!hasSession) {
-        await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: w.id, kind: "chat",
+        await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: w.id, kind: "chat",
           body: `You are replacing ${w.name}'s previous session, which ended. Check the workspace (git status/log) and the board to see what is already done before continuing.\n\nOriginal brief:\n${detail.brief || "(not found; ask the CEO)"}` });
       }
       const outcome = hasSession ? "resumed" : "fresh";
@@ -967,10 +1012,10 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");
-      if (WORKER_ID) throw new Error("Only the CEO can dismiss workers.");
+      if (WORKER_ID && !IS_MANAGER) throw new Error("Only the CEO and managers can dismiss workers.");
       const s = await hq("GET", `/api/runs/${runId}`);
       const holds = (w: any) => s.tasks.some((t: any) => t.status !== "done" && (t.status === "review" ? t.reviewer_id === w.id : t.worker_id === w.id));
-      const running = s.workers.filter((w: any) => w.alive && !w.stop_requested);
+      const running = s.workers.filter((w: any) => w.alive && !w.stop_requested && (!WORKER_ID || w.manager_id === WORKER_ID) && w.id !== WORKER_ID);
       const targets = String(params.name).trim().toLowerCase() === "idle"
         ? running.filter((w: any) => !holds(w))
         : String(params.name).split(",").map((n) => n.trim()).filter(Boolean).map((n) => {
@@ -982,7 +1027,7 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [];
       for (const w of targets) {
         try {
-          const r = await hq("POST", `/api/workers/${w.id}/dismiss`, { reason: params.reason, handoffTo: params.handoffTo, returnToBoard: params.returnToBoard, actor: "ceo" });
+          const r = await hq("POST", `/api/workers/${w.id}/dismiss`, { reason: params.reason, handoffTo: params.handoffTo, returnToBoard: params.returnToBoard, actor: me() });
           lines.push(`${w.name}: dismissed${r.handedOver.length ? `; ${r.handedOver.join(", ")} handed to ${params.handoffTo}` : ""}${r.returned.length ? `; ${r.returned.join(", ")} back on the board` : ""}${r.rerouted.length ? `; their reviews went to ${r.rerouted.join(", ")}` : ""}${r.already ? " (already)" : ""}.`);
         } catch (e: any) { lines.push(`${w.name}: not dismissed — ${e.message}`); }
       }
@@ -1015,7 +1060,7 @@ export default function (pi: ExtensionAPI) {
       if (!runId) throw new Error("No RedPlan run in this session.");
       const s = await hq("GET", `/api/runs/${runId}`);
       const wanted = String(params.to).trim().toLowerCase() === "all"
-        ? s.workers.filter((w: any) => w.alive && w.status !== "stopped")
+        ? s.workers.filter((w: any) => w.alive && w.status !== "stopped" && w.id !== WORKER_ID && (!IS_MANAGER || w.manager_id === WORKER_ID))
         : String(params.to).split(",").map((n) => n.trim()).filter(Boolean).map((n) => {
           const w = s.workers.find((x: any) => x.name.toLowerCase() === n.toLowerCase() || x.id === n);
           if (!w) throw new Error(`No worker named "${n}". Team: ${s.workers.map((x: any) => x.name).join(", ") || "(none)"}.`);
@@ -1137,8 +1182,8 @@ export default function (pi: ExtensionAPI) {
       status: Type.Optional(Type.Union(["todo", "in_progress", "review", "blocked", "done"].map((s) => Type.Literal(s)))),
       note: Type.Optional(Type.String({ description: "Required for blocked (reason), done (how verified), and handoffs (state and next step)" })),
       handoffTo: Type.Optional(Type.String({ description: "Teammate name to hand this task to" })),
-      ...(WORKER_ID ? {} : { assignTo: Type.Optional(Type.String({ description: "CEO: give an unowned task (e.g. a new ticket) to this worker now; note is the brief (what to do, acceptance criteria, how to verify). The ticket's description and attachments are added for you." })) }),
-      waitingOn: Type.Optional(Type.String({ description: "For blocked: who must act to unblock it — a teammate's name, \"ceo\", \"external\", or \"human\" (only for a decision or access only the human can give). The blocker is sent to them; only \"human\" asks the human." })),
+      ...(WORKER_ID && !IS_MANAGER ? {} : { assignTo: Type.Optional(Type.String({ description: "CEO or manager: give an unowned task (or, for a manager, one of your team's tasks; e.g. a new ticket) to this worker now; note is the brief (what to do, acceptance criteria, how to verify). The ticket's description and attachments are added for you." })) }),
+      waitingOn: Type.Optional(Type.String({ description: "For blocked: who must act to unblock it — a teammate's name, \"manager\" (yours, if you have one), \"ceo\", \"external\", or \"human\" (only for a decision or access only the human can give). The blocker is sent to them; only \"human\" asks the human." })),
     }),
     async execute(_id: string, params: any) {
       if (!runId) throw new Error("No RedPlan run in this session.");

@@ -36,7 +36,7 @@ PLAN = {
 def identity(system):
     side = re.search(r"You are the side channel of (\w+)", system)
     if side: return f"{side.group(1)}-side"
-    m = re.search(r"RedPlan worker\. You are (\w+)", system)
+    m = re.search(r"RedPlan (?:worker|manager)\. You are (\w+)", system)
     if m: return m.group(1)
     return "CEO" if "RedPlan mode is ON" in system else "other"
 
@@ -351,6 +351,26 @@ try:
     report = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", out.decode("utf8", "ignore")).split("RedPlan doctor:")[-1][:1200]
     if "not healthy" in report or "tmux session gone" in report:
         raise SystemExit(f"doctor not healthy after resume:\n{report}")
+    # Managers: the CEO spawns a manager for an area (a ticket here); the manager, a live Pi in tmux with its own
+    # tools, spawns its own builder (who reports to it) and later dismisses them, putting the work back on the board.
+    tk = hq("POST", f"/api/runs/{run['id']}/tickets", {"title": "Changelog", "description": "Write CHANGELOG.md for the release.", "priority": "normal"})["id"]
+    SCRIPTS["CEO"].append(("MANAGERS-NOW", [("redplan_spawn_worker", {"role": "docs manager", "name": "Nina", "manager": True, "team": "Docs", "taskIds": [tk], "workspace": "shared", "brief": "Lead the docs area: staff the changelog."})]))
+    SCRIPTS["Nina"] = [("[RedPlan brief", [("redplan_spawn_worker", {"role": "changelog writer", "name": "Ben", "taskIds": [tk], "workspace": "shared", "brief": "Write CHANGELOG.md."})]),
+                       ("DISMISS-BEN", [("redplan_dismiss_worker", {"name": "Ben", "reason": "The changelog moves to the next release.", "returnToBoard": True})])]
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": "ceo", "kind": "command", "body": "MANAGERS-NOW: give the docs their own team."})
+    workers_now = lambda: hq("GET", f"/api/runs/{run['id']}")["workers"]
+    nina = wait("Nina the manager running", lambda: next((w for w in workers_now() if w["name"] == "Nina" and w["is_manager"] and w["team"] == "Docs" and w["alive"]), None), 90)
+    ben = wait("Ben spawned by Nina, reporting to her", lambda: next((w for w in workers_now() if w["name"] == "Ben" and w["manager_id"] == nina["id"] and w["alive"]), None), 120)
+    nina_sys = [s for i, u, s in requests if i == "Nina"][-1]
+    ben_sys = wait("Ben's first model request", lambda: next((s for i, u, s in reversed(requests) if i == "Ben"), None), 60)
+    if "RedPlan manager. You are Nina, manager of the Docs team" not in nina_sys or "redplan_spawn_worker" not in nina_sys:
+        raise SystemExit("Nina should get the manager prompt and tools")
+    if "led by Nina (your manager)" not in ben_sys or "send Nina one short report" not in ben_sys:
+        raise SystemExit("Ben's prompt should point him at Nina, his manager")
+    hq("POST", f"/api/runs/{run['id']}/messages", {"from": "human", "to": nina["id"], "kind": "command", "body": "DISMISS-BEN: we do not need the changelog now."})
+    wait("Ben dismissed by Nina, the ticket back on the board", lambda: next((w for w in workers_now() if w["name"] == "Ben"), {}).get("left_reason") == "dismissed"
+         and next(t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == tk)["worker_id"] is None, 60)
+
     view = hq("GET", f"/api/runs/{run['id']}")
     # What agents say as they work reaches HQ as updates, from workers and from the CEO.
     if not any(e["kind"] == "say" and e["worker_id"] == names["Alex"]["id"] for e in view["events"]) or not any(e["kind"] == "say" and e["worker_id"] == "ceo" for e in view["events"]):
@@ -358,7 +378,7 @@ try:
     msgs = view["messages"]
     if not any(m["senderName"] == "Alex" and m["recipientName"] == "Peter" for m in msgs):
         raise SystemExit("teammate chat not visible in the run feed")
-    print("RedPlan smoke passed: CEO redplan_ask gets a worker side answer in seconds without disturbing it; /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor.")
+    print("RedPlan smoke passed: CEO redplan_ask gets a worker side answer in seconds without disturbing it; /redplan → first-use HQ password (masked, 0600, signs in) → plan + critical path → page comments sent as feedback → CEO revises (v2, changes per comment) → harness per task → approval → 4 tmux workers (Pi shared + Pi worktree + Pi reviewer + Claude Code via the runner) → board updates, teammate chat, CEO reports, human instructions and interrupts, independent review, btw side questions (answered without interrupting, instructions relayed), crash + resume with saved context, doctor, a manager (live Pi) that spawns and dismisses its own builder.")
 finally:
     ceo.kill()
     subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)
