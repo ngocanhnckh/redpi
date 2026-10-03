@@ -46,7 +46,7 @@ button, textarea, input, select { font: inherit; color: inherit; }
 .pill.violet { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot.working { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.6s infinite; }
-.dot.idle { background: var(--cyan); } .dot.starting { background: var(--amber); } .dot.offline { background: var(--red); }
+.dot.idle { background: var(--cyan); } .dot.starting { background: var(--amber); } .dot.offline { background: var(--red); } .dot.lost { background: var(--red); } .dot.left, .dot.dismissed { background: var(--faint); }
 @keyframes pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
 

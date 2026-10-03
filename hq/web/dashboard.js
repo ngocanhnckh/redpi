@@ -21,7 +21,10 @@ const AUTOPLAY_MS = Number(new URLSearchParams(location.search).get("autoplay_ms
 let autoplay = store.get("redpi-autoplay") === "1", apTimer = null, apHover = false;
 const viewScroll = {};
 
-const workerState = (w) => !w.alive ? "offline" : w.needs_human || w.needs_input || w.parked ? "needs" : w.status === "working" ? "working" : w.status === "starting" ? "starting" : "idle";
+// Open work a worker is answerable for: tasks they own, or reviews routed to them.
+const holds = (w) => (state?.tasks || []).filter((t) => t.status !== "done" && (t.status === "review" ? t.reviewer_id === w.id : t.worker_id === w.id));
+// A worker who left holding nothing (finished, dismissed) is simply gone: no alert. Only leaving mid-task is "lost".
+const workerState = (w) => !w.alive ? (holds(w).length ? "lost" : w.left_reason === "dismissed" ? "dismissed" : "left") : w.needs_human || w.needs_input || w.parked ? "needs" : w.status === "working" ? "working" : w.status === "starting" ? "starting" : "idle";
 const roleOf = (id) => id === "ceo" ? "ceo" : state?.workers.find((w) => w.id === id)?.role || "";
 function avatar(name, id, size = "") {
   if (id === "human") return `<span class="avatar you ${size}" aria-hidden="true">You</span>`;
@@ -140,7 +143,7 @@ function announceChanges(a, b) {
   for (const w of b.workers) {
     const o = was.get(w.id);
     if (o && workerState(o) !== "needs" && workerState(w) === "needs") lines.push(`${w.name} needs you`);
-    if (o && o.alive && !w.alive) lines.push(`${w.name} went offline`);
+    if (o && o.alive && !w.alive && workerState(w) === "lost") lines.push(`${w.name}'s session ended while holding ${holds(w).map((t) => t.id).join(", ")}`);
   }
   const tWas = new Map(a.tasks.map((t) => [t.id, t.status]));
   for (const t of b.tasks) if (tWas.get(t.id) && tWas.get(t.id) !== t.status && (t.status === "done" || t.status === "blocked")) lines.push(`${t.id} ${t.title} is ${t.status}`);
@@ -168,7 +171,7 @@ function needsYou() {
   // Only blockers waiting on you; the rest (a teammate, the CEO, something external) the team handles.
   for (const t of tasks.filter((t) => t.status === "blocked" && t.blocked_on === "human")) items.push({ id: t.worker_id, level: "red", text: `${t.id} blocked${t.worker_id ? ` (${name(t.worker_id)})` : ""}: ${t.note || "no reason given"}`.slice(0, 1200) });
   for (const w of workers) {
-    if (!w.alive && w.status !== "stopped") items.push({ id: w.id, level: "red", text: `${w.name} is offline`, action: "resume" });
+    if (!w.alive) { if (workerState(w) === "lost") items.push({ id: w.id, level: "amber", text: `${holds(w).map((t) => t.id).join(", ")} has nobody on it: ${w.name}'s session ended. The CEO has been told; resume ${w.name} or hand it on.`, action: "resume" }); }
     else if (w.needs_input) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_input.reason}` });
     else if (w.needs_human) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_human}` });
     else if (w.parked) items.push({ id: w.id, level: "amber", text: `${w.name} is idle while owning in-progress work` });
@@ -306,7 +309,7 @@ function renderRun() {
       <div class="panel stat"><div class="v">${done}/${tasks.length || "–"}</div><div class="k">Tasks done</div></div>
       <div class="panel stat"><div class="v">${tasks.filter((t) => t.status === "in_progress").length}</div><div class="k">In progress</div></div>
       <div class="panel stat"><div class="v" style="${tasks.some((t) => t.status === "blocked") ? "color:var(--red)" : ""}">${tasks.filter((t) => t.status === "blocked").length}</div><div class="k">Blocked</div></div>
-      <div class="panel stat"><div class="v">${workers.filter((w) => workerState(w) === "working").length}/${workers.length}</div><div class="k">Workers active</div></div>`;
+      <div class="panel stat"><div class="v">${workers.filter((w) => workerState(w) === "working").length}/${workers.filter((w) => w.alive).length}</div><div class="k">Workers active</div></div>`;
   updateTabs();
   renderView();
   renderFeed();
@@ -642,19 +645,27 @@ function renderFeed() {
   newBtn.textContent = `↓ ${feedUnseen} new`;
 }
 
+let pastOpen = false;
 function renderTeam() {
   const { run, workers } = state;
   // Each card says what the person last told us they are doing, in their words; else the live tool.
   const doing = (id, fallback) => { const u = latestUpdate(id); return u ? `<div class="doing said" title="${esc(plain(u.text))}">“${esc(plain(u.text))}”</div>` : `<div class="doing">${esc(fallback)}</div>`; };
+  // The team is who is here (or left mid-task, so you see it); everyone who left with nothing on them is folded away.
+  const current = workers.filter((w) => w.alive || workerState(w) === "lost"), past = workers.filter((w) => !current.includes(w));
+  const card = (w) => { const st = workerState(w), gone = !w.alive;
+    const what = st === "lost" ? `session ended while holding ${holds(w).map((t) => t.id).join(", ")}` : gone ? `${st === "dismissed" ? "dismissed" : "left"}${w.left_at ? ` ${ago(w.left_at)}` : ""}` : `${w.current_task ? `${w.current_task} · ` : ""}${w.activity?.text || w.last_message || w.status}`;
+    return `<button class="member${gone ? ` gone ${st}` : ""}" data-person="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
+      ${gone ? `<div class="doing">${esc(what)}</div>` : doing(w.id, what)}</span><span class="dot ${st === "needs" ? "offline" : st}" title="${st}"></span></button>`; };
   $("team").innerHTML = `<button class="member" data-person="ceo">${avatar("CEO", "ceo")}<span><span class="name">CEO</span> <span class="role">lead Pi session</span>${doing("ceo", run.status === "awaiting_approval" ? "waiting for your approval" : run.status === "planning" ? "planning" : run.status === "done" ? "run finished" : "coordinating the team")}</span><span class="dot working"></span></button>
-    ${workers.map((w) => `<button class="member" data-person="${esc(w.id)}">${avatar(w.name, w.id)}<span><span class="name">${esc(w.name)}</span> <span class="role">${esc(w.role)}</span>${w.harness && w.harness !== "pi" ? ` <span class="pill violet harness-pill">${esc(w.harnessName)}</span>` : ""}
-      ${doing(w.id, `${w.current_task ? `${w.current_task} · ` : ""}${w.activity?.text || w.last_message || w.status}`)}</span><span class="dot ${workerState(w) === "needs" ? "offline" : workerState(w)}" title="${workerState(w)}"></span></button>`).join("")}`;
+    ${current.map(card).join("")}
+    ${past.length ? `<details class="past-team"${pastOpen ? " open" : ""}><summary>Past teammates (${past.length}): finished or dismissed, nothing left on them</summary><div class="team past">${past.map(card).join("")}</div></details>` : ""}`;
+  $("team").querySelector(".past-team")?.addEventListener("toggle", (e) => { pastOpen = e.target.open; });
 }
 
 // The composer's recipients follow the team without resetting your choice.
 function syncRecipients() {
   const sel = $("to");
-  const opts = [["ceo", "CEO"], ["all", "Everyone"], ...state.workers.map((w) => [w.id, w.name])];
+  const opts = [["ceo", "CEO"], ["all", "Everyone"], ...state.workers.filter((w) => w.alive || workerState(w) === "lost" || w.id === draftTo).map((w) => [w.id, w.name])];
   const sig = opts.map((o) => o.join("=")).join("|");
   if (sel.dataset.sig !== sig) {
     const keep = draftTo || sel.value || "ceo";
@@ -726,7 +737,7 @@ function pendingNote(id, name, msgs) {
   if (!lastMine || after.length) return "";
   const w = id === "ceo" ? null : state.workers.find((x) => x.id === id);
   const link = id === "ceo" ? ceoLink() : { ok: true };
-  const text = w && !w.alive ? `${name} is offline. Your message waits in their inbox until they are back.`
+  const text = w && !w.alive ? (workerState(w) === "lost" ? `${name}'s session ended. Your message waits in their inbox if the CEO resumes them.` : `${name} has left the team, so nobody reads this. Ask the CEO instead.`)
     : !link.ok ? link.text
     : lastMine.kind === "aside" ? (Date.now() - lastMine.created > 3 * 60_000 ? `${name} has not answered on the side after ${ago(lastMine.created).replace(/ ago$/, "")}. The model may be slow or failing; check ${name}'s terminal.` : `${name} is answering on the side…`)
       : `${name} has your message: a quick answer comes in a few seconds, the full one when they finish the current turn.`;
@@ -802,13 +813,14 @@ async function renderPerson(root) {
   }
   // Live parts: status, banners, then the tab's content.
   const st = w ? workerState(w) : state.run.status;
-  $("p-status").innerHTML = w ? `<span class="pill ${st === "working" ? "green" : st === "needs" || st === "offline" ? "red" : ""}">${esc(st)}</span>` : pill(state.run.status);
+  $("p-status").innerHTML = w ? `<span class="pill ${st === "working" ? "green" : st === "needs" || st === "lost" ? "red" : ""}">${esc(st)}</span>` : pill(state.run.status);
   // What this person is blocked on, in full, so you can answer it right here.
   const blocked = w ? state.tasks.filter((t) => t.worker_id === id && t.status === "blocked") : [];
   const blockers = blocked.map((t) => `<div class="block-card ${t.blocked_on === "human" ? "" : "team"}"><div class="block-head"><span class="pill ${t.blocked_on === "human" ? "red" : "amber"}">blocked</span><button class="linkish" data-task="${esc(t.id)}">${esc(t.id)}</button> <b>${esc(t.title)}</b><span style="flex:1"></span>${tab === "chat" ? `<button class="btn" data-reply-task="${esc(t.id)}">Reply about ${esc(t.id)}</button>` : ""}</div>
     ${t.blocked_on && t.blocked_on !== "human" ? `<div class="block-who">${esc(waitingOn(t))}: the team is handling it (they and the CEO have the note). You only need to act if you want to.</div>` : t.blocked_on === "human" ? `<div class="block-who you">Waiting on you.</div>` : ""}
     <div class="block-note">${esc(t.note || "No reason given.")}</div></div>`).join("");
-  const banner = w && !w.alive ? `<div class="banner red">${esc(name)}'s session is gone. <button class="btn" id="resume">Ask the CEO to resume</button></div>`
+  const banner = w && !w.alive ? (workerState(w) === "lost" ? `<div class="banner red">${esc(name)}'s session ended while holding ${esc(holds(w).map((t) => t.id).join(", "))}. <button class="btn" id="resume">Ask the CEO to resume</button></div>`
+      : `<div class="banner">${esc(name)} ${workerState(w) === "dismissed" ? "was dismissed" : "left"}${w.left_at ? ` ${ago(w.left_at)}` : ""} with nothing left to do. Their history stays here.</div>`)
     : w?.needs_input ? `<div class="banner red">${esc(w.needs_input.reason)}</div>` : w?.needs_human ? `<div class="banner red">${esc(w.needs_human)}</div>`
       : w?.parked ? `<div class="banner amber">Idle while owning in-progress work; HQ is nudging them.</div>` : "";
   if (tab === "chat") {

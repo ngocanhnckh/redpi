@@ -66,7 +66,9 @@ SCRIPTS = {
     ("Review T1 now", [("redplan_update_task", {"taskId": "T1", "status": "done", "note": "reviewed the diff; tests pass"})]),
   ],
   "Peter": [
-    ("message from Alex", [("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."})]),
+    # The kill guard: a worker trying to end a tmux session is blocked (a session name that does not exist, so a miss is harmless).
+    ("message from Alex", [("bash", {"command": "tmux kill-session -t '=redplan-guard-probe-none'"}),
+                           ("redplan_send", {"to": "ceo", "message": "Peter here: got the API shape from Alex, building the CLI."})]),
   ],
 }
 
@@ -261,6 +263,8 @@ try:
     wait("Alex finished T1 (confirmed)", lambda: next((t for t in hq("GET", f"/api/runs/{run['id']}")["tasks"] if t["id"] == "T1" and t["status"] == "done"), None))
     wait("Peter received Alex's message", lambda: any(i == "Peter" and "message from Alex" in u for i, u, _ in requests))
     wait("CEO received Peter's report", lambda: any(i == "CEO" and "message from Peter" in u for i, u, _ in requests))
+    if not any(i == "Peter" and "Blocked by RedPlan: this command would kill agent sessions" in t for i, t in tool_texts):
+        raise SystemExit("a worker's tmux kill-session should be blocked by the RedPlan guard")
     # Peter started after Alex, so Peter's prompt must name Alex as a teammate with his task.
     peter_sys = [s for i, u, s in requests if i == "Peter"][-1]
     if "You are Peter, full-stack developer" not in peter_sys or "Alex (backend developer)" not in peter_sys or "T2 CLI client" not in peter_sys:

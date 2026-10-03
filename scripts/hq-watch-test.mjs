@@ -16,7 +16,7 @@ const proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { stdio: 
   ...process.env, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1",
   REDPI_HQ_WATCH_MS: "150", REDPI_HQ_WATCH_HOUR_MS: String(HOUR), REDPI_HQ_CHATTER_2H: "12", REDPI_HQ_BURN_TOKENS: "100000",
   REDPI_HQ_REPEAT: "5", REDPI_HQ_ALERT_ESCALATE_MS: "1500", REDPI_HQ_CHECKIN_MS: "2500", REDPI_HQ_STALL_MS: "600000",
-  REDPI_HQ_STAFF_GRACE_MS: "600000", REDPI_HQ_PARK_MS: "600000", REDPI_HQ_TASK_TOKEN_STEP: "100000",
+  REDPI_HQ_STAFF_GRACE_MS: "600000", REDPI_HQ_PARK_MS: "600000", REDPI_HQ_TASK_TOKEN_STEP: "100000", REDPI_HQ_ORPHAN_MS: "400",
 } });
 process.on("exit", () => { proc.kill(); rmSync(dir, { recursive: true, force: true }); });
 const fail = (msg, extra) => { console.error("FAIL:", msg, extra ?? ""); process.exit(1); };
@@ -101,5 +101,21 @@ await until("chatter alert resolved", async () => (await state()).alerts.find((a
 const checkin = await until("check-in", async () => (await ceoInbox()).reverse().find((m) => /^Check-in \(every/.test(m.body) && /Tokens per task so far/.test(m.body)), 8000);
 for (const want of [/card moves? since the last one/, /Board: todo \d+; in progress \d+/, /in review 1: T1 waiting on Ria/, /Open alerts: /, /Tokens per task so far: T2 2\d\dk, T1 1\d\dk/, /post the human a 2-3 line status/, /do nothing and do not reply/]) if (!want.test(checkin.body)) fail(`check-in should include ${want}`, checkin.body);
 
-console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker and unanswered questions each wake the CEO with a diagnosis within seconds, token milestones per agent per task (checked once per step, reviewers' tokens counted against the task they review), keep-happening alerts reach the human (Needs you), alerts clear when the pattern stops, and the CEO gets a regular check-in with the numbers.");
+// 8. Work with nobody on it: Noor's session ends while T2 is in progress. HQ marks the departure as "lost" (not a quiet
+// "finished"), tells the CEO within seconds who to bring back or hand it to, and clears it once someone is on it.
+if ((await state()).workers.find((w) => w.id === kai.id)?.left_reason !== "finished") fail("Kai left holding nothing: a quiet 'finished'");
+await beat(noor, { status: "stopped" });
+const nw = (await state()).workers.find((w) => w.id === noor.id);
+if (nw.alive || nw.left_reason !== "lost") fail("Noor left holding T2: should be 'lost'", nw);
+const orphan = await until("orphan alert", () => watchMsg(/Nobody is working on T2 \(in progress\): Noor's session ended .* ago\. Bring Noor back with redplan_resume_worker/));
+if (!/hand it to someone else now/.test(orphan.body)) fail("the orphan alert should say how to hand the work on", orphan.body);
+// Dismissing Noor and handing T2 to Mia (alive): the task moves, Mia gets a brief, the alert clears.
+const dis = await api("POST", `/api/workers/${noor.id}/dismiss`, { reason: "Session lost; Mia takes over.", handoffTo: "mia", actor: "ceo" });
+if (dis.status !== 200 || dis.body.handedOver.join() !== "T2" || dis.body.wasRunning) fail("dismiss with handoff", dis);
+const after = await state();
+if (after.tasks.find((t) => t.id === "T2").worker_id !== mia.id) fail("T2 should belong to Mia now");
+if (!after.messages.some((m) => m.recipient === mia.id && m.kind === "brief" && /Noor was dismissed and you now own:\n- T2 Client \[in_progress\]/.test(m.body))) fail("Mia should get a brief for T2");
+await until("orphan alert resolved", async () => (await state()).alerts.find((a) => a.kind === "orphan")?.resolved);
+
+console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker, work left with nobody on it and unanswered questions each wake the CEO with a diagnosis within seconds, token milestones per agent per task (checked once per step, reviewers' tokens counted against the task they review), keep-happening alerts reach the human (Needs you), alerts clear when the pattern stops, a worker who leaves mid-task is lost (one who leaves with nothing is a quiet finished), dismissing with a handoff moves the work and briefs the new owner, and the CEO gets a regular check-in with the numbers.");
 process.exit(0);

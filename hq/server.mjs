@@ -160,6 +160,9 @@ for (const [table, col, type] of [
   ["runs", "checkin_at", "INTEGER"],
   // The task a worker was on when it spent the tokens (for per-task token milestones).
   ["usage", "task_id", "TEXT"],
+  // How a worker left: "finished" (nothing left to do), "dismissed" (laid off by the CEO), or "lost"
+  // (its session ended while it still owned work). Cleared when it comes back.
+  ["workers", "left_reason", "TEXT"], ["workers", "left_at", "INTEGER"],
 ]) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
@@ -470,6 +473,8 @@ const CHATTER_2H = Number(process.env.REDPI_HQ_CHATTER_2H || 40);
 const BURN_TOKENS = Number(process.env.REDPI_HQ_BURN_TOKENS || 5_000_000);
 const REPEAT_N = Number(process.env.REDPI_HQ_REPEAT || 8);
 const STALL_MS = Number(process.env.REDPI_HQ_STALL_MS || 45 * 60_000);
+// A session that ended this long ago while holding work is reported (a quick resume should not alarm anyone).
+const ORPHAN_MS = Number(process.env.REDPI_HQ_ORPHAN_MS || 2 * 60_000);
 const pairLimitHits = new Map();
 const TASK_TOKEN_STEP = Number(process.env.REDPI_HQ_TASK_TOKEN_STEP || 5_000_000);   // "run|a|b" -> when the pair was last refused for messaging too much
 
@@ -545,9 +550,23 @@ function detectTrouble(runId) {
   for (const r of all(`SELECT recipient AS w, COUNT(*) AS n, GROUP_CONCAT(DISTINCT sender) AS senders FROM messages
       WHERE run_id = ? AND created > ? AND recipient LIKE 'wkr_%' AND sender != 'human' GROUP BY recipient`, runId, t - WATCH_HOUR)) {
     const w = W[r.w];
-    if (!w || (w.alive && w.status !== "stopped") || r.n < 2) continue;
+    if (!w || (w.alive && w.status !== "stopped") || w.left_reason === "dismissed" || r.n < 2) continue;
     found.push({ kind: "dead-end", key: `dead-end:${r.w}`, subject: r.w,
       text: `${r.n} messages went to ${w.name}, whose session is gone (from ${String(r.senders).split(",").map(name).join(", ")}). Resume them (redplan_resume_worker) or reassign their work, and tell the senders who to talk to instead.` });
+  }
+  // 9. Work with nobody on it: its owner's (or reviewer's) session ended while the task was still open.
+  const goneFor = (w) => w && !w.alive && t - (w.left_at || w.updated) >= ORPHAN_MS;
+  const orphans = new Map();
+  for (const task of all("SELECT * FROM tasks WHERE run_id = ? AND status != 'done'", runId)) {
+    const holder = task.status === "review" ? (task.reviewer_id ? W[task.reviewer_id] : null) : W[task.worker_id];
+    if (!goneFor(holder)) continue;
+    (orphans.get(holder.id) || orphans.set(holder.id, []).get(holder.id)).push(task);
+  }
+  for (const [wid, list] of orphans) {
+    const w = W[wid], ids = list.map((x) => `${x.id} (${x.status.replace("_", " ")})`).join(", ");
+    const how = w.left_reason === "dismissed" ? " was dismissed" : "'s session ended";
+    found.push({ kind: "orphan", key: `orphan:${wid}`, subject: wid,
+      text: `Nobody is working on ${ids}: ${w.name}${how} ${dur(t - (w.left_at || w.updated))} ago. ${w.left_reason === "dismissed" ? "Hand" : `Bring ${w.name} back with redplan_resume_worker (they continue their saved session), or hand`} ${list.length > 1 ? "them" : "it"} to someone else now (redplan_update_task handoffTo, or assignTo a free worker${list.some((x) => x.status === "review") ? "; a review goes to another reviewer" : ""}).` });
   }
   // 8. Questions between agents that nobody answers.
   const qs = all(`SELECT m.* FROM messages m WHERE m.run_id = ? AND m.needs_reply = 1 AND m.created < ? AND m.created > ?
@@ -607,6 +626,12 @@ function checkinText(runId, since) {
     `Check-in (every ${mins(CHECKIN_MS)}): ${moves.length} card move${moves.length === 1 ? "" : "s"} since the last one${doneNow.length ? `; done: ${doneNow.join(", ")}` : ""}.`,
     `Board: todo ${count("todo").length}; ${line("in_progress", "in progress", (x) => name(x.worker_id))}; ${line("review", "in review", (x) => `waiting on ${x.reviewer_id ? name(x.reviewer_id) : "a reviewer"}`)}; ${line("blocked", "blocked", (x) => name(x.worker_id))}; done ${count("done").length}.`,
     idle.length ? `Idle builders: ${idle.map((w) => w.name).join(", ")}.` : "",
+    (() => {
+      const spare = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId).filter((w) => !heldWork(runId, w.id).length && now() - w.updated > 10 * 60_000);
+      const reviewsLeft = tasks.some((x) => x.status !== "done");
+      const lay = spare.filter((w) => !(REVIEWER_RE.test(w.role) && reviewsLeft));
+      return lay.length ? `Nothing left for: ${lay.map((w) => w.name).join(", ")}. If no more work is coming for them, dismiss them (redplan_dismiss_worker) so the team stays small.` : "";
+    })(),
     `Open alerts: ${alertsOpen.length ? alertsOpen.map((a) => a.text.split(". ")[0]).join(" | ") : "none"}.`,
     burn.length ? `Tokens since the last check-in: ${burn.map((b) => `${b.w === "ceo" ? "you" : name(b.w)} ${tokens(b.n)}`).join(", ")}.` : "",
     (() => { const top = all("SELECT task_id AS id, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id IS NOT NULL GROUP BY task_id ORDER BY n DESC LIMIT 5", runId); return top.length ? `Tokens per task so far: ${top.map((x) => `${x.id} ${tokens(x.n)}`).join(", ")}.` : ""; })(),
@@ -634,7 +659,7 @@ function maybeReleaseWorker(runId, workerId) {
   const open = one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND worker_id = ? AND status != 'done'", runId, workerId).n;
   const reviewer = /review|qa|audit/i.test(w.role) && one("SELECT COUNT(*) AS n FROM tasks WHERE run_id = ? AND status IN ('review', 'in_progress', 'todo', 'blocked')", runId).n > 0;
   if (open || reviewer) return;
-  addMessage(runId, "human", workerId, "system", "All your tasks are done. If you have not yet, send the CEO a short final report (what changed, how you verified it, anything left), then stop: do not start new work, do not reopen tasks, and do not reply to status updates. You will be woken if someone asks you something.");
+  addMessage(runId, "human", workerId, "system", "All your tasks are done. If you have not yet, send the CEO a short final report (what changed, how you verified it, anything left), then wait: do not start new work, do not reopen tasks, and do not reply to status updates. Do not close your session yourself: the CEO dismisses you when the team no longer needs you, and you are woken if someone asks you something.");
 }
 
 // The run is done (or cancelled): ask every worker to close; HQ closes any still open after a grace period.
@@ -647,15 +672,30 @@ function stopWorkers(runId, reason) {
 }
 
 // ---------- tmux liveness ----------
+// Open work a worker still holds: its own unfinished tasks, and reviews assigned to it.
+function heldWork(runId, workerId) {
+  return all("SELECT id FROM tasks WHERE run_id = ? AND ((worker_id = ? AND status != 'done') OR (reviewer_id = ? AND status = 'review'))", runId, workerId, workerId).map((t) => t.id);
+}
+// Record a worker going or coming back. Leaving with nothing to do is quiet ("finished"); leaving
+// while holding work is "lost" and HQ's watch makes sure someone picks the work up.
+function setAlive(w, alive) {
+  if (alive) run("UPDATE workers SET alive = 1, left_reason = NULL, left_at = NULL, updated = ? WHERE id = ?", now(), w.id);
+  else run(`UPDATE workers SET alive = 0, left_at = COALESCE(left_at, ?), left_reason = COALESCE(left_reason, ?), updated = ? WHERE id = ?`,
+    now(), heldWork(w.run_id, w.id).length ? "lost" : "finished", now(), w.id);
+  notify(w.run_id, "worker");
+}
+// A slow tmux (a heavily loaded machine) is not a missing session: only a clear "no such session",
+// twice in a row, marks a worker gone.
+const aliveMisses = new Map();
 function refreshAlive() {
   const workers = all("SELECT id, run_id, tmux, alive FROM workers WHERE tmux IS NOT NULL AND status != 'finished'");
   for (const w of workers) {
-    execFile("tmux", [...TMUX, "has-session", "-t", `=${w.tmux}`], { timeout: 2000 }, (err) => {
-      const alive = err ? 0 : 1;
-      if (alive !== w.alive) {
-        run("UPDATE workers SET alive = ?, updated = ? WHERE id = ?", alive, now(), w.id);
-        notify(w.run_id, "worker");
-      }
+    execFile("tmux", [...TMUX, "has-session", "-t", `=${w.tmux}`], { timeout: 5000 }, (err) => {
+      if (err && typeof err.code !== "number") return;   // timed out or tmux missing: unknown, not gone
+      const misses = err ? (aliveMisses.get(w.id) || 0) + 1 : 0;
+      aliveMisses.set(w.id, misses);
+      const alive = misses === 0 ? 1 : misses >= 2 ? 0 : w.alive;
+      if (alive !== w.alive) setAlive(w, alive);
     });
   }
 }
@@ -665,8 +705,8 @@ setInterval(refreshAlive, 10000).unref();
 function sweepStops() {
   for (const w of all("SELECT * FROM workers WHERE alive = 1 AND stop_requested IS NOT NULL AND stop_at < ?", now() - STOP_GRACE_MS)) {
     if (w.tmux) execFile("tmux", [...TMUX, "kill-session", "-t", `=${w.tmux}`], { timeout: 3000 }, () => {});
-    run("UPDATE workers SET alive = 0, status = 'stopped', updated = ? WHERE id = ?", now(), w.id);
-    notify(w.run_id, "worker");
+    run("UPDATE workers SET status = 'stopped' WHERE id = ?", w.id);
+    setAlive(w, 0);
   }
 }
 setInterval(sweepStops, Math.min(15000, Math.max(500, STOP_GRACE_MS / 4))).unref();
@@ -1014,7 +1054,7 @@ route("PATCH", "/api/workers/:id", (b, p) => {
   if (!w) return notFound();
   if (b.tmux !== undefined) run("UPDATE workers SET tmux = ?, alive = 1, updated = ? WHERE id = ?", b.tmux, now(), p.id);
   // A relaunch gets a new launch id; heartbeats from the previous process are ignored from now on.
-  if (b.launchId) run("UPDATE workers SET launch_id = ?, alive = 1, parked_level = 0, needs_human = NULL, needs_input = NULL, stop_requested = NULL, stop_at = NULL, status = CASE WHEN status = 'stopped' THEN 'starting' ELSE status END, updated = ? WHERE id = ?", String(b.launchId), now(), p.id);
+  if (b.launchId) run("UPDATE workers SET launch_id = ?, alive = 1, left_reason = NULL, left_at = NULL, parked_level = 0, needs_human = NULL, needs_input = NULL, stop_requested = NULL, stop_at = NULL, status = CASE WHEN status = 'stopped' THEN 'starting' ELSE status END, updated = ? WHERE id = ?", String(b.launchId), now(), p.id);
   if (b.status) run("UPDATE workers SET status = ?, updated = ? WHERE id = ?", String(b.status), now(), p.id);
   notify(w.run_id, "worker");
   return workerView(one("SELECT * FROM workers WHERE id = ?", p.id));
@@ -1036,8 +1076,10 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   if (!w) return notFound();
   // A heartbeat from an earlier launch (a leftover process) must not make the new launch look alive or idle.
   if (b.launchId && w.launch_id && b.launchId !== w.launch_id) return { ok: false, stale: true, stop: `A newer launch of ${w.name} replaced this process.` };
+  const ending = b.status === "stopped";
+  if (!ending && !w.alive) setAlive(w, 1);
   run(`UPDATE workers SET status = COALESCE(?, status), current_task = COALESCE(?, current_task), last_message = COALESCE(?, last_message), activity = COALESCE(?, activity),
-    session_file = COALESCE(?, session_file), context = COALESCE(?, context), alive = 1, parked_level = 0, parked_at = NULL, needs_human = NULL, updated = ? WHERE id = ?`,
+    session_file = COALESCE(?, session_file), context = COALESCE(?, context), parked_level = 0, parked_at = NULL, needs_human = NULL, updated = ? WHERE id = ?`,
     b.status ?? null, b.currentTask ?? null, b.lastMessage != null ? String(b.lastMessage).slice(0, 8000) : null, b.activity ? JSON.stringify(b.activity) : null,
     b.sessionFile ? String(b.sessionFile) : null, b.context ? JSON.stringify(b.context) : null, now(), p.id);
   // needsInput: {count, reason} while something waits on a person; null clears it.
@@ -1046,6 +1088,7 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
     p.id, String(e.kind || "info"), String(e.text || "").slice(0, 2000), Number.isFinite(e.ms) ? Math.round(e.ms) : null, e.ok === undefined ? null : e.ok ? 1 : 0, now());
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", p.id, p.id);
   recordUsage(w.run_id, p.id, b.usage);
+  if (ending) setAlive(w, 0);
   notify(w.run_id, "worker");
   return w.stop_requested ? { ok: true, stop: w.stop_requested } : { ok: true };
 });
@@ -1167,6 +1210,59 @@ route("POST", "/api/workers/:id/resume-request", (_b, p) => {
   if (!w) return notFound();
   addMessage(w.run_id, "human", "ceo", "command", `Please resume ${w.name} with redplan_resume_worker (its tmux session is gone).`);
   return { ok: true };
+});
+
+// Lay off a worker (the CEO decides the team no longer needs them). Its open work is handed to a
+// teammate or put back on the board first, so nothing is left with nobody on it; reviews go to
+// another reviewer. The worker is told and closes itself; HQ closes the session a minute later if not.
+route("POST", "/api/workers/:id/dismiss", (b, p) => {
+  const w = one("SELECT * FROM workers WHERE id = ?", p.id);
+  if (!w) return notFound();
+  if (w.left_reason === "dismissed") return { ok: true, name: w.name, already: true, handedOver: [], returned: [], rerouted: [] };
+  const reason = String(b.reason || "").trim().slice(0, 500) || "The team no longer needs you for this run.";
+  const actor = String(b.actor || "ceo");
+  const own = all("SELECT * FROM tasks WHERE run_id = ? AND worker_id = ? AND status != 'done'", w.run_id, w.id);
+  const reviews = all("SELECT * FROM tasks WHERE run_id = ? AND reviewer_id = ? AND status = 'review'", w.run_id, w.id);
+  let target = null;
+  if (b.handoffTo) {
+    const want = String(b.handoffTo).trim().toLowerCase();
+    target = all("SELECT * FROM workers WHERE run_id = ? AND id != ?", w.run_id, w.id).find((x) => x.id === b.handoffTo || x.name.toLowerCase() === want);
+    if (!target) throw httpError(400, `No teammate named "${b.handoffTo}".`);
+    if (!target.alive || target.stop_requested) throw httpError(400, `${target.name} is not running; hand the work to someone who is, or resume them first.`);
+  }
+  const building = own.filter((t) => t.status !== "review");
+  if (building.length && !target && !b.returnToBoard) {
+    throw httpError(409, `${w.name} still owns ${building.map((t) => `${t.id} (${t.status.replace("_", " ")})`).join(", ")}. Hand it over (handoffTo: a teammate) or put it back on the board unassigned (returnToBoard: true), then dismiss.`);
+  }
+  const handedOver = [], returned = [];
+  db.exec("BEGIN");
+  try {
+    for (const t of building) {
+      if (target) {
+        run("UPDATE tasks SET worker_id = ?, updated = ? WHERE run_id = ? AND id = ?", target.id, now(), w.run_id, t.id);
+        recordTransition(w.run_id, t.id, t.status, t.status, actor, `Handed over: ${w.name} was dismissed. ${reason}`, target.id);
+        handedOver.push(t.id);
+      } else {
+        const to = t.status === "in_progress" ? "todo" : t.status;
+        run("UPDATE tasks SET worker_id = NULL, status = ?, updated = ? WHERE run_id = ? AND id = ?", to, now(), w.run_id, t.id);
+        recordTransition(w.run_id, t.id, t.status, to, actor, `Back on the board: ${w.name} was dismissed. ${reason}`);
+        returned.push(t.id);
+      }
+    }
+    run("UPDATE workers SET left_reason = 'dismissed', left_at = ?, stop_requested = ?, stop_at = ?, updated = ? WHERE id = ?",
+      now(), `You have been dismissed from this run: ${reason}`, now() - STOP_GRACE_MS + 60_000, now(), w.id);
+    run("INSERT INTO events (worker_id, kind, text, created) VALUES (?, 'session', ?, ?)", w.id, `Dismissed by ${participantName(w.run_id, actor)}: ${reason}`, now());
+    db.exec("COMMIT");
+  } catch (e) { db.exec("ROLLBACK"); throw e; }
+  if (target && handedOver.length) {
+    const notes = building.map((t) => `- ${t.id} ${t.title} [${t.status}]${t.note ? `: ${String(t.note).slice(0, 400)}` : ""}`).join("\n");
+    addMessage(w.run_id, actor, target.id, "brief", `${w.name} was dismissed and you now own:\n${notes}\nCheck the workspace (${w.cwd}${w.branch ? `, branch ${w.branch}` : ""}) and the board for what is already done, then continue.`, true);
+  }
+  // Their reviews go to another reviewer (routeReview skips a worker asked to stop).
+  const rerouted = reviews.map((t) => routeReview(w.run_id, { ...t, reviewer_id: null }, t.note)?.name).filter(Boolean);
+  if (w.alive) addMessage(w.run_id, "human", w.id, "system", `You have been dismissed from this run: ${reason} Your session is closing now. Do not reply.`);
+  notify(w.run_id, "worker"); notify(w.run_id, "task");
+  return { ok: true, name: w.name, handedOver, returned, rerouted, wasRunning: !!w.alive };
 });
 
 route("POST", "/api/runs/:id/messages", (b, p) => {

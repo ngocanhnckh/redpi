@@ -429,5 +429,47 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   if (!advice) fail("the CEO should be told to give waiting work to a free builder", (await inboxOf("ceo")).map((m) => m.body.slice(0, 90)));
 }
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
+// Dismissing workers the team no longer needs: refused while they still own building work (hand it over or
+// put it back on the board first), their open work returns to the board, their reviews go to another
+// reviewer, their session is told to close, and they leave quietly ("dismissed", not "lost").
+{
+  const rid = (await api("POST", "/api/runs", { projectPath: "/tmp/demo-dismiss", title: "Dismiss" })).body.run.id;
+  const pv = await api("POST", `/api/runs/${rid}/plans`, { plan });
+  await api("POST", `/api/plans/${pv.body.id}/decision`, { decision: "approve" });
+  const hire = async (name, role, taskIds = []) => (await api("POST", `/api/runs/${rid}/workers`, { name, role, cwd: "/tmp/demo-dismiss", taskIds })).body;
+  const [bo, ria, rex] = [await hire("Bo", "backend developer", ["T1", "T3"]), await hire("Ria", "independent reviewer"), await hire("Rex", "independent reviewer")];
+  const beat = (w, b = {}) => api("POST", `/api/workers/${w.id}/heartbeat`, { status: "idle", ...b });
+  for (const w of [bo, ria, rex]) await beat(w);
+  const set = (task, body) => api("POST", `/api/runs/${rid}/tasks/${task}`, body);
+  const inboxOf = async (who) => (await api("GET", `/api/runs/${rid}/inbox?for=${who}&after=0`)).body;
+  const st = async () => (await api("GET", `/api/runs/${rid}`)).body;
+  const dismiss = (w, b) => api("POST", `/api/workers/${w.id}/dismiss`, { reason: "No more backend work.", actor: "ceo", ...b });
+  await set("T1", { status: "in_progress", actor: bo.id, workerId: bo.id });
+  await set("T1", { status: "review", note: "pytest: 5 passed", actor: bo.id });
+  const reviewer = (await st()).tasks.find((t) => t.id === "T1").reviewer_id;
+  await set("T3", { status: "in_progress", actor: bo.id, workerId: bo.id });
+  const refused = await dismiss(bo);
+  if (refused.status !== 409 || !/Bo still owns T3 \(in progress\)/.test(refused.body.error) || /T1/.test(refused.body.error)) fail("dismissing a worker who owns building work should be refused, naming it (work in review is not theirs to finish)", refused);
+  const back = await dismiss(bo, { returnToBoard: true });
+  if (back.status !== 200 || back.body.returned.join() !== "T3" || !back.body.wasRunning) fail("dismiss with returnToBoard", back);
+  const t3 = (await st()).tasks.find((t) => t.id === "T3");
+  if (t3.status !== "todo" || t3.worker_id) fail("T3 should be back on the board, unassigned", t3);
+  const hb = await beat(bo);
+  if (!/dismissed from this run: No more backend work/.test(hb.body.stop || "")) fail("the dismissed worker's next heartbeat should tell it to close", hb.body);
+  if (!(await inboxOf(bo.id)).some((m) => m.kind === "system" && /You have been dismissed/.test(m.body))) fail("the dismissed worker should be told why");
+  await beat(bo, { status: "stopped" });
+  const gone = (await st()).workers.find((w) => w.id === bo.id);
+  if (gone.alive || gone.left_reason !== "dismissed") fail("a dismissed worker should leave as dismissed", gone);
+  if ((await dismiss(bo)).body.already !== true) fail("dismissing twice is a no-op");
+  // The reviewer of T1 is dismissed: T1 goes to the other reviewer.
+  const [rv, other] = reviewer === ria.id ? [ria, rex] : [rex, ria];
+  const rr = await dismiss(rv, { reason: "One reviewer is enough." });
+  if (rr.status !== 200 || rr.body.rerouted.join() !== other.name) fail("a dismissed reviewer's reviews should go to another reviewer", rr);
+  const t1 = (await st()).tasks.find((t) => t.id === "T1");
+  if (t1.reviewer_id !== other.id || !(await inboxOf(other.id)).some((m) => /^Review T1 now/.test(m.body))) fail("the other reviewer should own and be briefed on T1", t1);
+  const bad = await dismiss(other, { handoffTo: "Bo" });
+  if (bad.status !== 400 || !/Bo is not running/.test(bad.body.error)) fail("handing work to a worker who left should be refused", bad);
+}
+
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();
