@@ -17,7 +17,7 @@ let renderedPanel = null;
 let state, prev, openPanel = null, draftTo = null, office = null, officeHost = null, inboxHost = null, inboxView = null, chatHost = null, chatView = null;
 
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-const VIEWS = [["office", "Office"], ["board", "Board"], ["chat", "Chat"], ["inbox", "Inbox"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
+const VIEWS = [["office", "Office"], ["board", "Board"], ["feed", "Feed"], ["chat", "Chat"], ["inbox", "Inbox"], ["timeline", "Timeline"], ["stats", "Stats"], ["shots", "Screenshots"]];
 let view = { graph: "stats" }[store.get(`redpi-view-${runId}`)] || store.get(`redpi-view-${runId}`);
 if (view && !VIEWS.some(([k]) => k === view)) view = null;
 // Auto-play: the view fades through Office, Board, Timeline, Stats and Screenshots (10 s each; ?autoplay_ms= for tests).
@@ -295,7 +295,7 @@ function updateChatTab() {
 
 function updateTabs() {
   app.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
-  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : view === "inbox" ? "blockers, questions and approvals waiting on you · answer here" : view === "chat" ? "talk to the CEO and the team · #channels and direct messages" : "live project charts";
+  $("view-hint").textContent = view === "office" ? "click a person · drag to pan · scroll to zoom · double-click to reset" : view === "board" ? "click a card for its history" : view === "timeline" ? "planned schedule with live progress · click a task" : view === "shots" ? "what the team checked in the browser · click to enlarge" : view === "inbox" ? "blockers, questions and approvals waiting on you · answer here" : view === "chat" ? "talk to the CEO and the team · #channels and direct messages" : view === "feed" ? "everything everyone says and does, live · watch for who has gone quiet" : "live project charts";
   const open = (state?.inbox || []).filter((i) => i.status === "open").length;
   const tab = app.querySelector('[data-view="inbox"]');
   if (tab) tab.innerHTML = `Inbox${open ? ` <span class="tab-count">${open}</span>` : ""}`;
@@ -355,8 +355,8 @@ function scheduleAutoplay() {
   fill.style.animationPlayState = paused ? "paused" : "running";
   if (paused) return;
   apTimer = setTimeout(() => {
-    // Chat and the inbox are for answering, not watching: auto-play passes them by.
-    const cycle = VIEWS.filter(([k]) => k !== "inbox" && k !== "chat"), i = cycle.findIndex(([k]) => k === view);
+    // Chat, the inbox and the live Feed are for reading/answering, not watching: auto-play passes them by.
+    const cycle = VIEWS.filter(([k]) => k !== "inbox" && k !== "chat" && k !== "feed"), i = cycle.findIndex(([k]) => k === view);
     switchView(cycle[(i + 1) % cycle.length][0], true);
     scheduleAutoplay();
   }, AUTOPLAY_MS);
@@ -452,6 +452,7 @@ function renderView() {
   const top = body.dataset.view === view ? body.scrollTop : viewScroll[view] || 0;
   body.dataset.view = view;
   if (view !== "board") delete body.dataset.boardSig;
+  if (view === "feed") { renderFeedView(body); return; }
   if (view === "stats") { renderStats(body); body.scrollTop = top; return; }
   if (view === "timeline") { renderTimeline(body, state); body.scrollTop = top; return; }
   if (view === "shots") { renderShots(body); body.scrollTop = top; return; }
@@ -475,6 +476,76 @@ function renderView() {
   const k = body.querySelector(".kanban");
   if (k) k.scrollLeft = left;
   body.scrollTop = top;
+}
+
+// ---------- Feed: everything everyone says and does, live, so a silent (stuck) agent is obvious ----------
+let feedViewQuery = "", feedViewAgent = null, feedViewSaysOnly = false, feedTicker = null;
+const VERBAL_KINDS = new Set(["say", "reply", "btw", "info", "job", "error"]);
+const FEED_TAG = { say: "says", reply: "answer", btw: "btw", info: "note", job: "job", error: "error", chat: "message", command: "message", brief: "brief", decision: "decision", interrupt: "interrupt", aside: "btw", quick: "quick", ticket: "ticket", system: "HQ" };
+function feedEntries() {
+  const out = [];
+  for (const e of state.events || []) if (VERBAL_KINDS.has(e.kind)) out.push({ id: `e${e.id}`, who: e.worker_id, kind: e.kind, text: e.text, created: e.created });
+  for (const m of state.messages || []) if (m.kind !== "task") out.push({ id: `m${m.id}`, who: m.sender, to: m.recipient, kind: m.kind, text: m.body, created: m.created });
+  return out.sort((a, b) => a.created - b.created || a.id.localeCompare(b.id));
+}
+function renderFeedView(body) {
+  if (!body.querySelector(".livefeed")) {
+    body.innerHTML = `<div class="livefeed">
+      <div class="lf-agents" id="lf-agents" role="group" aria-label="Who is talking — click to filter"></div>
+      <div class="lf-bar">
+        <input type="search" id="lf-q" placeholder="Filter the stream…" autocomplete="off">
+        <label class="lf-toggle"><input type="checkbox" id="lf-says"> Narration only</label>
+        <span class="muted lf-count" id="lf-count"></span>
+      </div>
+      <div class="lf-stream" id="lf-stream" tabindex="0" aria-label="Everything the team is saying and doing, newest at the bottom"></div></div>`;
+    body.querySelector("#lf-q").value = feedViewQuery;
+    body.querySelector("#lf-says").checked = feedViewSaysOnly;
+    body.querySelector("#lf-q").addEventListener("input", (e) => { feedViewQuery = e.target.value; paintFeedStream(body, true); });
+    body.querySelector("#lf-says").addEventListener("change", (e) => { feedViewSaysOnly = e.target.checked; paintFeedStream(body, true); });
+    body.querySelector("#lf-agents").addEventListener("click", (e) => { const c = e.target.closest("[data-agent]"); if (!c) return; feedViewAgent = feedViewAgent === c.dataset.agent ? null : c.dataset.agent; paintFeedAgents(body); paintFeedStream(body, true); });
+  }
+  paintFeedAgents(body);
+  paintFeedStream(body);
+  if (!feedTicker) feedTicker = setInterval(() => { if (view === "feed" && document.getElementById("lf-agents")) paintFeedAgents(body); else { clearInterval(feedTicker); feedTicker = null; } }, 1000);
+}
+// Per-agent pulse: how long since each person last said or did anything. Green = fresh, amber = quiet,
+// red = silent while supposedly working (a likely hang). This is the at-a-glance "who is stuck".
+function paintFeedAgents(body) {
+  const host = body.querySelector("#lf-agents"); if (!host) return;
+  const now = Date.now();
+  const last = new Map();
+  for (const e of feedEntries()) last.set(e.who, Math.max(last.get(e.who) || 0, e.created));
+  const ceoSeen = state.run?.ceo_seen;
+  const people = [{ id: "ceo", name: "CEO", working: state.run?.status === "executing", seen: ceoSeen }]
+    .concat(orgOrder(state.workers.filter((w) => w.alive)).map((w) => ({ id: w.id, name: w.name, working: w.status === "working" || w.status === "starting", seen: w.updated })));
+  host.innerHTML = people.map((p) => {
+    const at = Math.max(last.get(p.id) || 0, p.seen || 0);
+    const age = at ? now - at : Infinity;
+    const tone = age < 60_000 ? "fresh" : age < 5 * 60_000 ? (p.working ? "warn" : "idle") : (p.working ? "stuck" : "idle");
+    const ageTxt = at ? ago(at).replace(/ ago$/, "") : "—";
+    return `<button type="button" class="lf-chip ${tone}${feedViewAgent === p.id ? " on" : ""}" data-agent="${esc(p.id)}" title="${esc(p.name)} last spoke or acted ${at ? ago(at) : "never"}${p.working ? " · working" : ""}"><span class="lf-dot"></span>${esc(p.name)} <span class="faint">${esc(ageTxt)}</span></button>`;
+  }).join("");
+}
+function paintFeedStream(body, force) {
+  const stream = body.querySelector("#lf-stream"); if (!stream) return;
+  let entries = feedEntries();
+  if (feedViewAgent) entries = entries.filter((e) => e.who === feedViewAgent || e.to === feedViewAgent);
+  if (feedViewSaysOnly) entries = entries.filter((e) => ["say", "reply", "btw"].includes(e.kind));
+  const q = feedViewQuery.trim().toLowerCase();
+  if (q) entries = entries.filter((e) => String(e.text || "").toLowerCase().includes(q) || nameOf(e.who).toLowerCase().includes(q));
+  const sig = `${feedViewAgent || ""}|${feedViewSaysOnly}|${q}|${entries.length}|${entries.at(-1)?.id || ""}`;
+  const countEl = body.querySelector("#lf-count");
+  if (countEl) countEl.textContent = `${entries.length} line${entries.length === 1 ? "" : "s"}`;
+  if (!force && stream.dataset.sig === sig) return;
+  const atEnd = stream.scrollTop + stream.clientHeight >= stream.scrollHeight - 40;
+  stream.dataset.sig = sig;
+  stream.innerHTML = entries.length ? entries.map((e) => {
+    const to = e.to && e.to !== "all" && !VERBAL_KINDS.has(e.kind) ? ` <span class="faint">→ ${esc(nameOf(e.to))}</span>` : e.to === "all" ? ` <span class="faint">→ everyone</span>` : "";
+    return `<div class="lf-item k-${esc(e.kind)}">${avatar(nameOf(e.who), e.who, "sm")}
+      <div class="lf-b"><div class="lf-m"><b>${esc(nameOf(e.who))}</b>${to} <span class="lf-tag">${esc(FEED_TAG[e.kind] || e.kind)}</span><span class="when faint" data-t="${e.created}">${ago(e.created)}</span></div>
+      <div class="lf-t md">${md(String(e.text || ""))}</div></div></div>`;
+  }).join("") : `<div class="empty">${feedViewAgent || q || feedViewSaysOnly ? "Nothing matches this filter yet." : "Nothing said yet. As the CEO and the team work, everything they say and do streams here."}</div>`;
+  if (force || atEnd) stream.scrollTop = stream.scrollHeight;
 }
 
 // ---------- tickets: the human adds work straight to the board ----------

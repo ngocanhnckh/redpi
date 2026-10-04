@@ -499,6 +499,15 @@ export default function (pi: ExtensionAPI) {
     }, 700);
   }
 
+  // Deliver a message into the live session safely. isIdle() can race with an in-flight turn, so a plain
+  // sendUserMessage sometimes throws "Agent is already processing a prompt"; catch it and queue instead of
+  // letting the error spam the terminal (and lose the message). Queued delivery (steer/followUp) never throws.
+  function deliver(body: string, { urgent = false }: { urgent?: boolean } = {}) {
+    const queue = () => { try { pi.sendUserMessage(body, { deliverAs: urgent ? "steer" : "followUp" }); } catch {} };
+    if (latestCtx?.isIdle?.()) { try { pi.sendUserMessage(body); } catch { queue(); } }
+    else queue();
+  }
+
   // ----- inbox -----
   function format(m: any): string {
     const from = m.senderName || m.sender;
@@ -577,7 +586,7 @@ export default function (pi: ExtensionAPI) {
     // Relay a real instruction into the live session without aborting it.
     if (forward) {
       const body = `[RedPlan · instruction from ${asker}${fromCeo ? "" : " via HQ"} (relayed from a side question)]\n${forward}`;
-      if (latestCtx?.isIdle?.()) pi.sendUserMessage(body); else pi.sendUserMessage(body, { deliverAs: "steer" });
+      deliver(body, { urgent: true });
     }
     await hq("POST", `/api/runs/${runId}/messages`, { from: me(), to: replyTo, kind: "aside", body: forward ? `${reply}\n\n↳ Forwarded to my live session: ${forward}` : reply }).catch(() => {});
     beat({}, { kind: "btw", text: `Answered on the side in ${((Date.now() - started) / 1000).toFixed(1)}s${forward ? " and forwarded an instruction" : ""}`, ms: Date.now() - started, ok: true });
@@ -626,8 +635,7 @@ export default function (pi: ExtensionAPI) {
       const body = msgs.map(format).join("\n\n---\n\n");
       // The human wrote from HQ: their answer is owed back there when this turn ends.
       if (msgs.some((m) => m.sender === "human" && !["system", "decision"].includes(m.kind))) { owedReply = true; owedSince = Date.now(); }
-      if (latestCtx.isIdle()) pi.sendUserMessage(body);
-      else pi.sendUserMessage(body, { deliverAs: urgent ? "steer" : "followUp" });
+      deliver(body, { urgent });
       beat({}, { kind: "inbox", text: msgs.map((m) => `${m.senderName}: ${String(m.body).slice(0, 120)}`).join(" | ") });
     } catch (e: any) {
       // HQ restarting or unreachable: retry on the next tick. Anything else shows in the activity feed.
@@ -779,7 +787,7 @@ export default function (pi: ExtensionAPI) {
     startPolling();
     ctx.ui.setStatus("redplan", `RedPlan CEO · ${hqUrl(`/runs/${runId}`)}`);
     ctx.ui.notify(`RedPlan run started.\nDashboard: ${hqUrl(`/runs/${runId}`)}\nAll projects: ${hqUrl("/")}`, "info");
-    pi.sendUserMessage(`[RedPlan] New request:\n\n${request}\n\nFollow the RedPlan protocol, starting with Phase 1 (intake).`);
+    deliver(`[RedPlan] New request:\n\n${request}\n\nFollow the RedPlan protocol, starting with Phase 1 (intake).`);
   } });
 
   pi.registerCommand("redplan-status", { description: "Show the RedPlan run, plan, board, and HQ links", handler: async (_args: string, ctx: any) => {

@@ -1815,7 +1815,7 @@ function notFound() { throw httpError(404, "not found"); }
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
-    if (url.pathname === "/api/health") return send(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT });
+    if (url.pathname === "/api/health") return send(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT, sweeps: sweepRanAt });
     // Public: the login page and the static assets (the open-source UI code, no data).
     if (req.method === "GET" && url.pathname.startsWith("/static/")) { let f; try { f = decodeURIComponent(url.pathname.slice(8)); } catch { return send(res, 404, "not found"); } return serveFile(res, f); }
     if (req.method === "GET" && url.pathname === "/login") return serveFile(res, "login.html");

@@ -333,6 +333,31 @@
   .stats-bar .stats-total { font-size: 13px; color: var(--muted); }
   .stats-bar .stats-total strong { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
   .stats-bar .stats-note { margin-left: auto; }
+  /* Feed: the live verbals stream with a per-agent pulse. */
+  .livefeed { display: flex; flex-direction: column; height: 100%; min-height: 0; gap: 8px; }
+  .lf-agents { display: flex; flex-wrap: wrap; gap: 6px; }
+  .lf-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2); color: var(--text); font-size: 12px; cursor: pointer; }
+  .lf-chip.on { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .lf-chip .lf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .lf-chip.fresh .lf-dot { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .lf-chip.warn .lf-dot { background: var(--amber); }
+  .lf-chip.idle .lf-dot { background: #8fa2ff; }
+  .lf-chip.stuck { border-color: var(--red); color: var(--red); }
+  .lf-chip.stuck .lf-dot { background: var(--red); box-shadow: 0 0 6px var(--red); animation: lfpulse 1.2s ease-in-out infinite; }
+  @keyframes lfpulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .lf-chip.stuck .lf-dot { animation: none; } }
+  .lf-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .lf-bar #lf-q { flex: 1 1 220px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); }
+  .lf-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .lf-count { margin-left: auto; font-size: 12px; }
+  .lf-stream { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 4px 2px; }
+  .lf-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; }
+  .lf-item .lf-b { min-width: 0; }
+  .lf-m { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+  .lf-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .lf-t { font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+  .lf-item.k-error .lf-t { color: var(--red); }
+  .lf-item.k-say .lf-tag, .lf-item.k-reply .lf-tag { border-color: var(--green); color: var(--green); }
   .tab-count.quiet { background: var(--cyan); color: #04130a; }
   .cx { display: grid; grid-template-columns: 230px minmax(0, 1fr); height: 100%; min-height: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); }
   .cx-side { background: color-mix(in srgb, var(--panel-2) 70%, var(--bg)); border-right: 1px solid var(--border); overflow-y: auto; padding: 8px 6px 12px; display: flex; flex-direction: column; gap: 1px; }

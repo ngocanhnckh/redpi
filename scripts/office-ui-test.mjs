@@ -209,7 +209,7 @@ const lay = await page.evaluate(() => {
   const t = document.querySelector(".team-panel").getBoundingClientRect();
   return { beside: f.left >= v.right - 1 && Math.abs(f.top - v.top) < 2, sameHeight: Math.abs(f.height - v.height) < 2, teamBelow: t.top >= v.bottom, oldSections: !!document.querySelector(".charts-section, #graph-host"), tabs: [...document.querySelectorAll("[role=tab][data-view]")].map((b) => b.dataset.view).join(","), overflow: document.documentElement.scrollWidth > innerWidth };
 });
-if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,chat,inbox,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
+if (!lay.beside || !lay.sameHeight || !lay.teamBelow || lay.oldSections || lay.tabs !== "office,board,feed,chat,inbox,timeline,stats,shots" || lay.overflow) await fail("run layout wrong", lay);
 
 // The page never jumps on live updates: scrolled down with a half-typed message, updates
 // arrive (heartbeats, a new message), and the scroll position, focus and text stay.
@@ -239,6 +239,17 @@ if (await visible("#feed .msg") || await visible("#feed .upd") || !(await visibl
 await page.click('[data-filter="chat"]');
 if (await visible("#feed .act") || await visible("#feed .upd")) await fail("Chat filter still shows other entries");
 await page.click('[data-filter="all"]');
+// The Feed tab: a dedicated live stream of everything everyone says, with a per-agent pulse so a silent
+// (stuck) agent is obvious. The CEO's narration shows here too.
+await page.click('[data-view="feed"]');
+await page.waitForSelector("#view-body .lf-stream .lf-item");
+if (!(await page.locator('#lf-agents .lf-chip[data-agent="ceo"]').count())) await fail("the Feed should show a pulse chip per agent, including the CEO");
+if (!/Checking the board/.test(await page.textContent("#lf-stream"))) await fail("the Feed should stream the CEO's narration");
+// Filtering to one agent narrows the stream to them.
+await page.click('#lf-agents .lf-chip[data-agent="ceo"]');
+await page.waitForFunction(() => { const items = [...document.querySelectorAll("#lf-stream .lf-item")]; return items.length > 0 && items.every((i) => /CEO/.test(i.querySelector(".lf-m")?.textContent || "")); });
+await page.click('#lf-agents .lf-chip[data-agent="ceo"]');   // toggle the filter back off
+await page.click('[data-view="office"]');
 // Team cards show each person's latest update in their words.
 if (!/Reading the orders module/.test(await page.textContent(`.member[data-person="${ids.Priya}"]`))) await fail("Priya's card should show her latest update");
 if (!/Checking the board/.test(await page.textContent('.member[data-person="ceo"]'))) await fail("the CEO's card should show its latest update");
