@@ -255,8 +255,10 @@ async function workerPrompt(): Promise<string> {
   const lead = d.manager ? d.manager.name : "the CEO";
   const independent = d.review !== "self";
   const reviewer = /review|qa|audit/i.test(w.role);
-  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title} [${t.status}]${t.kind === "ticket" ? ` (ticket from the human, ${t.priority === "urgent" ? "URGENT: before anything else" : `${t.priority || "normal"} priority`})` : ""}`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
-  const team = d.teammates.map((t: any) => `- ${t.name} (${t.role})${t.current_task ? `: working on ${t.current_task}` : ""}`).join("\n") || "- (just you)";
+  // No volatile state here (card statuses, who is on what): the brief is kept STATIC so the worker's context
+  // caches across turns. Live state comes from redplan_status / redplan_team on demand.
+  const tasks = d.tasks.map((t: any) => `- ${t.id} ${t.title}${t.kind === "ticket" ? ` (ticket from the human, ${t.priority === "urgent" ? "URGENT: before anything else" : `${t.priority || "normal"} priority`})` : ""}`).join("\n") || (reviewer ? "- (you review teammates' tasks as they reach review)" : "- (none yet; ask the CEO)");
+  const team = d.teammates.map((t: any) => `- ${t.name} (${t.role})`).join("\n") || "- (just you)";
   const frontend = FRONTEND_RE.test(`${w.role} ${d.tasks.map((t: any) => t.title).join(" ")} ${d.brief || ""}`);
   const finish = reviewer
     ? "done only after you have checked the exact diff against the task's acceptance criteria and run its tests. HQ sends you each task that reaches review, with the author's workspace and the criteria; keep it in review while you check it (never move it to in_progress to mean \"reviewing\"). Review within minutes, oldest first. Pass: done, with how you verified it and any minor issues listed in the note (do not send work back for nits or style). Fail (a criterion not met, or a real bug): in_progress with concrete findings; it goes back to its author and returns to you for the re-check."
@@ -607,8 +609,12 @@ export default function (pi: ExtensionAPI) {
       // Side questions (from the human or the CEO) never enter the live session: answer them on the side, one at a time.
       const asides = msgs.filter((m) => m.kind === "aside" && (m.sender === "human" || m.sender === "ceo") && m.recipient === me());
       for (const a of asides) asideChain = asideChain.then(() => answerAside(a)).catch(() => {});
-      // Anything else the human or the CEO sends gets an instant answer too, while the live session takes it in.
-      for (const q of msgs.filter((x) => (x.sender === "human" || x.sender === "ceo") && x.recipient === me() && ["chat", "command", "interrupt", "ticket"].includes(x.kind)))
+      // The human (and a CEO *question*) gets an instant answer too, while the live session takes the message in.
+      // But a CEO instruction to a worker (command/ticket) is just executed — a second model call to chat back
+      // about it is pure waste — and an interrupt is handled by aborting, not answered. Skip those.
+      for (const q of msgs.filter((x) => (x.sender === "human" || x.sender === "ceo") && x.recipient === me()
+          && ["chat", "command", "ticket"].includes(x.kind)
+          && !(WORKER_ID && x.sender === "ceo" && x.kind !== "chat")))
         quickChain = quickChain.then(() => answerAside(q, "quick")).catch(() => {});
       msgs = msgs.filter((m) => !asides.includes(m));
       // Wake rules: everything wakes an idle session except a teammate's update that asks nothing,
@@ -760,13 +766,10 @@ export default function (pi: ExtensionAPI) {
       return planText.deliver(event, ctx, prompt);
     }
     if (!runId) return planText.deliver(event, ctx, "");
-    let where = "";
-    try {
-      const s = await hq("GET", `/api/runs/${runId}`);
-      const done = s.tasks.filter((t: any) => t.status === "done").length;
-      where = `\nCurrent run: "${s.run.title}" status=${s.run.status}${s.plan ? `, plan v${s.plan.version} ${s.plan.status}` : ", no plan yet"}${s.tasks.length ? `, tasks ${done}/${s.tasks.length} done` : ""}, workers: ${s.workers.map((w: any) => { const open = s.tasks.filter((t: any) => t.worker_id === w.id && t.status !== "done").length; return `${w.name} (${w.role}, ${w.alive ? `${w.status}, ${open ? `${open} open task${open === 1 ? "" : "s"}` : "free"}` : "offline"})`; }).join(", ") || "none"}${s.tasks.some((t: any) => t.kind === "ticket" && t.status !== "done") ? `; open tickets: ${s.tasks.filter((t: any) => t.kind === "ticket" && t.status !== "done").map((t: any) => `${t.id} ${t.priority}${t.worker_id ? "" : " UNASSIGNED"} [${t.status}]`).join(", ")}` : ""}. Dashboard: ${hqUrl(`/runs/${runId}`)}`;
-    } catch {}
-    return planText.deliver(event, ctx, `${CEO_PROTOCOL}${where}`);
+    // The system prompt is kept STATIC across turns so the whole context prefix caches (a changing board
+    // status here invalidated the cache every turn — the dominant token sink). The live board is fetched on
+    // demand with redplan_status instead, and HQ pushes check-ins and alerts as messages.
+    return planText.deliver(event, ctx, `${CEO_PROTOCOL}\n\nThe live board is not repeated in this prompt (that would re-bill your whole context every turn): call redplan_status whenever you need the current tasks and team, and act on the HQ check-ins and alerts that arrive as messages. Dashboard: ${hqUrl(`/runs/${runId}`)}.`);
   });
 
   // ----- commands -----
