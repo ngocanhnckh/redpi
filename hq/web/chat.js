@@ -29,7 +29,7 @@ export class Chat {
       <nav class="cx-side" aria-label="Conversations"></nav>
       <section class="cx-main">
         <header class="cx-head"></header>
-        <div class="cx-list-wrap"><div class="cx-list" tabindex="0" aria-live="polite"></div><button class="cx-new" type="button" hidden></button></div>
+        <div class="cx-list-wrap"><div class="cx-list" tabindex="0"></div><button class="cx-new" type="button" hidden></button></div>
         <div class="cx-foot"></div>
       </section>
     </div>`;
@@ -54,16 +54,26 @@ export class Chat {
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && document.body.classList.contains("chat-full") && !this.mentionOpen()) this.toggleFull(false); });
   }
 
-  setActive(on) { this.active = on; if (!on) this.toggleFull(false); else this.markSeen(); }
+  setActive(on) {
+    const was = this.active; this.active = on;
+    if (!on) { this.toggleFull(false); return; }
+    // Entering the view: jump to where you left off (the New line), and only mark read once you reach the bottom.
+    if (!was && this.state) { this.listSig = ""; this.newBtn.hidden = true; this.render(true); }
+    this.markSeen();
+  }
   toggleFull(force) {
     const on = document.body.classList.toggle("chat-full", force);
     this.head.querySelector(".cx-full")?.setAttribute("aria-pressed", String(on));
   }
 
+  // Merged, sorted messages, cached per state object so a hidden chat does not re-sort on every live tick.
   messages() {
+    if (this._mc && this._mcState === this.state && this._mcExtra === this.extra.size) return this._mc;
     const byId = new Map(this.extra);
     for (const m of this.state.messages || []) byId.set(m.id, m);
-    return [...byId.values()].sort((a, b) => a.id - b.id);
+    this._mc = [...byId.values()].sort((a, b) => a.id - b.id);
+    this._mcState = this.state; this._mcExtra = this.extra.size;
+    return this._mc;
   }
 
   // The conversations: channels, then a direct message with the CEO and each teammate (people who left fold away).
@@ -86,15 +96,21 @@ export class Chat {
 
   open(key, { focus = true } = {}) {
     if (!this.convs().some((c) => c.key === key)) key = "dm:ceo";
+    if (key === this.conv && this.active) { this.foot.querySelector("textarea")?.focus(); return; }   // already open: don't yank scroll
     this.saveDraft();
-    this.conv = key; this.listSig = ""; this.footKey = "";
+    this.conv = key; this.listSig = ""; this.footKey = ""; this.newBtn.hidden = true;
     try { localStorage.setItem(`redpi-chat-conv-${this.ctx.runId}`, key); } catch {}
     this.root.querySelector(".cx").classList.add("in-conv");
     this.render(true);
     if (focus) this.foot.querySelector("textarea")?.focus({ preventScroll: true });
   }
 
-  update(state) { this.state = state; this.render(false); }
+  update(state) {
+    this.state = state;
+    // While another view is showing, only keep the unread badge current — do not render or mark read.
+    if (!this.active) { this.ctx.onUnread?.(); return; }
+    this.render(false);
+  }
 
   render(jump) {
     const all = this.messages(), convs = this.convs();
@@ -204,6 +220,7 @@ export class Chat {
     if (key === this.footKey) return;
     this.footKey = key;
     if (c.readOnly) { this.foot.innerHTML = `<div class="cx-ro faint">${esc(c.about)}</div>`; return; }
+    if (c.dm && c.past) { this.foot.innerHTML = `<div class="cx-ro faint">${esc(c.name)} has left the team, so nobody would read this. Message the CEO instead.</div>`; return; }
     const name = c.dm ? c.name : "#team";
     this.foot.innerHTML = `<div class="cx-compose">
         <div class="cx-mention" role="listbox" hidden></div>
@@ -232,13 +249,17 @@ export class Chat {
     const ta = this.foot.querySelector("textarea");
     if (!c || c.readOnly || !ta) return;
     const body = ta.value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
-    if (!body) return;
+    if (!body) { toast("Type a message first."); ta.focus(); return; }
+    const btns = [...this.foot.querySelectorAll(".cx-acts .btn")];
+    const primary = this.foot.querySelector('.cx-acts [data-send="command"]') || btns[0];
+    btns.forEach((b) => { b.disabled = true; }); primary?.setAttribute("aria-busy", "true");
     try {
       await api("POST", `/api/runs/${this.ctx.runId}/messages`, { from: "human", to: c.dm ? c.id : "all", kind, body });
       ta.value = ""; ta.style.height = "auto"; this.drafts.delete(c.key);
       this.list.scrollTop = this.list.scrollHeight;
       this.ctx.reload();
     } catch (e) { toast(e.message); }
+    finally { btns.forEach((b) => { b.disabled = false; }); primary?.removeAttribute("aria-busy"); }
   }
 
   saveDraft() { const ta = this.foot.querySelector("textarea"); if (ta) this.drafts.set(this.conv, ta.value); }
@@ -293,6 +314,8 @@ export class Chat {
 
   async loadEarlier() {
     const min = Math.min(...this.messages().map((m) => m.id));
+    const btn = this.list.querySelector(".cx-earlier");
+    if (btn) { if (btn.dataset.busy === "1") return; btn.dataset.busy = "1"; btn.disabled = true; btn.textContent = "Loading…"; }
     try {
       const older = await api("GET", `/api/runs/${this.ctx.runId}/messages?before=${min}&limit=300`);
       older.forEach((m) => this.extra.set(m.id, m));

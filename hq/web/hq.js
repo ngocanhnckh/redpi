@@ -2,11 +2,19 @@
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 export async function api(method, path, body) {
-  const res = await fetch(path, {
-    method, credentials: "same-origin",
-    headers: { "x-redpi-hq": "1", ...(body ? { "content-type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // A stuck request should fail loudly, not hang a button forever.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let res;
+  try {
+    res = await fetch(path, {
+      method, credentials: "same-origin", signal: ctrl.signal,
+      headers: { "x-redpi-hq": "1", ...(body ? { "content-type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error(e?.name === "AbortError" ? "The request timed out. Check your connection and try again." : "Could not reach HQ. Is it still running?");
+  } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
   // Signed out (or the password changed): back to the sign-in page, then here again.
   if (res.status === 401 && !path.startsWith("/api/login")) location.assign(`/login?next=${encodeURIComponent(location.pathname + location.search)}`);
@@ -38,6 +46,18 @@ export function live(runId, onChange) {
     es.onerror = () => { es.close(); setTimeout(connect, 3000); };
   };
   connect();
+}
+
+// Run an async click handler with immediate feedback: the button is disabled and shows a spinner until it
+// settles, so no action ever feels dead. Returns the handler's result; errors are toasted unless told not to.
+export async function busy(btn, fn, { quiet = false } = {}) {
+  if (!btn) return fn();
+  if (btn.dataset.busy === "1") return;   // no double-submit
+  btn.dataset.busy = "1"; btn.setAttribute("aria-busy", "true");
+  const wasDisabled = btn.disabled; btn.disabled = true;
+  try { return await fn(); }
+  catch (e) { if (!quiet) toast(e?.message || "Something went wrong"); throw e; }
+  finally { delete btn.dataset.busy; btn.removeAttribute("aria-busy"); btn.disabled = wasDisabled; }
 }
 
 export function toast(msg) {

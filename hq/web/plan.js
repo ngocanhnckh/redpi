@@ -1,4 +1,4 @@
-import { api, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
+import { api, busy, esc, hours, live, pill, signedInAs, toast } from "/static/hq.js";
 import { closeComposer, compose, composerOpen, highlight, onComposerClose, pinTarget, readSelection } from "/static/annotate.js";
 import { mountPanZoom, panZoomFrame } from "/static/panzoom.js";
 import { drawFlows, flowsView, wrapText } from "/static/flows.js";
@@ -143,19 +143,19 @@ function wireDecision(pending) {
   const text = document.getElementById("comment"), send = document.getElementById("send");
   const drafts = () => data.comments.filter((c) => c.status === "draft").length;
   text.oninput = () => { overall = text.value; store.set(`redplan-overall-${planId}`, overall); send.disabled = !drafts() && !overall.trim(); };
-  const decide = async (decision) => {
-    closeComposer();
+  const decide = (decision, btn) => {
     const n = drafts();
     if (decision === "changes" && !n && !overall.trim()) return toast("Add a comment first");
-    try {
+    closeComposer();
+    return busy(btn, async () => {
       await api("POST", `/api/plans/${planId}/decision`, { decision, comment: overall.trim() });
       overall = ""; store.set(`redplan-overall-${planId}`, "");
       toast(decision === "approve" ? "Approved: the CEO is starting the team" : `Sent ${n ? `${n} comment${n === 1 ? "" : "s"}` : "your feedback"} to the CEO. It is revising the plan.`);
       load();
-    } catch (e) { toast(e.message); }
+    });
   };
-  send.onclick = () => decide("changes");
-  document.getElementById("approve").onclick = () => decide("approve");
+  send.onclick = () => decide("changes", send);
+  document.getElementById("approve").onclick = (e) => decide("approve", e.currentTarget);
 }
 
 // ---------- annotations in the page ----------
@@ -337,12 +337,13 @@ function harnessBar(plan, pending) {
   </div>`;
 }
 function wireHarness() {
-  const put = async (task, harness) => {
+  const put = async (task, harness, el) => {
+    el.disabled = true; el.setAttribute("aria-busy", "true");
     try { data.harness = await api("PUT", `/api/runs/${data.runId}/harness`, { task, harness }); render(); toast(`${task === "*" ? "Every task" : task} → ${harnessName(harness)}`); }
-    catch (e) { toast(e.message); render(); }
+    catch (e) { toast(e.message); el.disabled = false; el.removeAttribute("aria-busy"); render(); }
   };
-  app.querySelectorAll("[data-harness-all]").forEach((el) => el.onchange = () => put("*", el.value));
-  app.querySelectorAll("[data-harness-task]").forEach((el) => el.onchange = () => put(el.dataset.harnessTask, el.value));
+  app.querySelectorAll("[data-harness-all]").forEach((el) => el.onchange = () => put("*", el.value, el));
+  app.querySelectorAll("[data-harness-task]").forEach((el) => el.onchange = () => put(el.dataset.harnessTask, el.value, el));
 }
 
 function storiesView(plan, schedule, pending) {

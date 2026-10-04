@@ -190,7 +190,7 @@ if (!peterMsgs.some((m) => m.body.startsWith("Handing T2"))) fail("new owner not
 if ((await api("GET", `/api/runs/${runId}/tasks/T2/history`)).body.at(-1)?.target !== peter.id) fail("handoff not in history");
 
 // Blockers go to whoever must act: a teammate named in the note (they are told directly), the CEO by
-// default, the human only when asked for explicitly or clearly needed. Only human blocks are "needs you".
+// default; a worker's "human" goes to the CEO first, and only the CEO puts a blocker on the human.
 const blockT2 = (body) => api("POST", `/api/runs/${runId}/tasks/T2`, { status: "blocked", actor: peter.id, ...body });
 const bt = await blockT2({ note: "waiting on Alex to merge the schema migration" });
 const blockedOn = () => api("GET", `/api/runs/${runId}`).then((r) => r.body.tasks.find((t) => t.id === "T2").blocked_on);
@@ -201,7 +201,9 @@ if ((await api("GET", `/api/runs/${runId}/tasks/T2/history`)).body.at(-1)?.targe
 await blockT2({ note: "the vendor sandbox is down" });
 if ((await blockedOn()) !== "ceo") fail("an unnamed blocker should default to the CEO, not the human");
 await blockT2({ note: "need the production database password", waitingOn: "human" });
-if ((await blockedOn()) !== "human") fail("waitingOn human not recorded");
+if ((await blockedOn()) !== "ceo") fail("a worker's human blocker should go to the CEO first");
+await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "blocked", actor: "ceo", note: "need the production database password", waitingOn: "human" });
+if ((await blockedOn()) !== "human") fail("the CEO's waitingOn human not recorded");
 if ((await blockT2({ note: "x", waitingOn: "Bob" })).status !== 400) fail("unknown waitingOn accepted");
 await api("POST", `/api/runs/${runId}/tasks/T2`, { status: "todo", actor: "ceo" });
 if ((await blockedOn()) !== null) fail("blocked_on should clear when the task moves on");
@@ -215,14 +217,15 @@ const w2 = (await api("GET", `/api/workers/${alex.id}`)).body;
 if (w2.worker.session_file !== "/tmp/s.jsonl" || w2.worker.needs_input?.reason !== "rate limit" || w2.worker.context?.tokens !== 1000) fail("session file / needs input / context not stored", w2.worker);
 if (!w2.events.some((e) => e.ms === 1234 && e.ok === 0)) fail("timed tool event not stored", w2.events);
 
-// Parked ladder (REDPI_HQ_PARK_MS=600): idle + in_progress + silent → worker nudge → CEO → human.
+// Parked ladder (REDPI_HQ_PARK_MS=600): idle + in_progress + silent → worker nudge → CEO → the CEO again, harder (never the human).
 await api("POST", `/api/runs/${runId}/tasks/T3`, { status: "in_progress", actor: peter.id, workerId: peter.id });
 await api("POST", `/api/workers/${peter.id}/heartbeat`, { status: "idle" });
 const seen = async (who, text) => (await api("GET", `/api/runs/${runId}/inbox?for=${who}&after=0`)).body.some((m) => m.body.includes(text));
 let ladder = false;
-for (let i = 0; i < 60 && !ladder; i++) { await new Promise((r) => setTimeout(r, 150)); ladder = (await api("GET", `/api/workers/${peter.id}`)).body.worker.needs_human; }
-if (!ladder) fail("parked worker never escalated to the human");
-if (!(await seen(peter.id, "still own in-progress work")) || !(await seen("ceo", "Peter is parked")) || !(await seen("human", "Peter needs you"))) fail("wake ladder steps missing");
+for (let i = 0; i < 60 && !ladder; i++) { await new Promise((r) => setTimeout(r, 150)); ladder = await seen("ceo", "Peter is STILL parked"); }
+if (!ladder) fail("a parked worker should be pressed on the CEO again");
+if (!(await seen(peter.id, "still own in-progress work")) || !(await seen("ceo", "Peter is parked"))) fail("wake ladder steps missing");
+if ((await seen("human", "parked")) || (await seen("human", "needs you")) || (await api("GET", `/api/inbox?run=${runId}&status=all`)).body.items.some((i) => i.kind === "alert")) fail("a parked worker is the CEO's to fix: nothing should reach the human");
 await api("POST", `/api/workers/${peter.id}/heartbeat`, { status: "working" });
 if ((await api("GET", `/api/workers/${peter.id}`)).body.worker.parked) fail("activity did not reset the ladder");
 
@@ -490,7 +493,13 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   const ana = await hire("Ana", "backend developer", ["T1", "T3"]);
   const set = (task, body) => api("POST", `/api/runs/${rid}/tasks/${task}`, body);
   await set("T1", { status: "in_progress", actor: ana.id, workerId: ana.id });
+  // A worker who says only the human can unblock it goes to the CEO first: no ticket, the CEO decides.
   await set("T1", { status: "blocked", note: "Need the production API key for the payment provider.", waitingOn: "human", actor: ana.id });
+  if ((await items()).items.some((i) => i.kind === "blocker")) fail("a worker's blocker should not reach the human's inbox directly");
+  if ((await api("GET", `/api/runs/${rid}`)).body.tasks.find((t) => t.id === "T1").blocked_on !== "ceo") fail("a worker's human blocker should wait on the CEO");
+  if (!(await inboxOf("ceo")).some((m) => m.kind === "system" && /Ana thinks only the human can unblock it\. Decide it yourself if you can.*redplan_ask_human with taskId T1/s.test(m.body))) fail("the CEO should be asked to decide the blocker first");
+  // The CEO decides it truly needs the human: now it is a ticket.
+  await set("T1", { status: "blocked", note: "Need the production API key for the payment provider.", waitingOn: "human", actor: "ceo" });
   const blocker = await byKey(/^T1 API skeleton/);
   if (!blocker || blocker.kind !== "blocker" || blocker.status !== "open" || blocker.askedByName !== "Ana" || blocker.task.id !== "T1") fail("a blocker on the human should be an open ticket", blocker);
   if ((await api("GET", "/api/projects")).body.find((p) => p.path === "/tmp/demo-inbox")?.inbox_open !== 1) fail("the project should count open tickets");
@@ -505,7 +514,7 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   if (un.body.status !== "resolved" || (await api("GET", `/api/runs/${rid}`)).body.tasks.find((t) => t.id === "T1").status !== "in_progress") fail("unblock should resolve the ticket and put the task back to work", un.body);
   if (!(await inboxOf(ana.id)).some((m) => /The human unblocked T1\.\nGo ahead\.\n\nContinue T1 now\./.test(m.body))) fail("the owner should be told to continue");
   // Blocked again: the same ticket reopens with the new note; moved on by the team: it closes itself.
-  await set("T1", { status: "blocked", note: "The key is rejected: 401.", waitingOn: "human", actor: ana.id });
+  await set("T1", { status: "blocked", note: "The key is rejected: 401.", waitingOn: "human", actor: "ceo" });
   const again = (await items()).items.filter((i) => i.kind === "blocker");
   if (again.length !== 1 || again[0].status !== "open" || again[0].thread.at(-1).body !== "The key is rejected: 401.") fail("a task blocked again should reopen its ticket", again);
   await set("T1", { status: "in_progress", note: "Rotated the key myself.", actor: ana.id });

@@ -32,7 +32,7 @@ function actionsFor(it) {
     case "approval": return [["approve", "Approve", "primary"], ["decline", plan ? "Request changes" : "Decline", "danger"], ...(plan ? [] : [["comment", "Comment", ""]])];
     case "blocker": return [["unblock", "Unblock", "primary"], ["comment", "Reply", ""], ["resolve", "Close", ""]];
     case "alert": return [["comment", `Tell ${it.targetName}`, "primary"], ["resolve", "Close", ""]];
-    default: return [["comment", "Reply", "primary"], ["resolve", "Close", ""]];
+    default: return [["comment", "Reply", "primary"], ...(it.task?.status === "blocked" ? [["unblock", `Unblock ${it.task.id}`, ""]] : []), ["resolve", "Close", ""]];
   }
 }
 function placeholder(it) {
@@ -48,6 +48,9 @@ export class Inbox {
   constructor(root, opts = {}) {
     this.root = root; this.opts = opts; this.items = [];
     this.filter = "open"; this.selected = null; this.drafts = new Map(); this.sig = "";
+    // Closed tickets arrive from the run view without their thread, to keep that payload light; the thread is
+    // fetched once on open and cached (keyed by the ticket's updated time, so a new comment refetches).
+    this.threadCache = new Map(); this.threadFetching = new Set();
     root.innerHTML = `<div class="ib">
       <div class="ib-side">
         <div class="viewtabs ib-tabs" role="tablist" aria-label="Which tickets">${FILTERS.map(([k, l]) => `<button role="tab" data-ibf="${k}">${l} <span class="faint" data-ibn="${k}"></span></button>`).join("")}</div>
@@ -88,6 +91,8 @@ export class Inbox {
   }
 
   paint() {
+    // Switching filters should not leave the detail showing a ticket missing from the list.
+    if (this.selected) { const sel = this.items.find((i) => i.id === this.selected); if (sel && !this.matches(sel)) this.selected = null; }
     const counts = { open: 0, waiting: 0, closed: 0, all: this.items.length };
     for (const it of this.items) counts[CLOSED.includes(it.status) ? "closed" : it.status]++;
     this.root.querySelectorAll("[data-ibf]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.ibf === this.filter)));
@@ -113,7 +118,14 @@ export class Inbox {
     const it = this.items.find((i) => i.id === this.selected);
     if (!it) { this.sig = ""; this.detail.innerHTML = `<div class="ib-pick faint">Pick a ticket to read it and answer.</div>`; this.detail.classList.remove("has"); return; }
     this.detail.classList.add("has");
-    const sig = `${it.id}|${it.updated}|${it.status}|${it.comments}|${(it.thread || []).length}`;
+    // A closed ticket comes without its thread; serve it from cache or fetch it, then repaint.
+    if (it.thread === undefined && it.comments > 0) {
+      const cached = this.threadCache.get(it.id);
+      if (cached && cached.updated === it.updated) it.thread = cached.thread;
+      else this.loadThread(it);
+    }
+    const loadingThread = it.thread === undefined && it.comments > 0;
+    const sig = `${it.id}|${it.updated}|${it.status}|${it.comments}|${(it.thread || []).length}|${loadingThread ? "L" : ""}`;
     if (sig === this.sig) return;
     const sameTicket = this.sig.startsWith(`${it.id}|`);
     this.sig = sig;
@@ -132,7 +144,7 @@ export class Inbox {
         ${this.opts.showRun ? ` · <a href="/runs/${esc(it.run_id)}">${esc(it.project || "")} / ${esc(it.runTitle || "")}</a>` : ""}
         ${planId ? ` · <a href="/plans/${esc(planId)}">Open the plan</a>` : ""}</div>
       ${it.body ? `<div class="ib-body md">${md(it.body)}</div>` : ""}
-      ${thread ? `<div class="ib-thread">${thread}</div>` : ""}
+      ${thread ? `<div class="ib-thread">${thread}</div>` : loadingThread ? `<div class="ib-thread loading-row">Loading the thread…</div>` : ""}
       ${CLOSED.includes(it.status) ? `<div class="ib-res faint">${esc(sl)}${it.closedByName ? ` by ${esc(it.closedByName)}` : ""}${it.closed ? ` ${ago(it.closed)}` : ""}${it.resolution ? `: ${esc(it.resolution)}` : ""}</div>` : ""}`;
     // The composer survives re-renders of the same ticket; switching tickets keeps each one's draft.
     let box = this.detail.querySelector(".ib-compose");
@@ -157,13 +169,29 @@ export class Inbox {
     if (keepFocus) box.querySelector("textarea").focus({ preventScroll: true });
   }
 
+  async loadThread(it) {
+    const key = `${it.id}|${it.updated}`;
+    if (this.threadFetching.has(key)) return;
+    this.threadFetching.add(key);
+    try {
+      const view = await api("GET", `/api/inbox/${it.id}`);
+      const thread = view.thread || [];
+      this.threadCache.set(it.id, { updated: it.updated, thread });
+      const cur = this.items.find((i) => i.id === it.id);
+      if (cur) cur.thread = thread;
+      if (this.selected === it.id) { this.sig = ""; this.paintDetail(); }
+    } catch { /* a transient failure just leaves "Loading…"; the next open retries */ }
+    finally { this.threadFetching.delete(key); }
+  }
+
   async act(action, btn) {
     const it = this.items.find((i) => i.id === this.selected);
     if (!it) return;
     const ta = this.detail.querySelector(".ib-compose textarea");
     const body = ta.value.trim();
     if (action === "comment" && !body) { toast("Write your answer first."); ta.focus(); return; }
-    btn.disabled = true;
+    if (action === "decline" && String(it.key || "").startsWith("plan:") && !body) { toast("Say what should change first."); ta.focus(); return; }
+    btn.disabled = true; btn.setAttribute("aria-busy", "true");
     try {
       const view = await api("POST", `/api/inbox/${it.id}`, { action, body });
       ta.value = ""; this.drafts.delete(it.id);
@@ -173,7 +201,7 @@ export class Inbox {
       toast({ comment: `Sent to ${view.targetName}.`, approve: "Approved.", decline: String(it.key || "").startsWith("plan:") ? "Changes requested: the CEO revises the plan." : "Declined.", unblock: `Unblocked: ${view.targetName} carries on.`, resolve: "Closed.", reopen: "Reopened." }[action] || "Done.");
       this.paint();
       this.opts.onChanged?.();
-    } catch (e) { toast(e.message); } finally { btn.disabled = false; }
+    } catch (e) { toast(e.message); } finally { btn.disabled = false; btn.removeAttribute("aria-busy"); }
   }
 }
 

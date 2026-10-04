@@ -1,11 +1,12 @@
 import { ago, api, esc, live, pill, signedInAs, toast } from "/static/hq.js";
 import { portraitUrl } from "/static/office/people.js";
 import { Office } from "/static/office/office.js";
-import { renderCharts } from "/static/charts.js";
+import { renderCharts, usageSummary, tokens as fmtTokens } from "/static/charts.js";
 import { renderTimeline } from "/static/timeline.js";
 import { md, plain } from "/static/md.js";
 import { Inbox, inboxBadge } from "/static/inbox.js";
 import { Chat } from "/static/chat.js";
+import { busy } from "/static/hq.js";
 
 const app = document.getElementById("app");
 const runId = location.pathname.startsWith("/runs/") ? location.pathname.split("/")[2] : null;
@@ -89,7 +90,7 @@ async function loadHome() {
   const active = projects.filter((p) => p.active_runs);
   if (homeFilter !== "all" && homeFilter !== "active") homeFilter = active.length ? "active" : "all";
   const online = projects.flatMap((p) => p.workers.filter((w) => w.alive));
-  const needs = projects.reduce((n, p) => n + (p.inbox_open || 0) + p.workers.filter((w) => w.needsYou).length, 0);
+  const needs = projects.reduce((n, p) => n + (p.inbox_open || 0), 0);
   const done = active.reduce((n, p) => n + p.done, 0), tasks = active.reduce((n, p) => n + p.tasks, 0);
   const focused = document.activeElement?.id === "psearch";
   app.innerHTML = `
@@ -125,7 +126,7 @@ async function loadHome() {
 function projectCard(p) {
   const [label, tone] = projectState(p);
   const live = p.workers.filter((w) => w.alive);
-  const needs = (p.inbox_open || 0) + p.workers.filter((w) => w.needsYou).length;
+  const needs = p.inbox_open || 0;
   const faces = live.slice(0, 8).map((w) => `<img class="avatar sm ${w.needsYou ? "needs-ring" : ""}" alt="" title="${esc(w.name)} · ${esc(w.role)}${w.needsYou ? " · needs you" : ""}" src="${portraitUrl(w.name, w.role)}">`).join("");
   return `<a class="panel project-card ${p.active_runs ? "on" : ""}" href="/projects/${esc(p.id)}">
     <div class="pc-top"><span class="pc-name">${esc(p.name)}</span><span class="pill ${tone}">${esc(label)}</span></div>
@@ -186,20 +187,6 @@ function ceoLink() {
   return { ok: caps.includes("aside"), text: caps.includes("aside") ? "" : "The CEO session's RedPi is out of date: type /reload in its terminal." };
 }
 
-function needsYou() {
-  const { workers } = state;
-  const items = [];
-  const ceo = ["done", "cancelled"].includes(state.run.status) ? { ok: true } : ceoLink();
-  if (!ceo.ok) items.push({ id: "ceo", level: "red", text: ceo.text });
-  // Everything that waits on you is a ticket in the inbox: blockers on you, questions, approvals, alerts the CEO did not fix.
-  const KIND = { blocker: "Blocked", question: "Question", approval: "Approve", alert: "HQ watch" };
-  for (const it of (state.inbox || []).filter((i) => i.status === "open")) items.push({ ticket: it.id, level: it.kind === "question" ? "amber" : "red", text: `${KIND[it.kind] || it.kind}: ${it.title}${it.kind === "blocker" ? ` (${it.askedByName})` : it.kind === "question" ? ` (${it.askedByName})` : ""}`.slice(0, 300) });
-  for (const w of workers) {
-    if (!w.alive) { if (workerState(w) === "lost") items.push({ id: w.id, level: "amber", text: `${holds(w).map((t) => t.id).join(", ")} has nobody on it: ${w.name}'s session ended. The CEO has been told; resume ${w.name} or hand it on.`, action: "resume" }); }
-    else if (w.needs_input) items.push({ id: w.id, level: "red", text: `${w.name}: ${w.needs_input.reason}` });
-  }
-  return items.slice(0, 8);
-}
 
 // Scroll areas that are re-rendered keep the reader's place: a list of messages stays
 // pinned to the newest one only while the reader is already at the bottom; otherwise it
@@ -233,7 +220,6 @@ function buildRun() {
   app.innerHTML = `
     <div id="live" class="sr-only" aria-live="polite"></div>
     <div class="run-head" id="run-head"></div>
-    <div id="needs-slot"></div>
     <div class="stats" id="stats" style="margin-bottom:10px"></div>
     <div class="run-main">
       <div class="panel view-panel">
@@ -268,17 +254,16 @@ function buildRun() {
   applyFilter();
   const toSel = $("to");
   toSel.onchange = () => { draftTo = toSel.value; };
-  const sendDraft = async () => {
+  const sendDraft = () => {
     const input = $("draft");
     const body = input.value.trim();
     if (!body) return;
-    try {
+    return busy($("send"), async () => {
       await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: toSel.value, kind: "command", body });
       input.value = ""; feed.scrollTop = feed.scrollHeight;
       toast(toSel.value === "all" ? "Sent to everyone. Replies appear here and in each person's chat." : `Sent to ${nameOf(toSel.value)}. Their reply appears here and in their chat.`);
       loadRun();
-    }
-    catch (e) { toast(e.message); }
+    });
   };
   $("send").onclick = sendDraft;
   $("draft").onkeydown = (e) => { if (e.key === "Enter") sendDraft(); };
@@ -293,7 +278,7 @@ function buildRun() {
     else if (el.dataset.filter) { feedFilter = el.dataset.filter; store.set("redpi-feed-filter", feedFilter); applyFilter(); feed.scrollTop = feed.scrollHeight; }
     else if (el.dataset.person) select(el.dataset.person);
     else if (el.dataset.task) { openPanel = { task: el.dataset.task }; renderPanel(); }
-    else if (el.dataset.open !== undefined) { if (el.dataset.action === "resume") resume(el.dataset.open); else if (el.dataset.open) select(el.dataset.open); }
+    else if (el.dataset.open !== undefined) { if (el.dataset.action === "resume") resume(el.dataset.open, el); else if (el.dataset.open) select(el.dataset.open); }
   };
 }
 
@@ -324,12 +309,12 @@ function renderRun() {
   $("crumbs").innerHTML = `<a href="/projects/${esc(project.id)}">${esc(project.name)}</a> <span class="faint mono">${esc(project.path)}</span>`;
   if (!view) view = workers.length ? "office" : "board";
   const done = tasks.filter((t) => t.status === "done").length;
-  $("run-head").innerHTML = `<h1>${esc(run.title)}</h1>${pill(run.status)}
+  // The one thing only you can fix: the CEO's terminal is closed or out of date. A small pill, not a banner.
+  const link = ["done", "cancelled"].includes(run.status) ? { ok: true } : ceoLink();
+  $("run-head").innerHTML = `<h1>${esc(run.title)}</h1>${pill(run.status)}${link.ok ? "" : ` <span class="pill red" title="${esc(link.text)}">CEO not connected</span>`}
       ${plan ? `<a class="btn" href="/plans/${esc(plan.id)}">Plan v${plan.version} ${plan.status === "pending" ? "· needs your approval" : ""}</a>` : `<span class="muted">The CEO is still planning…</span>`}
       <button class="btn primary new-ticket" data-new-ticket="1" title="Add work straight to the board: no plan or approval needed">+ New ticket</button>
       <span class="muted" style="margin-left:auto">updated ${ago(run.updated)}</span>`;
-  const needs = needsYou();
-  $("needs-slot").innerHTML = needs.length ? `<div class="needs" role="region" aria-label="Needs you"><span class="needs-title">Needs you</span>${needs.map((n) => `<button class="needs-item ${n.level}" ${n.ticket ? `data-ticket="${n.ticket}"` : `data-open="${esc(n.id || "")}"`} ${n.action ? `data-action="${n.action}"` : ""} title="${esc(n.text)}">${esc(n.text)}</button>`).join("")}</div>` : "";
   $("stats").innerHTML = `
       <div class="panel stat"><div class="v">${done}/${tasks.length || "–"}</div><div class="k">Tasks done</div></div>
       <div class="panel stat"><div class="v">${tasks.filter((t) => t.status === "in_progress").length}</div><div class="k">In progress</div></div>
@@ -358,15 +343,17 @@ function scheduleAutoplay() {
   const btn = $("autoplay"), bar = $("ap-bar");
   if (!btn) return;
   btn.setAttribute("aria-pressed", String(autoplay));
-  btn.textContent = autoplay ? (apHover ? "Auto-play · paused" : "Auto-play · on") : "Auto-play";
+  // Reading a drawer, a task, or the new-ticket form pauses the rotation, like hovering the view does.
+  const paused = apHover || !!openPanel || !!document.querySelector(".modal-back");
+  btn.textContent = autoplay ? (paused ? "Auto-play · paused" : "Auto-play · on") : "Auto-play";
   bar.hidden = !autoplay;
   if (!autoplay) return;
   // The bar fills over the interval; it restarts on every switch and holds while paused.
   const fill = bar.firstElementChild;
   fill.style.animation = "none"; void fill.offsetWidth;
   fill.style.animation = `ap-fill ${AUTOPLAY_MS}ms linear forwards`;
-  fill.style.animationPlayState = apHover ? "paused" : "running";
-  if (apHover) return;
+  fill.style.animationPlayState = paused ? "paused" : "running";
+  if (paused) return;
   apTimer = setTimeout(() => {
     // Chat and the inbox are for answering, not watching: auto-play passes them by.
     const cycle = VIEWS.filter(([k]) => k !== "inbox" && k !== "chat"), i = cycle.findIndex(([k]) => k === view);
@@ -392,6 +379,37 @@ function ensureChat() {
     chatView = new Chat(chatHost, { runId, avatar, presence, pendingText, onPerson: select, reload: loadRun, onUnread: updateChatTab, order: orgOrder });
   }
   return chatView;
+}
+
+// The Stats time filter: All, this week, or today. The trend charts clip to it; snapshots stay current.
+const STATS_RANGES = [["all", "All"], ["week", "This week"], ["today", "Today"]];
+let statsRange = STATS_RANGES.some(([k]) => k === store.get(`redpi-stats-range`)) ? store.get(`redpi-stats-range`) : "today";
+function statsFrom() {
+  const now = state?.now || Date.now();
+  if (statsRange === "today") { const d = new Date(now); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  if (statsRange === "week") return now - 7 * 86400_000;
+  return 0;
+}
+function renderStats(body) {
+  if (!body.querySelector(".charts")) {
+    body.innerHTML = `<div class="stats-bar"><div class="viewtabs" role="tablist" aria-label="Time range">${STATS_RANGES.map(([k, l]) => `<button role="tab" data-range="${k}">${l}</button>`).join("")}</div>
+      <span class="stats-total" aria-live="polite"></span><span class="muted stats-note" style="font-size:12px"></span></div><div class="charts" id="charts"></div>`;
+    body.querySelector(".stats-bar").addEventListener("click", (e) => { const b = e.target.closest("[data-range]"); if (b) { statsRange = b.dataset.range; store.set("redpi-stats-range", statsRange); renderStats(body); } });
+  }
+  body.querySelectorAll("[data-range]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.range === statsRange)));
+  body.querySelector(".stats-note").textContent = statsRange === "all" ? "Whole run" : statsRange === "week" ? "Trends over the last 7 days · snapshots are current" : "Trends since midnight · snapshots are current";
+  // The headline total the user asked for: all tokens used across the team in the selected window.
+  const u = usageSummary(state, statsFrom()), word = statsRange === "all" ? "all time" : statsRange === "week" ? "this week" : "today";
+  body.querySelector(".stats-total").innerHTML = u.tokens
+    ? `<strong>${fmtTokens(u.tokens)}</strong> tokens ${word} · ${u.calls.toLocaleString()} call${u.calls === 1 ? "" : "s"} · ${u.people} active${u.cost > 0 ? ` · $${u.cost.toFixed(2)}` : ""}`
+    : `<span class="muted">No token use ${word}</span>`;
+  // Rebuild the nine SVGs only when the data (or range) changed, not on every live tick while Stats is open.
+  const lastTr = (state.transitions || []).at(-1)?.id || 0, lastUse = (state.usage?.series || []).length;
+  const sig = `${statsRange}|${state.tasks.map((t) => t.status).join("")}|${lastTr}|${lastUse}|${(state.workers || []).length}`;
+  const charts = $("charts");
+  if (charts.dataset.sig === sig && charts.children.length) return;
+  charts.dataset.sig = sig;
+  renderCharts(charts, state, statsFrom());
 }
 
 function renderView() {
@@ -433,12 +451,18 @@ function renderView() {
   // Board, Timeline, Stats and Screenshots scroll inside the view; each keeps its own place.
   const top = body.dataset.view === view ? body.scrollTop : viewScroll[view] || 0;
   body.dataset.view = view;
-  if (view === "stats") { body.innerHTML = `<div class="charts" id="charts"></div>`; renderCharts($("charts"), state); body.scrollTop = top; return; }
+  if (view !== "board") delete body.dataset.boardSig;
+  if (view === "stats") { renderStats(body); body.scrollTop = top; return; }
   if (view === "timeline") { renderTimeline(body, state); body.scrollTop = top; return; }
   if (view === "shots") { renderShots(body); body.scrollTop = top; return; }
   const { tasks, workers, plan } = state;
   const byId = Object.fromEntries(workers.map((w) => [w.id, w]));
   const titles = plan ? Object.fromEntries(plan.plan.stories.flatMap((s) => s.tasks.map((t) => [t.id, { story: s, task: t }]))) : {};
+  // Rebuild only when a card changed: this ran a full innerHTML teardown on every live tick.
+  const withAtt = new Set((state.attachments || []).map((a) => a.task_id));
+  const boardSig = `${view}|${tasks.map((t) => `${t.id}:${t.status}:${t.worker_id || ""}:${t.priority || ""}:${(t.note || "").length}:${(state.taskTokens || {})[t.id] >= 1e6 ? 1 : 0}:${withAtt.has(t.id) ? 1 : 0}`).join(";")}`;
+  if (body.dataset.boardSig === boardSig && body.querySelector(".kanban")) { body.scrollTop = top; return; }
+  body.dataset.boardSig = boardSig;
   const left = body.querySelector(".kanban")?.scrollLeft || 0;
   body.innerHTML = tasks.length ? `<div class="kanban">${COLUMNS.map(([k, label]) => {
     const cards = tasks.filter((t) => t.status === k).map((t, i) => [t, i]).sort(([a, i], [b, j]) => prioRank(a) - prioRank(b) || i - j).map(([t]) => t);
@@ -499,7 +523,7 @@ function openTicketForm() {
     }
     draw();
   };
-  const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); back?.focus?.(); };
+  const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); back?.focus?.(); if (autoplay) scheduleAutoplay(); };
   const onKey = (e) => {
     if (e.key === "Escape") { e.stopImmediatePropagation(); close(); }
     else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); }
@@ -653,9 +677,18 @@ function noticeView(e) {
     <span class="when" data-t="${e.created}">${ago(e.created)}</span></div>`;
 }
 
+// Latest "say" per worker, computed once per state in a single pass instead of scanning all events per worker.
+let _sayCache = null, _sayState = null;
+function saysByWorker() {
+  if (_sayState === state) return _sayCache;
+  const m = new Map();
+  for (const e of state?.events || []) if (e.kind === "say") m.set(e.worker_id, e);
+  _sayCache = m; _sayState = state;
+  return m;
+}
 // The latest thing someone said about their work (for team cards and panels).
 function latestUpdate(id, maxAgeMs = 15 * 60_000) {
-  const e = (state.events || []).filter((x) => x.kind === "say" && x.worker_id === id).at(-1);
+  const e = saysByWorker().get(id);
   return e && Date.now() - e.created < maxAgeMs ? e : null;
 }
 
@@ -702,9 +735,13 @@ function renderFeed() {
   newBtn.textContent = `↓ ${feedUnseen} new`;
 }
 
-let pastOpen = false;
+let pastOpen = false, teamSig = "";
 function renderTeam() {
   const { run, workers } = state;
+  // Rebuild only when something a card shows actually changed (this panel is always visible, so it ran every tick).
+  const sig = `${run.status}|${pastOpen}|${workers.map((w) => `${w.id}:${workerState(w)}:${w.current_task || ""}:${w.activity?.text || ""}:${latestUpdate(w.id)?.id || 0}:${w.is_manager ? 1 : 0}:${w.manager_id || ""}`).join(";")}`;
+  if (sig === teamSig && $("team").children.length) return;
+  teamSig = sig;
   // Each card says what the person last told us they are doing, in their words; else the live tool.
   const doing = (id, fallback) => { const u = latestUpdate(id); return u ? `<div class="doing said" title="${esc(plain(u.text))}">“${esc(plain(u.text))}”</div>` : `<div class="doing">${esc(fallback)}</div>`; };
   // The team is who is here (or left mid-task, so you see it); everyone who left with nothing on them is folded away.
@@ -741,8 +778,8 @@ function select(id) {
   renderPanel();
 }
 
-async function resume(workerId) {
-  try { await api("POST", `/api/workers/${workerId}/resume-request`); toast("Asked the CEO to resume them"); loadRun(); } catch (e) { toast(e.message); }
+async function resume(workerId, btn) {
+  return busy(btn, async () => { await api("POST", `/api/workers/${workerId}/resume-request`); toast("Asked the CEO to resume them"); loadRun(); });
 }
 
 function msgView(m) {
@@ -844,7 +881,7 @@ async function renderPerson(root) {
     root.onclick = async (e) => {
       const c = e.target.closest("[data-copy]");
       if (c) { try { await navigator.clipboard.writeText(c.dataset.copy); toast("Copied"); } catch { toast("Select the command and copy it"); } }
-      if (e.target.closest("#resume")) resume(id);
+      if (e.target.closest("#resume")) resume(id, e.target.closest("#resume"));
       const rt = e.target.closest("[data-reply-task]");
       if (rt) {
         const input = root.querySelector("#wmsg");
@@ -859,20 +896,20 @@ async function renderPerson(root) {
     };
     if (tab === "chat") {
       const input = root.querySelector("#wmsg");
-      const send = async (kind) => {
+      const send = (kind, btn) => {
         const body = input.value.trim() || (kind === "interrupt" ? "Stop what you are doing and wait for instructions." : "");
         if (!body) return;
-        try {
+        return busy(btn, async () => {
           await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: id, kind, body });
           input.value = "";
           const t = $("thread"); if (t) t.dataset.stick = "1";
           loadRun();
-        } catch (err) { toast(err.message); }
+        });
       };
-      root.querySelector("#wsend").onclick = () => send("command");
-      root.querySelector("#wint").onclick = () => send("interrupt");
-      root.querySelector("#wask")?.addEventListener("click", () => send("aside"));
-      input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send("command"); } };
+      root.querySelector("#wsend").onclick = (e) => send("command", e.currentTarget);
+      root.querySelector("#wint").onclick = (e) => send("interrupt", e.currentTarget);
+      root.querySelector("#wask")?.addEventListener("click", (e) => send("aside", e.currentTarget));
+      input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send("command", root.querySelector("#wsend")); } };
       input.focus();
     }
   }
@@ -891,7 +928,9 @@ async function renderPerson(root) {
   if (tab === "chat") {
     const top = banner + blockers;
     const slot = $("p-banner");
-    if (slot.dataset.html !== top) { slot.innerHTML = top; slot.dataset.html = top; }   // keep your scroll in a long note
+    // Diff on a stable key (not the HTML, which carries a live "3m ago" that changes every tick and lost scroll).
+    const bannerKey = `${w ? workerState(w) : state.run.status}|${w?.needs_input?.reason || ""}|${w?.needs_human || ""}|${blocked.map((t) => `${t.id}:${t.status}:${(t.note || "").length}`).join(",")}`;
+    if (slot.dataset.key !== bannerKey) { slot.innerHTML = top; slot.dataset.key = bannerKey; }   // keep your scroll in a long note
     const thread = $("thread");
     const msgs = conversation(id);
     const atEnd = thread.dataset.stick === "1" || !thread.children.length || thread.scrollTop + thread.clientHeight >= thread.scrollHeight - 40;
@@ -918,7 +957,7 @@ async function renderPerson(root) {
   }
   const body = $("p-body");
   const pos = { top: body.scrollTop };
-  body.innerHTML = tab === "activity" && !w ? updatesList("ceo") : w ? await workerDetails(w, tab, tab === "details" ? banner + blockers : banner) : ceoDetails();
+  body.innerHTML = tab === "activity" && !w ? updatesList("ceo") : w ? workerDetails(w, tab, tab === "details" ? banner + blockers : banner) : ceoDetails();
   body.scrollTop = pos.top;
 }
 
@@ -940,16 +979,23 @@ function ceoDetails() {
     <div><div class="section-title" style="margin-bottom:6px">Latest to the team</div>${told.length ? `<div class="mini-msgs">${told.map(msgView).join("")}</div>` : `<span class="muted">Nothing yet.</span>`}</div>`;
 }
 
-async function workerDetails(w, tab, banner) {
-  let d;
-  try { d = await api("GET", `/api/workers/${w.id}`); } catch (e) { return `<div class="error-box">${esc(e.message)}</div>`; }
-  if (tab === "activity") return `${updatesList(w.id)}<div><div class="section-title" style="margin-bottom:6px">Tool calls</div>${waterfall(d.events)}</div>
-      <div><div class="section-title" style="margin-bottom:6px">Activity</div><div class="events">${d.events.length ? d.events.slice().reverse().map((e) => `<div class="ev"><span>${ago(e.created)}</span><span>${esc(e.kind)}</span><span>${esc(e.text)}</span></div>`).join("") : `<span class="muted">No activity yet.</span>`}</div></div>`;
-  const ww = d.worker, ctx = ww.context, attach = ww.attach || "";
+// Rendered straight from the run state (already loaded): no per-click fetch, so the drawer opens instantly.
+function workerDetails(w, tab, banner) {
+  const evs = (state.events || []).filter((e) => e.worker_id === w.id);
+  if (tab === "activity") {
+    const recent = evs.slice(-60);
+    return `${updatesList(w.id)}<div><div class="section-title" style="margin-bottom:6px">Tool calls</div>${waterfall(recent)}</div>
+      <div><div class="section-title" style="margin-bottom:6px">Recent activity</div><div class="events">${recent.length ? recent.slice().reverse().map((e) => `<div class="ev"><span>${ago(e.created)}</span><span>${esc(e.kind)}</span><span>${esc(e.text)}</span></div>`).join("") : `<span class="muted">No activity yet.</span>`}</div></div>`;
+  }
+  const ww = w, ctx = ww.context, attach = ww.attach || "";
+  const dTasks = (state.tasks || []).filter((t) => t.worker_id === w.id);
+  const lead = ww.manager_id ? (state.workers.find((m) => m.id === ww.manager_id)?.name) : null;
+  const reports = ww.is_manager ? (state.workers.find ? state.workers.filter((x) => x.manager_id === w.id) : []) : [];
   const team = (state.messages || []).filter((m) => m.kind !== "task" && m.kind !== "system" && m.sender !== "human" && m.recipient !== "human" && (m.sender === w.id || m.recipient === w.id)).slice(-15);
   return `${banner}
+    ${ww.is_manager ? `<div class="muted" style="font-size:13px">Manages ${esc(ww.team || "a team")}${reports.length ? `: ${reports.map((r) => esc(r.name)).join(", ")}` : " (no reports yet)"}</div>` : lead ? `<div class="muted" style="font-size:13px">Reports to ${esc(lead)}</div>` : ""}
     <div><div class="section-title" style="margin-bottom:6px">Now</div>${latestUpdate(w.id) ? `<div class="upd-body">“${esc(latestUpdate(w.id).text)}”</div>` : ""}<div class="muted" style="font-size:13px;margin-top:4px">${ww.current_task ? `<span class="mono">${esc(ww.current_task)}</span> · ` : ""}${esc(ww.activity?.text || ww.status)}</div></div>
-    <div><div class="section-title" style="margin-bottom:6px">Tasks</div>${d.tasks.length ? d.tasks.map((t) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><button class="linkish mono" data-task="${esc(t.id)}">${esc(t.id)}</button><span style="flex:1">${esc(t.title)}</span><span class="pill ${t.status === "done" ? "green" : t.status === "blocked" ? "red" : t.status === "in_progress" ? "cyan" : ""}">${esc(t.status.replace("_", " "))}</span></div>`).join("") : `<span class="muted">No tasks assigned.</span>`}</div>
+    <div><div class="section-title" style="margin-bottom:6px">Tasks</div>${dTasks.length ? dTasks.map((t) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><button class="linkish mono" data-task="${esc(t.id)}">${esc(t.id)}</button><span style="flex:1">${esc(t.title)}</span><span class="pill ${t.status === "done" ? "green" : t.status === "blocked" ? "red" : t.status === "in_progress" ? "cyan" : ""}">${esc(t.status.replace("_", " "))}</span></div>`).join("") : `<span class="muted">No tasks assigned.</span>`}</div>
     ${ctx && ctx.percent != null ? `<div><div class="section-title" style="margin-bottom:6px">Context</div><div class="bar"><i style="width:${Math.min(100, ctx.percent)}%;background:${ctx.percent > 80 ? "var(--red)" : ctx.percent > 50 ? "var(--amber)" : "var(--green)"}"></i></div><div class="faint" style="font-size:12px;margin-top:4px">${Math.round(ctx.percent)}% of ${Math.round((ctx.window || 0) / 1000)}k tokens</div></div>` : ""}
     <div><div class="section-title" style="margin-bottom:6px">Latest message</div><div class="last md">${ww.last_message ? md(ww.last_message) : "Nothing yet."}</div></div>
     <div><div class="section-title" style="margin-bottom:6px">With the team</div>${team.length ? `<div class="mini-msgs">${team.map(msgView).join("")}</div>` : `<span class="muted">No messages with teammates yet.</span>`}</div>
@@ -965,12 +1011,12 @@ async function renderPanel() {
   return renderPerson(root);
 }
 
+const taskHistory = new Map();   // cached per task so the drawer opens instantly, then fills in
 async function renderTask(root, taskId) {
   const t = state.tasks.find((x) => x.id === taskId);
   if (!t) { closePanel(); return; }
   const meta = state.plan?.plan.stories.flatMap((s) => s.tasks.map((k) => ({ story: s, task: k }))).find((x) => x.task.id === taskId);
-  let history = [];
-  try { history = await api("GET", `/api/runs/${runId}/tasks/${encodeURIComponent(taskId)}/history`); } catch {}
+  const history = taskHistory.get(taskId) || null;   // null = not loaded yet
   const drawerPos = renderedPanel === `t:${taskId}` ? saveScroll(".drawer .scroll") : null;
   renderedPanel = `t:${taskId}`;
   root.innerHTML = `<aside class="drawer" role="dialog" aria-label="Task ${esc(taskId)}">
@@ -980,14 +1026,19 @@ async function renderTask(root, taskId) {
       ${t.kind === "ticket" ? ticketDetails(t) : ""}
       <div class="muted">${t.worker_id ? `Owner: <button class="linkish" data-person="${esc(t.worker_id)}">${esc(nameOf(t.worker_id))}</button>` : "Not assigned yet"}</div>
       ${t.note ? `<div><div class="section-title" style="margin-bottom:6px">Latest note</div><div class="last md">${md(t.note)}</div></div>` : ""}
-      <div><div class="section-title" style="margin-bottom:6px">History</div>${history.length ? `<ol class="history">${history.map((h) => `<li><span class="mono">${esc(h.from_status || "–")} → ${esc(h.to_status)}</span> by <b>${esc(h.actorName)}</b>${h.targetName ? ` → ${esc(h.targetName)}` : ""} <span class="faint">${ago(h.created)}</span>${h.reason ? `<div class="muted">${esc(h.reason)}</div>` : ""}</li>`).join("")}</ol>` : `<span class="muted">No changes yet.</span>`}</div>
+      <div><div class="section-title" style="margin-bottom:6px">History</div>${history === null ? `<div class="loading-row">Loading history…</div>` : history.length ? `<ol class="history">${history.map((h) => `<li><span class="mono">${esc(h.from_status || "–")} → ${esc(h.to_status)}</span> by <b>${esc(h.actorName)}</b>${h.targetName ? ` → ${esc(h.targetName)}` : ""} <span class="faint">${ago(h.created)}</span>${h.reason ? `<div class="muted">${esc(h.reason)}</div>` : ""}</li>`).join("")}</ol>` : `<span class="muted">No changes yet.</span>`}</div>
     </div></aside>`;
   restoreScroll(".drawer .scroll", drawerPos);
   document.getElementById("close").onclick = closePanel;
   root.onclick = (e) => { const who = e.target.closest("[data-person]"); if (who) select(who.dataset.person); };
+  if (history === null && !taskHistory.has(taskId)) {
+    try { taskHistory.set(taskId, await api("GET", `/api/runs/${runId}/tasks/${encodeURIComponent(taskId)}/history`)); }
+    catch { taskHistory.set(taskId, []); }
+    if (renderedPanel === `t:${taskId}` && openPanel?.task === taskId) renderTask(root, taskId);   // fill in, keep scroll
+  }
 }
 
-function closePanel() { openPanel = null; renderedPanel = null; document.getElementById("drawer-root").innerHTML = ""; }
+function closePanel() { openPanel = null; renderedPanel = null; document.getElementById("drawer-root").innerHTML = ""; if (autoplay) scheduleAutoplay(); }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openPanel) closePanel(); });
 
 const refresh = () => { inboxBadge(); return (runId ? loadRun() : projectId ? loadProject() : inboxPage ? loadInboxPage() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }); };

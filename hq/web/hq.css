@@ -94,3 +94,12 @@ textarea:focus, input:focus { outline: 2px solid color-mix(in srgb, var(--green)
 @media (max-width: 640px) { .home-bar input[type=search] { width: 100%; } }
 .inbox-link .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; display: inline-grid; place-items: center; line-height: 1; }
 .inbox-link .badge[hidden] { display: none; }
+/* A button awaiting a request: a spinner replaces nothing feeling dead, and it cannot be clicked twice. */
+.btn[aria-busy="true"], button[aria-busy="true"] { position: relative; color: transparent !important; pointer-events: none; }
+.btn[aria-busy="true"]::after, button[aria-busy="true"]::after { content: ""; position: absolute; inset: 0; margin: auto; width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent; color: var(--text); opacity: .8; animation: btn-spin .6s linear infinite; }
+.btn.primary[aria-busy="true"]::after { color: #04130a; }
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn[aria-busy="true"]::after, button[aria-busy="true"]::after { animation-duration: 1.6s; } }
+/* A short delay before a view's data arrives shows a subtle bar instead of a blank panel. */
+.loading-row { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }

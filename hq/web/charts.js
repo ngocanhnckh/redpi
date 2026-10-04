@@ -35,6 +35,9 @@ export function duration(ms) {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 const num = (v) => (Math.abs(v - Math.round(v)) < 0.05 ? String(Math.round(v)) : v.toFixed(1));
+// On the team right now: still running and not dismissed. (A dismissed worker can stay `alive` for a minute
+// until its session closes, so left_reason is the real signal.) Used to keep gone agents out of roster charts.
+const onTeam = (w) => w.alive && w.left_reason !== "dismissed";
 
 // Axes and grid for a time × value chart.
 function frame({ x, y, t0, t1, ticks, yFmt = num }) {
@@ -57,13 +60,15 @@ function sizes(state) {
 }
 
 // Replays the transition log into snapshots of every task's status over time.
-export function timeline(state) {
+export function timeline(state, from = 0) {
   const { tasks, transitions = [] } = state;
   const now = state.now || Date.now();
   const size = sizes(state);
   const known = new Set(tasks.map((t) => t.id));
   const firstMove = transitions.find((tr) => known.has(tr.task_id))?.created;
-  const start = Math.min(state.approvedAt || firstMove || now, firstMove || now);
+  const computed = Math.min(state.approvedAt || firstMove || now, firstMove || now);
+  // A time filter clips the window: start no earlier than `from`, with the board's state at that moment seeded in.
+  const start = from ? Math.min(Math.max(computed, from), now - MIN) : computed;
   const status = new Map(tasks.map((t) => [t.id, "todo"]));
   const snap = (t) => {
     const counts = { todo: 0, in_progress: 0, review: 0, blocked: 0, done: 0 };
@@ -71,9 +76,10 @@ export function timeline(state) {
     for (const [id, st] of status) { counts[st in counts ? st : "todo"]++; total += size.of(id); if (st !== "done") left += size.of(id); }
     return { t, counts, left, total };
   };
+  if (from) for (const tr of transitions) if (known.has(tr.task_id) && tr.created < start) status.set(tr.task_id, tr.to_status);
   const points = [snap(start)];
   for (const tr of transitions) {
-    if (!known.has(tr.task_id)) continue;
+    if (!known.has(tr.task_id) || (from && tr.created < start)) continue;
     status.set(tr.task_id, tr.to_status);
     points.push(snap(Math.max(start, tr.created)));
   }
@@ -93,7 +99,9 @@ function stepPath(points, x, y, val) {
 function burndown(state, tl) {
   const { points, start, now, hours } = tl;
   const last = points.at(-1), total = points[0].total;
-  const doneAmt = total - last.left, elapsed = now - start;
+  // Work finished WITHIN the shown window (points[0] is seeded to the board state at window start), so the
+  // pace and forecast stay correct when the Stats filter clips to today/this week.
+  const doneAmt = points[0].left - last.left, elapsed = now - start;
   const unit = hours ? "h" : " tasks";
   const rate = doneAmt > 0 ? doneAmt / elapsed : 0;
   const finish = last.left > 0 && rate > 0 ? now + last.left / rate : null;
@@ -188,7 +196,8 @@ function cycleTime(state, tl) {
 }
 
 function workload(state) {
-  const people = state.workers.map((w) => ({ id: w.id, name: w.name }));
+  // On the team now, or still holding work. A worker dismissed long ago with no tasks left is not shown.
+  const people = state.workers.filter((w) => onTeam(w) || state.tasks.some((t) => t.worker_id === w.id)).map((w) => ({ id: w.id, name: w.name }));
   if (state.tasks.some((t) => !t.worker_id)) people.push({ id: null, name: "Unassigned" });
   if (!people.length) return { key: "workload", title: "Workload", sub: "Appears when the team is formed", svg: `<div class="chart-empty">No one on the team yet.</div>`, legend: "" };
   const rowH = 20, L = 76, h = M.t + people.length * rowH + 8;
@@ -209,8 +218,9 @@ function workload(state) {
     }
     body += `<text class="tick" x="${at + 4}" y="${yy + 12}">${mine.length}</text>`;
   });
-  const busiest = people.filter((p) => p.id).map((p) => ({ p, n: state.tasks.filter((t) => t.worker_id === p.id && t.status !== "done").length })).sort((a, b) => b.n - a.n)[0];
-  const sub = `${state.workers.length} people · ${state.tasks.length} tasks${busiest?.n ? ` · most open: ${busiest.p.name} (${busiest.n})` : ""}`;
+  const team = people.filter((p) => p.id);
+  const busiest = team.map((p) => ({ p, n: state.tasks.filter((t) => t.worker_id === p.id && t.status !== "done").length })).sort((a, b) => b.n - a.n)[0];
+  const sub = `${team.length} people · ${state.tasks.length} tasks${busiest?.n ? ` · most open: ${busiest.p.name} (${busiest.n})` : ""}`;
   return { key: "workload", title: "Workload", sub, svg: svg(`Workload: ${sub}`, body, h), legend: legend(STATUS.map(([, label, color]) => [label, color])) };
 }
 
@@ -244,15 +254,17 @@ function breakdown(state) {
 function activity(state) {
   const now = state.now || Date.now(), bucket = 5 * MIN, cols = 24;
   const end = Math.floor(now / bucket) * bucket, first = end - (cols - 1) * bucket;
-  const people = state.workers;
-  if (!people.length) return { key: "activity", title: "Team activity", sub: "Tool calls per person", svg: `<div class="chart-empty">No one on the team yet.</div>`, legend: "" };
-  const grid = new Map(people.map((w) => [w.id, new Array(cols).fill(0)]));
+  const grid = new Map(state.workers.map((w) => [w.id, new Array(cols).fill(0)]));
   let total = 0;
   for (const a of state.activity || []) {
     const i = Math.round((a.at - first) / bucket);
     if (i >= 0 && i < cols && grid.has(a.worker_id)) { grid.get(a.worker_id)[i] += a.n; total += a.n; }
   }
-  const max = Math.max(1, ...[...grid.values()].flat());
+  // Only the people who matter in this 2-hour window: still on the team, or active within it. Agents dismissed
+  // long ago (no recent activity) don't get an empty row.
+  const people = state.workers.filter((w) => onTeam(w) || grid.get(w.id).some((n) => n > 0));
+  if (!people.length) return { key: "activity", title: "Team activity", sub: "Tool calls per person", svg: `<div class="chart-empty">No activity in the last 2 hours.</div>`, legend: "" };
+  const max = Math.max(1, ...people.map((w) => grid.get(w.id)).flat());
   const L = 76, rowH = 18, cw = (W - L - M.r) / cols, h = M.t + people.length * rowH + M.b;
   let body = "";
   people.forEach((w, r) => {
@@ -271,13 +283,34 @@ function activity(state) {
 const PEOPLE_COLORS = ["var(--green)", "var(--cyan)", "var(--amber)", "#b995ff", "var(--red)", "#7fd1ae", "#f08bc0", "#9fb3a6"];
 export function tokens(n) { n = Number(n) || 0; return n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)); }
 const PARTS = [["input", "New input", "var(--cyan)"], ["cacheRead", "Cache read", "#b995ff"], ["cacheWrite", "Cache write", "var(--amber)"], ["output", "Output", "var(--green)"]];
-function people(state) {
+// Per-person token totals. With a time filter, totals are summed from the windowed series (so agents who did
+// nothing in the window — e.g. dismissed long ago — drop off instead of poisoning the chart); otherwise the
+// run's all-time totals are used.
+function people(state, from = 0) {
   const names = new Map([["ceo", "CEO"], ...state.workers.map((w) => [w.id, w.name])]);
+  if (from) {
+    const slot = state.usage?.slot || 5 * MIN;
+    const agg = new Map();
+    for (const p of state.usage?.series || []) {
+      if (p.at + slot <= from) continue;
+      const a = agg.get(p.worker_id) || { worker_id: p.worker_id, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
+      a.input += p.input || 0; a.output += p.output || 0; a.cacheRead += p.cacheRead || 0; a.cacheWrite += p.cacheWrite || 0; a.cost += p.cost || 0; a.calls += p.calls || 0;
+      agg.set(p.worker_id, a);
+    }
+    return [...agg.values()].map((u) => ({ ...u, name: names.get(u.worker_id) || u.worker_id, total: u.input + u.output + u.cacheRead + u.cacheWrite }))
+      .filter((u) => u.total > 0).sort((a, b) => b.total - a.total);
+  }
   return (state.usage?.totals || []).map((u) => ({ ...u, name: names.get(u.worker_id) || u.worker_id, total: u.input + u.output + u.cacheRead + u.cacheWrite })).sort((a, b) => b.total - a.total);
 }
-function tokenUse(state) {
-  const rows = people(state);
-  if (!rows.length) return { key: "tokens", title: "Token use", sub: "Appears as the agents work (reported per model call)", svg: `<div class="chart-empty">No token use reported yet.</div>`, legend: "" };
+// A one-line total for the selected window: the number the user asked for ("how many tokens today").
+export function usageSummary(state, from = 0) {
+  const rows = people(state, from);
+  const sum = (k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
+  return { tokens: sum("total"), output: sum("output"), cost: sum("cost"), calls: sum("calls"), people: rows.length };
+}
+function tokenUse(state, from = 0) {
+  const rows = people(state, from);
+  if (!rows.length) return { key: "tokens", title: "Token use", sub: from ? "No token use in this window" : "Appears as the agents work (reported per model call)", svg: `<div class="chart-empty">${from ? "No token use in this window." : "No token use reported yet."}</div>`, legend: "" };
   const rowH = 20, L = 76, h = M.t + rows.length * rowH + 8;
   const x = lin(0, Math.max(1, ...rows.map((r) => r.total)), L, W - M.r - 40);
   let body = "";
@@ -298,12 +331,13 @@ function tokenUse(state) {
   const sub = `${tokens(total)} tokens in ${sum("calls")} model calls · ${tokens(sum("output"))} output · ${inAll ? Math.round((100 * sum("cacheRead")) / inAll) : 0}% of input from cache${cost > 0 ? ` · $${cost.toFixed(2)}` : ""}`;
   return { key: "tokens", title: "Token use", sub, svg: svg(`Token use: ${sub}`, body, h), legend: legend(PARTS.map(([k, label, color]) => [label, color, tokens(sum(k))])) };
 }
-function tokenTime(state) {
-  const series = state.usage?.series || [], slot = state.usage?.slot || 5 * MIN;
-  if (!series.length) return { key: "tokens-time", title: "Tokens over time", sub: "Appears as the agents work", svg: `<div class="chart-empty">No token use reported yet.</div>`, legend: "" };
-  const rows = people(state), color = new Map(rows.map((r, i) => [r.worker_id, PEOPLE_COLORS[i % PEOPLE_COLORS.length]]));
+function tokenTime(state, from = 0) {
+  const slot = state.usage?.slot || 5 * MIN;
+  const series = (state.usage?.series || []).filter((p) => !from || p.at + slot > from);
+  if (!series.length) return { key: "tokens-time", title: "Tokens over time", sub: from ? "Nothing in this window yet" : "Appears as the agents work", svg: `<div class="chart-empty">${from ? "No token use in this window." : "No token use reported yet."}</div>`, legend: "" };
+  const rows = people(state, from), color = new Map(rows.map((r, i) => [r.worker_id, PEOPLE_COLORS[i % PEOPLE_COLORS.length]]));
   const now = state.now || Date.now();
-  const t0 = Math.min(...series.map((p) => p.at)), t1 = Math.max(now, t0 + slot);
+  const t0 = Math.max(from, Math.min(...series.map((p) => p.at))), t1 = Math.max(now, t0 + slot);
   const bySlot = new Map();
   for (const p of series) { const m = bySlot.get(p.at) || new Map(); m.set(p.worker_id, (m.get(p.worker_id) || 0) + p.tokens); bySlot.set(p.at, m); }
   const { ticks, max } = yTicks(Math.max(1, ...[...bySlot.values()].map((m) => [...m.values()].reduce((a, b) => a + b, 0))));
@@ -324,10 +358,11 @@ function tokenTime(state) {
 }
 
 /** Renders every chart into `root` from the run state (call on each live update). */
-export function renderCharts(root, state) {
+export function renderCharts(root, state, from = 0) {
   if (!state.tasks.length) { root.innerHTML = `<div class="empty">Charts appear once the plan is approved and the board has tasks.</div>`; return; }
-  const tl = timeline(state);
-  const charts = [burndown(state, tl), flow(state, tl), throughput(state, tl), cycleTime(state, tl), workload(state), breakdown(state), activity(state), tokenUse(state), tokenTime(state)];
+  const tl = timeline(state, from);
+  // Time filter (from) clips the trend charts; the snapshot charts (workload, status, token totals) are always current.
+  const charts = [burndown(state, tl), flow(state, tl), throughput(state, tl), cycleTime(state, tl), workload(state), breakdown(state), activity(state), tokenUse(state, from), tokenTime(state, from)];
   root.innerHTML = charts.map((c) => `<section class="panel chart" data-chart="${c.key}"><div class="panel-head"><h2>${esc(c.title)}</h2></div>
     <div class="chart-body"><div class="chart-sub">${esc(c.sub)}</div>${c.svg}${c.legend}</div></section>`).join("");
 }

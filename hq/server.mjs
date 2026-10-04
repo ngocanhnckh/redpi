@@ -161,6 +161,10 @@ for (const [table, col, type] of [
   // Tickets: tasks the human (or the CEO, for a request typed in its terminal) adds without a plan.
   // The CEO session's presence: when it last checked in, and what its RedPi can do (side answers, tickets).
   ["runs", "ceo_seen", "INTEGER"], ["runs", "ceo_caps", "TEXT"],
+  // The CEO stall watchdog: how far up the wake ladder a frozen CEO is, and when that step fired.
+  ["runs", "ceo_stall_level", "INTEGER NOT NULL DEFAULT 0"], ["runs", "ceo_stall_at", "INTEGER"],
+  // When the human was last reminded that an inbox item is still waiting on them.
+  ["human_items", "reminded", "INTEGER"],
   ["tasks", "kind", "TEXT"], ["tasks", "priority", "TEXT"], ["tasks", "description", "TEXT"], ["tasks", "hours", "REAL"], ["tasks", "created", "INTEGER"],
   // Who reviews a task (it comes back to them after findings), and the last staffing nudge to the CEO.
   ["tasks", "reviewer_id", "TEXT"], ["runs", "staff_nudged", "INTEGER"], ["runs", "staff_key", "TEXT"],
@@ -207,11 +211,26 @@ run(`UPDATE messages SET needs_reply = 0 WHERE recipient = 'human' AND sender = 
 
 const RUN_STATUSES = ["planning", "awaiting_approval", "approved", "executing", "done", "cancelled"];
 
+// The watchdogs are the machinery that catches a stuck run; that machinery must itself be unkillable. A sweep
+// must never crash the hub (a single SQLITE_BUSY or a bad row would otherwise take down every run's heartbeats,
+// watches and SSE at once). Wrap each sweep, log failures, and record when it last ran so /api/health can show
+// the watchdogs are still alive. All sweeps are unref'd so they never hold the process open.
+const sweepRanAt = {};
+function safeInterval(name, fn, ms) {
+  const tick = () => { try { fn(); } catch (e) { console.error(`sweep ${name} failed: ${e?.stack || e}`); } finally { sweepRanAt[name] = now(); } };
+  const h = setInterval(tick, ms); h.unref?.(); return h;
+}
+// A thrown error anywhere else (a dropped socket, a late callback) is logged, not fatal: the hub keeps running
+// so no run is left frozen because the process that watches it died.
+process.on("uncaughtException", (e) => console.error("uncaughtException (ignored, hub keeps running):", e?.stack || e));
+process.on("unhandledRejection", (e) => console.error("unhandledRejection (ignored, hub keeps running):", e?.stack || e));
+
 // ---------- live updates (server-sent events) ----------
 const listeners = new Set();
 function notify(runId, type) {
   const line = `data: ${JSON.stringify({ runId, type, at: now() })}\n\n`;
-  for (const l of listeners) if (!l.runId || l.runId === runId) l.res.write(line);
+  // A write to a half-closed SSE socket throws; it must never take down the caller (a sweep or a DB write).
+  for (const l of listeners) if (!l.runId || l.runId === runId) { try { l.res.write(line); } catch { listeners.delete(l); } }
 }
 
 // ---------- domain ----------
@@ -269,11 +288,15 @@ function runView(runId) {
   const latest = planView(one("SELECT * FROM plans WHERE run_id = ? ORDER BY version DESC LIMIT 1", runId));
   const workers = all("SELECT * FROM workers WHERE run_id = ? ORDER BY created", runId).map(workerView);
   const tasks = all("SELECT * FROM tasks WHERE run_id = ? ORDER BY rowid", runId);
+  // Resolve names from the already-loaded workers, not a query per message (this used to be ~600 point queries).
+  const nameOf = (id) => id === "ceo" ? "CEO" : id === "hq" ? "HQ" : id === "human" ? "You" : id === "all" ? "Everyone" : nameMap.get(id) || id;
+  const nameMap = new Map(workers.map((w) => [w.id, w.name]));
   const messages = all("SELECT * FROM (SELECT * FROM messages WHERE run_id = ? ORDER BY id DESC LIMIT 300) ORDER BY id", runId)
-    .map((m) => ({ ...m, senderName: participantName(runId, m.sender), recipientName: participantName(runId, m.recipient) }));
+    .map((m) => ({ ...m, senderName: nameOf(m.sender), recipientName: nameOf(m.recipient) }));
   // For the event board and the project charts: every task move, the latest worker
   // actions, and tool calls per worker in 5-minute buckets over the last two hours.
-  const transitions = all("SELECT id, task_id, from_status, to_status, actor, reason, target, created FROM task_transitions WHERE run_id = ? ORDER BY id", runId);
+  // The full log can grow very large on a long run; the charts and event board only need a recent window.
+  const transitions = all("SELECT * FROM (SELECT id, task_id, from_status, to_status, actor, reason, target, created FROM task_transitions WHERE run_id = ? ORDER BY id DESC LIMIT 2000) ORDER BY id", runId);
   // Tool calls and the agents' own plain-language updates ("say"), each with its own cap so
   // busy tool use never crowds out what people said. The CEO's events use the id "ceo:<run>".
   const who = `(e.worker_id IN (SELECT id FROM workers WHERE run_id = ?) OR e.worker_id = ?)`;
@@ -288,14 +311,20 @@ function runView(runId) {
   const usageTotals = all(`SELECT worker_id, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cacheRead, SUM(cache_write) AS cacheWrite,
     SUM(cost) AS cost, COUNT(*) AS calls, MIN(created) AS first, MAX(created) AS last FROM usage WHERE run_id = ? GROUP BY worker_id`, runId);
   const slot = Math.max(60_000, Math.ceil((now() - r.created) / 120 / 60_000) * 60_000);
-  const usageSeries = all(`SELECT worker_id, (created / ${slot}) * ${slot} AS at, SUM(input + output + cache_read + cache_write) AS tokens, SUM(output) AS output, SUM(cost) AS cost
+  const usageSeries = all(`SELECT worker_id, (created / ${slot}) * ${slot} AS at, SUM(input + output + cache_read + cache_write) AS tokens,
+    SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cacheRead, SUM(cache_write) AS cacheWrite, SUM(cost) AS cost, COUNT(*) AS calls
     FROM usage WHERE run_id = ? GROUP BY worker_id, at ORDER BY at`, runId);
   const screenshots = all("SELECT id, worker_id, task_id, caption, mime, bytes, created FROM screenshots WHERE run_id = ? ORDER BY created DESC LIMIT 200", runId);
   const attachments = all("SELECT id, task_id, name, mime, bytes, created FROM attachments WHERE run_id = ? ORDER BY created", runId);
   const alerts = all("SELECT * FROM alerts WHERE run_id = ? AND (resolved IS NULL OR resolved > ?) ORDER BY id DESC LIMIT 50", runId, now() - 24 * 3600_000);
   const taskTokens = Object.fromEntries(all("SELECT task_id AS id, SUM(input + output + cache_read + cache_write) AS n FROM usage WHERE run_id = ? AND task_id IS NOT NULL GROUP BY task_id", runId).map((x) => [x.id, x.n]));
   // The human's tickets for this run: everything still open, and what closed in the last week, each with its thread.
-  const inbox = all("SELECT * FROM human_items WHERE run_id = ? AND (closed IS NULL OR closed > ?) ORDER BY updated DESC LIMIT 150", runId, now() - 7 * 86400_000).map((it) => itemView(it, true));
+  // The dashboard shows a count and, when a ticket is open, its thread. Build these without a query storm:
+  // reuse the run/project and the name map, and include the comment thread only for the few active tickets
+  // (closed ones load their thread on demand via GET /api/inbox/:id).
+  const inboxRows = all("SELECT * FROM human_items WHERE run_id = ? AND (closed IS NULL OR closed > ?) ORDER BY updated DESC LIMIT 120", runId, now() - 7 * 86400_000);
+  const inboxCtx = { runTitle: r.title, projectId: r.project_id, project: project?.name, nameOf };
+  const inbox = inboxRows.map((it) => itemView(it, !INBOX_CLOSED.includes(it.status), inboxCtx));
   return { run: r, project, plans, plan: latest, workers, tasks, messages, transitions, events, activity, approvedAt, usage: { totals: usageTotals, series: usageSeries, slot }, screenshots, attachments, alerts, taskTokens, inbox, now: now() };
 }
 
@@ -340,8 +369,13 @@ function whoMustAct(runId, task, waitingOn, note) {
 
 // A blocker goes to whoever can clear it: the teammate it waits on hears it directly, and the CEO always
 // knows (it coordinates and escalates to the human only for real decisions).
-function routeBlocker(runId, task, actor, blockedOn, note) {
+function routeBlocker(runId, task, actor, blockedOn, note, forHuman = false) {
   const owner = one("SELECT name FROM workers WHERE id = ?", task.worker_id)?.name || "the owner";
+  if (forHuman) {
+    const lead = leadOf(runId, task.worker_id);
+    addMessage(runId, "human", lead, "system", `${task.id} ${task.title} is blocked (${owner}), and ${owner} thinks only the human can unblock it. Decide it yourself if you can: answer ${owner}, change the approach, or reassign, then have them move it back to in_progress. Ask the human only for a real decision or something only they can give (access, money, a risky or irreversible step): redplan_ask_human with taskId ${task.id} and your recommendation; their answer comes back to you. Reason: ${note}`.slice(0, 4000));
+    return;
+  }
   const target = blockedOn && blockedOn.startsWith("wkr_") ? one("SELECT id, name FROM workers WHERE id = ?", blockedOn) : null;
   if (target) addMessage(runId, task.worker_id || actor, target.id, "chat", `${task.id} (${task.title}) is blocked waiting on you. ${note}`);
   // The CEO hears it, or the owner's manager when they have one (the manager handles their team's blockers).
@@ -373,8 +407,8 @@ function backfillInbox() {
     const plan = JSON.parse(pl.json);
     openHumanItemOnce(pl.run_id, { kind: "approval", key: `plan:${pl.id}`, askedBy: "ceo", title: `Approve plan v${pl.version}: ${plan.title || "untitled"}`, body: `${plan.summary || ""}\n\nApprove here, or open the plan to read it in full and comment on any part of it.` });
   }
-  for (const a of all(`SELECT * FROM alerts WHERE escalated IS NOT NULL AND resolved IS NULL AND run_id IN (${active})`))
-    openHumanItemOnce(a.run_id, { kind: "alert", key: `alert:${a.id}`, askedBy: "hq", title: firstLine(a.text), body: a.text });
+  // Alerts are the CEO's to handle, not the human's: close any still open from before.
+  run("UPDATE human_items SET status = 'resolved', closed = ?, closed_by = 'hq', resolution = 'Handled by the CEO (HQ alerts no longer go to you)', updated = ? WHERE kind = 'alert' AND status IN ('open', 'waiting')", now(), now());
 }
 function humanItem(id) { return one("SELECT * FROM human_items WHERE id = ?", id); }
 function humanComment(item, author, body) {
@@ -428,7 +462,8 @@ function inboxFromMessage(runId, from, body, needsReply, msgId, kind) {
     else notify(runId, "inbox");
     return;
   }
-  if (needsReply) openHumanItem(runId, { kind: "question", title: firstLine(body), body, askedBy: from, key: `msg:${msgId}` });
+  // Only the CEO's questions become tickets: a worker asking the human in chat stays in that chat (the CEO filters).
+  if (needsReply && from === "ceo") openHumanItem(runId, { kind: "question", title: firstLine(body), body, askedBy: from, key: `msg:${msgId}` });
 }
 // The human writing straight to an agent (chat, not the inbox) answers that agent's open questions.
 function inboxFromHuman(runId, to, body) {
@@ -601,7 +636,7 @@ function sweepStaffing() {
     run("UPDATE runs SET staff_nudged = ?, staff_key = ? WHERE id = ?", now(), advice.key, r.id);
   }
 }
-setInterval(sweepStaffing, Math.min(30000, Math.max(200, Math.min(STAFF_NUDGE_MS, STAFF_GRACE_MS || STAFF_NUDGE_MS) / 4))).unref();
+safeInterval("staffing", sweepStaffing, Math.min(30000, Math.max(200, Math.min(STAFF_NUDGE_MS, STAFF_GRACE_MS || STAFF_NUDGE_MS) / 4)));
 
 // ---------- HQ watch: catch a run going wrong within minutes, not hours ----------
 // Every minute HQ looks for the patterns that have cost runs hours: two agents talking in circles, an
@@ -618,6 +653,14 @@ const CHATTER_2H = Number(process.env.REDPI_HQ_CHATTER_2H || 40);
 const BURN_TOKENS = Number(process.env.REDPI_HQ_BURN_TOKENS || 5_000_000);
 const REPEAT_N = Number(process.env.REDPI_HQ_REPEAT || 8);
 const STALL_MS = Number(process.env.REDPI_HQ_STALL_MS || 45 * 60_000);
+// A session that reports "working" but has sent no heartbeat at all for this long is frozen (its turn is hung:
+// a wedged model call, a dialog nobody answers, a dead loop). Distinct from "parked" (which is reported idle).
+// Generous, so a long model turn or a slow build is not mistaken for a hang.
+const FREEZE_MS = Number(process.env.REDPI_HQ_FREEZE_MS || 12 * 60_000);
+// The CEO session is "connected" while it has checked in this recently (matches the dashboard's pill).
+const CEO_PRESENT_MS = Number(process.env.REDPI_HQ_CEO_PRESENT_MS || 120_000);
+// How long an inbox item can wait on the human before HQ re-surfaces it and nudges the CEO to keep moving.
+const HUMAN_REMIND_MS = Number(process.env.REDPI_HQ_HUMAN_REMIND_MS || 30 * 60_000);
 // A session that ended this long ago while holding work is reported (a quick resume should not alarm anyone).
 const ORPHAN_MS = Number(process.env.REDPI_HQ_ORPHAN_MS || 2 * 60_000);
 const pairLimitHits = new Map();
@@ -713,6 +756,16 @@ function detectTrouble(runId) {
     found.push({ kind: "orphan", key: `orphan:${wid}`, subject: wid,
       text: `Nobody is working on ${ids}: ${w.name}${how} ${dur(t - (w.left_at || w.updated))} ago. ${w.left_reason === "dismissed" ? "Hand" : `Bring ${w.name} back with redplan_resume_worker (they continue their saved session), or hand`} ${list.length > 1 ? "them" : "it"} to someone else now (redplan_update_task handoffTo, or assignTo a free worker${list.some((x) => x.status === "review") ? "; a review goes to another reviewer" : ""}).` });
   }
+  // 10. A worker frozen mid-turn: it still reports "working" but has sent no heartbeat for a long time, so its
+  // session is hung (not idle, which the parked ladder catches). The CEO checks it the non-disruptive way first.
+  for (const w of workers) {
+    if (!w.alive || w.stop_requested || w.left_reason || !["working", "starting"].includes(w.status)) continue;
+    if (t - w.updated < FREEZE_MS) continue;
+    const held = openTasks(w.id);
+    if (!held.length && w.status !== "starting") continue;
+    found.push({ kind: "frozen", key: `frozen:${w.id}`, subject: w.id,
+      text: `${name(w.id)} has reported "working" but sent nothing to HQ for ${dur(t - w.updated)}${on(w.id)} — its session looks hung (a stuck model call, a long command, or a dialog waiting in its terminal). Check the quick, non-disruptive way first (redplan_ask ${w.name}); if it is truly stuck, bring it back fresh with its saved work (redplan_resume_worker ${w.name}) or hand the work to someone else.` });
+  }
   // 8. Questions between agents that nobody answers.
   const qs = all(`SELECT m.* FROM messages m WHERE m.run_id = ? AND m.needs_reply = 1 AND m.created < ? AND m.created > ?
       AND m.sender != 'human' AND m.recipient != 'human' AND m.recipient != 'all' AND m.kind NOT IN ('system', 'brief', 'task')
@@ -745,13 +798,15 @@ function watchRun(r) {
       continue;
     }
     run("UPDATE alerts SET seen = ?, text = ? WHERE id = ?", t, f.text, a.id);
-    if (!a.escalated && t - a.created >= ALERT_ESCALATE_MS) {
+    // Still happening: remind the CEO (and the manager), less often each time (15 min, 30, 1 h, ... at most every 4 h).
+    // Problems in the team are the CEO's to fix; the human is not paged for them.
+    const since = a.escalated ? t - a.escalated : t - a.created;
+    const due = a.escalated ? Math.min(4 * 3600_000, Math.max(ALERT_ESCALATE_MS, a.escalated - a.created)) : ALERT_ESCALATE_MS;
+    if (since >= due) {
       run("UPDATE alerts SET escalated = ? WHERE id = ?", t, a.id);
-      addMessage(r.id, "hq", "human", "system", `HQ watch: ${f.text} The CEO was told ${mins(t - a.created)} ago and it is still happening.`);
-      openHumanItem(r.id, { kind: "alert", key: `alert:${a.id}`, askedBy: "hq", taskId: null, title: firstLine(f.text), body: `${f.text}\n\nThe CEO was told ${mins(t - a.created)} ago and it is still happening. Comment here to tell the CEO what to do; it closes itself when the problem stops.` });
       const lead = leadOf(r.id, a.subject);
-      addMessage(r.id, "human", "ceo", "system", `HQ watch, still happening after ${mins(t - a.created)} (the human has been told${lead === "ceo" ? "" : `; ${participantName(r.id, lead)}, their manager, was told first`}): ${f.text}`);
-      if (lead !== "ceo") addMessage(r.id, "human", lead, "system", `HQ watch, still happening after ${mins(t - a.created)}; the CEO and the human have been told: ${f.text}`);
+      addMessage(r.id, "human", "ceo", "system", `HQ watch, STILL HAPPENING after ${mins(t - a.created)}${lead === "ceo" ? "" : ` (${participantName(r.id, lead)}, their manager, was told first and has not fixed it: take it over)`}. This is yours to fix now, without the human: ${f.text}`);
+      if (lead !== "ceo") addMessage(r.id, "human", lead, "system", `HQ watch, still happening after ${mins(t - a.created)}; the CEO has been told: ${f.text}`);
     }
   }
   for (const a of openAlerts) if (!found.some((f) => f.key === a.key)) { run("UPDATE alerts SET resolved = ? WHERE id = ?", t, a.id); closeHumanItem(r.id, `alert:${a.id}`, "resolved", "hq", "The problem stopped"); }
@@ -789,6 +844,56 @@ function checkinText(runId, since) {
   ].filter(Boolean).join("\n");
 }
 
+// The most recent thing the CEO session actually did: a tool/plain-language event, a model call, or a message.
+function lastCeoActivity(runId) {
+  const ev = one("SELECT MAX(created) AS at FROM events WHERE worker_id = ?", `ceo:${runId}`).at || 0;
+  const us = one("SELECT MAX(created) AS at FROM usage WHERE run_id = ? AND worker_id = 'ceo'", runId).at || 0;
+  const ms = one("SELECT MAX(created) AS at FROM messages WHERE run_id = ? AND sender = 'ceo'", runId).at || 0;
+  return Math.max(ev, us, ms);
+}
+// The CEO stall watchdog. A CEO that is connected but has produced nothing for a long time while something is
+// waiting on it has a hung turn, and a plain message cannot wake a hung turn. So HQ sends an interrupt: the
+// extension aborts the stuck turn and re-reads its inbox — the automatic equivalent of /reload. Only if that
+// does not take, or the terminal has gone away entirely, is the human told (only they can /reload a dead
+// process). The ladder resets the moment the CEO does anything again.
+function watchCeo(r) {
+  const t = now();
+  const present = !!r.ceo_seen && t - r.ceo_seen < CEO_PRESENT_MS;
+  const lastAct = lastCeoActivity(r.id);
+  const quiet = t - Math.max(lastAct, r.created) > FREEZE_MS;   // the CEO has produced nothing for a while
+  // What the CEO should be acting on: an unanswered message that wakes its session, a plan it has not
+  // submitted (planning), or a team it has not formed after approval. Any of these means work is waiting on it.
+  const pinged = one(`SELECT MIN(created) AS at FROM messages WHERE run_id = ? AND recipient = 'ceo' AND created > ? AND kind NOT IN ('aside', 'quick', 'reply')`, r.id, lastAct).at || 0;
+  const waiting = !!pinged && t - pinged > FREEZE_MS;
+  const noPlan = r.status === "planning" && !one("SELECT id FROM plans WHERE run_id = ? LIMIT 1", r.id);
+  const noTeam = r.status === "approved" && !one("SELECT id FROM workers WHERE run_id = ? AND alive = 1 LIMIT 1", r.id);
+  const reason = waiting || noPlan || noTeam;
+  const neverConnected = !r.ceo_seen && t - r.created > 2 * CEO_PRESENT_MS;   // the session never came up at all
+  const frozen = present && quiet && reason;                 // connected, silent, with work waiting -> hung turn
+  const gone = (!!r.ceo_seen && !present && reason) || neverConnected;   // terminal closed, or never started
+  if (!frozen && !gone) {
+    if (r.ceo_stall_level) {
+      run("UPDATE runs SET ceo_stall_level = 0, ceo_stall_at = NULL WHERE id = ?", r.id);
+      closeHumanItem(r.id, "ceo-stuck", "resolved", "hq", "The CEO is responding again.");
+    }
+    return;
+  }
+  // Each rung waits another FREEZE_MS before the next.
+  if (r.ceo_stall_level && t - (r.ceo_stall_at || 0) < FREEZE_MS) return;
+  if (frozen && r.ceo_stall_level === 0) {
+    // The programmatic /reload: a plain message cannot wake a hung turn, but an interrupt aborts it and re-reads.
+    addMessage(r.id, "hq", "ceo", "interrupt", `HQ is waking your session: you have gone quiet for ${dur(t - lastAct)} while work is waiting on you. Stop whatever is stuck (abandon a wedged tool or command), then catch up now — read your latest HQ messages and the board, answer anything waiting, and keep the run moving.`);
+    run("UPDATE runs SET ceo_stall_level = 1, ceo_stall_at = ? WHERE id = ?", t, r.id);
+  } else {
+    // The auto-wake did not take, or the terminal is gone/never started: only the human can /reload a dead process.
+    openHumanItem(r.id, { kind: "alert", key: "ceo-stuck", askedBy: "hq", title: "The CEO session looks stuck",
+      body: neverConnected ? `No CEO session has checked in for this run since it was created ${dur(t - r.created)} ago. Start it (open the run and run /redplan, or /reload the CEO's terminal) so it can plan and run the team.`
+        : gone ? `The CEO's terminal has not checked in for ${dur(t - r.ceo_seen)} while work is waiting on it. Reopen it, or type /reload in the CEO's terminal, so it picks the run back up.`
+        : `HQ tried to wake the CEO but it has still done nothing for ${dur(t - lastAct)} while work is waiting. Its turn is likely wedged — type /reload in the CEO's terminal (or abort and restart it) to get it going again.` });
+    run("UPDATE runs SET ceo_stall_level = 2, ceo_stall_at = ? WHERE id = ?", t, r.id);
+  }
+}
+
 function sweepWatch() {
   for (const r of all("SELECT * FROM runs WHERE status = 'executing'")) {
     try { watchRun(r); } catch (e) { console.error(`watch failed for ${r.id}: ${e.message}`); }
@@ -799,8 +904,13 @@ function sweepWatch() {
       run("UPDATE runs SET checkin_at = ? WHERE id = ?", now(), r.id);
     } catch (e) { console.error(`check-in failed for ${r.id}: ${e.message}`); }
   }
+  // Watch the CEO itself whenever the ball is in its court: planning, right after approval (forming the team),
+  // and executing. Not awaiting_approval — that one waits on the human, not the CEO.
+  for (const r of all("SELECT * FROM runs WHERE status IN ('planning', 'approved', 'executing')")) {
+    try { watchCeo(r); } catch (e) { console.error(`CEO watch failed for ${r.id}: ${e.message}`); }
+  }
 }
-setInterval(sweepWatch, Math.max(200, WATCH_MS)).unref();
+safeInterval("watch", sweepWatch, Math.max(200, WATCH_MS));
 
 // Every worker's own tasks are done: tell it once to report and stop (it is woken again only if asked something).
 function maybeReleaseWorker(runId, workerId) {
@@ -850,6 +960,7 @@ function setAlive(w, alive) {
 // A slow tmux (a heavily loaded machine) is not a missing session: only a clear "no such session",
 // twice in a row, marks a worker gone.
 const aliveMisses = new Map();
+const workerBeatNotify = new Map();   // per-run throttle for activity-only heartbeat SSEs
 function refreshAlive() {
   const workers = all("SELECT id, run_id, tmux, alive FROM workers WHERE tmux IS NOT NULL AND status != 'finished'");
   for (const w of workers) {
@@ -862,7 +973,7 @@ function refreshAlive() {
     });
   }
 }
-setInterval(refreshAlive, 10000).unref();
+safeInterval("alive", refreshAlive, 10000);
 
 // Workers asked to stop that are still open after the grace period: close their tmux session.
 function sweepStops() {
@@ -872,7 +983,7 @@ function sweepStops() {
     setAlive(w, 0);
   }
 }
-setInterval(sweepStops, Math.min(15000, Math.max(500, STOP_GRACE_MS / 4))).unref();
+safeInterval("stops", sweepStops, Math.min(15000, Math.max(500, STOP_GRACE_MS / 4)));
 
 // A CEO researching for a long time without a plan: one nudge to submit what it has.
 function sweepPlanning() {
@@ -883,7 +994,7 @@ function sweepPlanning() {
     run("UPDATE runs SET plan_nudged = ? WHERE id = ?", now(), r.id);
   }
 }
-setInterval(sweepPlanning, Math.min(60000, Math.max(500, PLAN_NUDGE_MS / 4))).unref();
+safeInterval("planning", sweepPlanning, Math.min(60000, Math.max(500, PLAN_NUDGE_MS / 4)));
 
 // Wake ladder for parked workers: nudge the worker, then tell the CEO, then flag the human.
 function sweepParked() {
@@ -897,17 +1008,29 @@ function sweepParked() {
     const level = w.parked_level + 1;
     if (level === 1) addMessage(w.run_id, "human", w.id, "system", `You still own in-progress work (${tasks}) but have been idle for ~${mins} min. Continue it, mark it blocked with the reason, or hand it off.`);
     else if (level === 2) addMessage(w.run_id, "human", leadOf(w.run_id, w.id), "system", `${w.name} is parked: idle ~${mins} min while owning ${tasks}, and did not respond to a nudge. Check on them, reassign, or resume them.`);
-    else if (level === 3) {
-      run("UPDATE workers SET needs_human = ? WHERE id = ?", `Idle ~${mins} min on ${tasks}; nudges to the worker and the CEO did not help.`, w.id);
-      addMessage(w.run_id, w.id, "human", "system", `${w.name} needs you: idle ~${mins} min on ${tasks} after nudging the worker and the CEO.`);
-      openHumanItem(w.run_id, { kind: "alert", key: `parked:${w.id}`, askedBy: w.id, title: `${w.name} is stuck on ${tasks}`, body: `${w.name} has been idle ~${mins} min while owning ${tasks}. HQ nudged them, then the CEO; neither helped. Comment here to tell ${w.name} what to do, or open their terminal.` });
-    } else continue;
+    else if (level === 3) addMessage(w.run_id, "human", "ceo", "system", `${w.name} is STILL parked: idle ~${mins} min on ${tasks} after nudges to them${leadOf(w.run_id, w.id) === "ceo" ? " and to you" : " and their manager"}. Fix it now yourself: ask them what is wrong (redplan_ask), hand ${tasks} to someone else (redplan_update_task handoffTo), or resume or replace them. Do not pass this to the human.`);
+    else continue;
     // Stamp without touching updated: the ladder keeps counting from the last real activity.
     run("UPDATE workers SET parked_level = ?, parked_at = ? WHERE id = ?", level, now(), w.id);
     notify(w.run_id, "worker");
   }
 }
-setInterval(sweepParked, Math.min(15000, Math.max(500, PARK_MS / 4))).unref();
+safeInterval("parked", sweepParked, Math.min(15000, Math.max(500, PARK_MS / 4)));
+
+// Nothing waiting on the human should silently freeze a run: re-surface an item that has sat unanswered, and
+// tell the CEO to keep moving on whatever does not depend on it (so one unanswered question never stalls it all).
+function sweepHumanInbox() {
+  const t = now();
+  for (const it of all(`SELECT hi.*, r.status AS run_status FROM human_items hi JOIN runs r ON r.id = hi.run_id
+      WHERE hi.status = 'open' AND r.status IN ('planning', 'awaiting_approval', 'approved', 'executing')
+        AND hi.created < ? AND (hi.reminded IS NULL OR hi.reminded < ?)`, t - HUMAN_REMIND_MS, t - HUMAN_REMIND_MS)) {
+    run("UPDATE human_items SET reminded = ? WHERE id = ?", t, it.id);
+    notify(it.run_id, "inbox");
+    if (it.run_status === "executing" && it.kind !== "alert")
+      addMessage(it.run_id, "hq", "ceo", "system", `The human still has not answered inbox #${it.id} (${it.title}) after ${dur(t - it.created)}. Keep the run moving on everything that does not depend on their answer; only the part that truly needs it should wait. Re-ask only if it is genuinely blocking and you have a clear recommendation.`);
+  }
+}
+safeInterval("human-inbox", sweepHumanInbox, Math.min(60000, Math.max(1000, HUMAN_REMIND_MS / 4)));
 
 // ---------- HTTP ----------
 function send(res, status, body, headers = {}) {
@@ -959,7 +1082,7 @@ function serveFile(res, file) {
 const routes = [];
 const route = (method, pattern, handler) => routes.push({ method, re: new RegExp(`^${pattern.replace(/:(\w+)/g, "(?<$1>[^/]+)")}$`), handler });
 
-route("GET", "/api/health", () => ({ ok: true, version: VERSION, pid: process.pid, port: PORT }));
+route("GET", "/api/health", () => ({ ok: true, version: VERSION, pid: process.pid, port: PORT, sweeps: sweepRanAt }));
 route("POST", "/api/shutdown", (_b, _p, res) => { send(res, 200, { ok: true }); setTimeout(() => process.exit(0), 50); return undefined; });
 
 route("GET", "/api/runs", () => all(`SELECT r.*, p.path AS project_path, p.name AS project_name,
@@ -1249,7 +1372,12 @@ route("POST", "/api/workers/:id/heartbeat", (b, p) => {
   run("DELETE FROM events WHERE worker_id = ? AND id < (SELECT COALESCE(MAX(id), 0) - 500 FROM events WHERE worker_id = ?)", p.id, p.id);
   recordUsage(w.run_id, p.id, b.usage);
   if (ending) setAlive(w, 0);
-  notify(w.run_id, "worker");
+  // A heartbeat fires every ~0.7-2s. Only push an SSE (which makes every open dashboard refetch the run) when
+  // something a viewer would notice changed; pure "still typing" activity/context churn is coalesced to ~3s.
+  const meaningful = ending || (!w.alive) || b.status !== w.status || (b.currentTask != null && b.currentTask !== w.current_task)
+    || b.needsInput !== undefined || b.activity || (b.events && b.events.length) || (b.usage && b.usage.length);
+  const key = w.run_id, last = workerBeatNotify.get(key) || 0;
+  if (meaningful || now() - last >= 3000) { workerBeatNotify.set(key, now()); notify(w.run_id, "worker"); }
   return w.stop_requested ? { ok: true, stop: w.stop_requested } : { ok: true };
 });
 
@@ -1309,7 +1437,11 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
   }
 
   if (b.status === "blocked" && !note) throw httpError(400, "blocked needs a note with the reason and what would unblock it");
-  const blockedOn = b.status === "blocked" ? whoMustAct(p.id, t, b.waitingOn, note) : null;
+  let blockedOn = b.status === "blocked" ? whoMustAct(p.id, t, b.waitingOn, note) : null;
+  // Only the CEO puts a blocker in the human's inbox. A worker who says it needs the human goes to its lead,
+  // who decides it themselves when they can, and asks the human (redplan_ask_human) only when they must.
+  const forHuman = blockedOn === "human" && actor !== "ceo" && actor !== "human";
+  if (forHuman) blockedOn = leadOf(p.id, t.worker_id || actor);
   if (b.status === "done" && !note) throw httpError(400, "done needs a note saying how the work was verified (tests, build, review)");
   // Reopening a closed task: only whoever closed it, the CEO, or the human, with a reason, and only once
   // (after that the human decides). This stops tasks bouncing between done and review.
@@ -1341,7 +1473,7 @@ route("POST", "/api/runs/:id/tasks/:task", (b, p) => {
     addMessage(p.id, actor, t.worker_id, "brief", `Changes requested on ${p.task} (${t.title}) by ${participantName(p.id, actor)}:\n${note}\n\nFix these before starting anything else, verify again, then move it back to review; ${participantName(p.id, actor)} re-checks it.`, true);
   }
   if (b.status) run("UPDATE tasks SET blocked_on = ? WHERE run_id = ? AND id = ?", blockedOn, p.id, p.task);
-  if (b.status === "blocked" && (b.status !== t.status || blockedOn !== t.blocked_on)) routeBlocker(p.id, t, actor, blockedOn, note);
+  if (b.status === "blocked" && (b.status !== t.status || blockedOn !== t.blocked_on)) routeBlocker(p.id, t, actor, blockedOn, note, forHuman);
   // A blocker on the human is a ticket in their inbox; it closes itself when the task moves on.
   if (b.status === "blocked" && blockedOn === "human") openHumanItem(p.id, { kind: "blocker", key: `blocker:${p.task}`, askedBy: t.worker_id || actor, taskId: p.task, title: `${p.task} ${t.title}`, body: note });
   else if (b.status) closeHumanItem(p.id, `blocker:${p.task}`, "resolved", actor, b.status === "blocked" ? `Now waiting on ${participantName(p.id, blockedOn)}` : `Moved to ${b.status.replace("_", " ")}${note ? `: ${note}` : ""}`);
@@ -1480,14 +1612,15 @@ route("GET", "/api/runs/:id/inbox", (_b, p, _res, url) => {
 });
 
 // ---------- the human's inbox ----------
-function itemView(it, withComments = false) {
-  const r = one("SELECT r.title, r.project_id, p.name AS project FROM runs r JOIN projects p ON p.id = r.project_id WHERE r.id = ?", it.run_id) || {};
+function itemView(it, withComments = false, ctx = null) {
+  const name = ctx?.nameOf || ((id) => participantName(it.run_id, id));
+  const r = ctx ? { title: ctx.runTitle, project_id: ctx.projectId, project: ctx.project } : (one("SELECT r.title, r.project_id, p.name AS project FROM runs r JOIN projects p ON p.id = r.project_id WHERE r.id = ?", it.run_id) || {});
   const task = it.task_id ? one("SELECT id, title, status, worker_id FROM tasks WHERE run_id = ? AND id = ?", it.run_id, it.task_id) : null;
   const n = one("SELECT COUNT(*) AS n, MAX(created) AS last FROM human_comments WHERE item_id = ?", it.id);
   const target = itemTarget(it);
-  const view = { ...it, askedByName: participantName(it.run_id, it.asked_by), target, targetName: participantName(it.run_id, target), runTitle: r.title, projectId: r.project_id, project: r.project,
-    task, comments: n.n, lastComment: n.last, closedByName: it.closed_by ? participantName(it.run_id, it.closed_by) : null };
-  if (withComments) view.thread = all("SELECT * FROM human_comments WHERE item_id = ? ORDER BY id", it.id).map((c) => ({ ...c, authorName: participantName(it.run_id, c.author) }));
+  const view = { ...it, askedByName: name(it.asked_by), target, targetName: name(target), runTitle: r.title, projectId: r.project_id, project: r.project,
+    task, comments: n.n, lastComment: n.last, closedByName: it.closed_by ? name(it.closed_by) : null };
+  if (withComments) view.thread = all("SELECT * FROM human_comments WHERE item_id = ? ORDER BY id", it.id).map((c) => ({ ...c, authorName: name(c.author) }));
   return view;
 }
 const INBOX_FILTER = { open: "status = 'open'", waiting: "status = 'waiting'", active: "status IN ('open', 'waiting')", closed: "status IN ('approved', 'declined', 'resolved')", all: "1 = 1" };

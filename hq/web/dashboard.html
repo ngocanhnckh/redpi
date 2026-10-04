@@ -329,6 +329,10 @@
   .tab-count { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; margin-left: 3px; border-radius: 999px; background: var(--red); color: #fff; font-size: 10.5px; font-weight: 700; line-height: 1; }
   /* Chat: Slack-like channels and direct messages. */
   #view-body > .chat-host { height: 100%; container-type: inline-size; }
+  .stats-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 2px 10px; }
+  .stats-bar .stats-total { font-size: 13px; color: var(--muted); }
+  .stats-bar .stats-total strong { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .stats-bar .stats-note { margin-left: auto; }
   .tab-count.quiet { background: var(--cyan); color: #04130a; }
   .cx { display: grid; grid-template-columns: 230px minmax(0, 1fr); height: 100%; min-height: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); }
   .cx-side { background: color-mix(in srgb, var(--panel-2) 70%, var(--bg)); border-right: 1px solid var(--border); overflow-y: auto; padding: 8px 6px 12px; display: flex; flex-direction: column; gap: 1px; }

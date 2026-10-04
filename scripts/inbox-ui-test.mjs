@@ -47,7 +47,7 @@ await api("PATCH", `/api/runs/${runId}`, { status: "executing" });
 const ana = await api("POST", `/api/runs/${runId}/workers`, { name: "Ana", role: "backend developer", cwd: "/tmp/shop", taskIds: ["T1"] });
 await api("POST", `/api/workers/${ana.id}/heartbeat`, { status: "working" });
 await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "in_progress", actor: ana.id, workerId: ana.id });
-await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "blocked", note: "I need the **Stripe live key** to finish checkout. Test keys work; live checkout needs yours.", waitingOn: "human", actor: ana.id });
+await api("POST", `/api/runs/${runId}/tasks/T1`, { status: "blocked", note: "I need the **Stripe live key** to finish checkout. Test keys work; live checkout needs yours.", waitingOn: "human", actor: "ceo" });
 // Run 2 (another project): a plan waiting for approval.
 const run2 = (await api("POST", "/api/runs", { projectPath: "/home/yitec/blog", title: "Blog" })).run.id;
 const pv2 = await api("POST", `/api/runs/${run2}/plans`, { plan: plan("Blog") });
@@ -68,14 +68,13 @@ async function open(path, options = {}) {
   return page;
 }
 
-// 1. The run page: the blocker is under Needs you and on the Inbox tab; clicking it opens the ticket.
+// 1. The run page: no alert strip; the Inbox tab counts the blocker, and opening it shows the ticket.
 let page = await open(`/runs/${runId}`);
-await page.waitForSelector(".needs-item[data-ticket]");
-const needText = await page.textContent(".needs-item[data-ticket]");
-if (!/^Blocked: T1 Payments \(Ana\)/.test(needText)) await fail("the blocker should be under Needs you", needText);
-if ((await page.textContent('[data-view="inbox"]')).trim() !== "Inbox 1") await fail("the Inbox tab should count what waits on you", await page.textContent('[data-view="inbox"]'));
+await page.waitForFunction(() => document.querySelector('[data-view="inbox"]')?.textContent.trim() === "Inbox 1");
+if (await page.$(".needs, .needs-item")) await fail("there should be no Needs-you strip on the run page");
+if (await page.$(".run-head .pill.red")) await fail("a connected CEO should show no warning");
 await page.waitForFunction(() => document.getElementById("inbox-count")?.textContent === "2");   // header: every project
-await page.click(".needs-item[data-ticket]");
+await page.click('[data-view="inbox"]');
 await page.waitForSelector(".ib-detail.has .ib-dt");
 if ((await page.textContent(".ib-dt")) !== "T1 Payments") await fail("the ticket should open", await page.textContent(".ib-dt"));
 if (!(await page.innerHTML(".ib-body")).includes("<strong>Stripe live key</strong>")) await fail("the ticket body should render markdown");
@@ -103,7 +102,7 @@ await page.waitForFunction(() => /Waiting on CEO/.test(document.querySelector(".
 await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "reply", body: "Understood: card only. Noted in the ADR." });
 await page.waitForFunction(() => document.querySelectorAll(".ib-thread .ib-c").length === 2 && /Resolved/.test(document.querySelector(".ib-dh")?.textContent || ""));
 await snap(page, "inbox-thread");
-if (await page.$(".needs-item[data-ticket]")) await fail("nothing should wait on you in this run now");
+if ((await page.textContent('[data-view="inbox"]')).trim() !== "Inbox") await fail("nothing should wait on you in this run now");
 
 // 3. /inbox: every project's tickets, with the plan approval from the other project; approve it there.
 page = await open("/inbox");
@@ -136,5 +135,5 @@ await page.waitForSelector(".ib-detail:not(.has)", { state: "attached" });
 const real = errors.filter((e) => !/Failed to load resource.*(401|404)/.test(e));
 if (real.length) await fail("console errors", real);
 await browser.close();
-console.log("Inbox UI test passed: Needs you opens the ticket, the Inbox tab and header badge count what waits on you, live updates keep your draft, Unblock and Reply reach the right agent and the thread updates live, /inbox shows every project and approves a plan, and the phone layout works.");
+console.log("Inbox UI test passed: no alert strip, the Inbox tab and header badge count what waits on you, live updates keep your draft, Unblock and Reply reach the right agent and the thread updates live, /inbox shows every project and approves a plan, and the phone layout works.");
 process.exit(0);

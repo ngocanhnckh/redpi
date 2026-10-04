@@ -296,7 +296,7 @@ if (!/quick answer/.test(await page.textContent(".drawer #thread"))) await fail(
 await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "reply", body: "On it: the login flow goes first, Alex starts now." });
 await page.waitForFunction(() => /login flow goes first/.test(document.querySelector(".drawer #thread")?.lastElementChild?.textContent || ""));
 if (await page.locator(".drawer #thread .bub.pending").count()) await fail("waiting note should go once the reply arrives");
-if (/CEO asked you/.test(await page.textContent("#needs-slot"))) await fail("a plain reply should not show as a question in Needs you");
+if ((await api("GET", `/api/inbox?run=${runId}&status=all`)).items.some((i) => /login flow/.test(i.title))) await fail("a plain reply should not become a question in your inbox");
 if (!(await page.locator("#feed .msg.reply", { hasText: "login flow goes first" }).count())) await fail("the reply should also show on the event board");
 if (shots) await page.screenshot({ path: join(shots, "ceo-drawer.png") });
 const sent = (await api("GET", `/api/runs/${runId}`)).messages.filter((m) => m.sender === "human" && m.recipient === "ceo" && m.kind === "command" && /prioritise the login/.test(m.body));
@@ -352,6 +352,10 @@ await api("POST", `/api/runs/${run2}/tasks/T3`, { status: "blocked", actor: kim,
 await api("POST", `/api/workers/${kim}/heartbeat`, { status: "working", events: [{ kind: "tool", text: "bash: pytest -q", ms: 1200, ok: true }, { kind: "tool", text: "bash: npm run build", ms: 900, ok: false }],
   usage: [{ input: 600, output: 150, cacheRead: 2000, cost: 0.03 }, { input: 400, output: 50, cacheRead: 1000, cost: 0.02 }] });
 await api("POST", `/api/workers/${lee}/heartbeat`, { status: "working", usage: [{ input: 500, output: 100, cacheRead: 0, cost: 0.01 }] });
+// A worker dismissed with no tasks, activity or tokens must not clutter the charts (the "poisoned by agents
+// dismissed long ago" complaint): no empty activity/workload row, no token bar or legend entry.
+const zed = (await api("POST", `/api/runs/${run2}/workers`, { name: "Zed", role: "backend developer", cwd: "/tmp/checkout" })).id;
+await api("POST", `/api/workers/${zed}/dismiss`, { actor: "ceo", reason: "no longer needed" });
 // Two screenshots (a 2x2 PNG) from a frontend check.
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGNQOJAARAwQCgAiDgUBwxGaiQAAAABJRU5ErkJggg==";
 await api("POST", `/api/runs/${run2}/screenshots`, { from: kim, taskId: "T3", caption: "Checkout page at 1280 px", data: PNG });
@@ -375,6 +379,13 @@ if (!/1 of 4 tasks done · 2 blocked/.test(charts.status.sub)) await fail("statu
 if (!/2 tool calls/.test(charts.activity.sub)) await fail("activity wrong", charts.activity.sub);
 // Token use: 4.8k tokens over 3 calls, 67% of input from cache (3000 of 4500), $0.06.
 if (!/4\.8k tokens in 3 model calls/.test(charts.tokens.sub) || !/67% of input from cache/.test(charts.tokens.sub) || !/\$0\.06/.test(charts.tokens.sub) || !/Kim/.test(await page.textContent('[data-chart="tokens"] svg'))) await fail("token use chart wrong", charts.tokens.sub);
+// The headline the user asked for: all tokens used in the window, filterable. Defaults to Today.
+const total = await page.textContent(".stats-total");
+if (!/4\.8k tokens today/.test(total) || !/3 calls/.test(total) || !/2 active/.test(total) || !/\$0\.06/.test(total)) await fail("the stats total headline is wrong", total);
+// The dismissed, empty worker (Zed) stays out of every chart; workload still counts just the two on the team.
+const chartText = await page.evaluate(() => [...document.querySelectorAll(".chart svg, .chart .chart-legend")].map((e) => e.textContent).join(" "));
+if (/Zed/.test(chartText)) await fail("a dismissed worker with no work should not appear in the charts");
+if (!/2 people · 4 tasks/.test(charts.workload.sub)) await fail("workload should count only the team on it", charts.workload.sub);
 // Screenshots tab: newest first, images load, click to enlarge, arrows move, Esc closes.
 await page.click('[data-view="shots"]');
 await page.waitForSelector("#view-body .shot img");
@@ -397,7 +408,7 @@ if (!/📷/.test(await page.textContent("#feed")) || !(await page.$('#feed [data
 await page.click('[data-view="stats"]');
 // Moves show on the event board as actions, with the failed tool call in red; no duplicate task echoes.
 const feed2 = await page.evaluate(() => ({ moves: [...document.querySelectorAll("#feed .act.move")].map((e) => e.textContent.replace(/\s+/g, " ")), bad: document.querySelectorAll("#feed .act.tool.bad").length, echoes: document.querySelectorAll("#feed .msg.task").length }));
-if (feed2.moves.length !== 6 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked, waiting on you · needs the payments API/.test(m)) || !feed2.moves.some((m) => /Kim moved T3 Receipts: to do → blocked, waiting on Lee/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
+if (feed2.moves.length !== 6 || !feed2.moves.some((m) => /Lee moved T4 Refunds: to do → blocked, waiting on CEO · needs the payments API/.test(m)) || !feed2.moves.some((m) => /Kim moved T3 Receipts: to do → blocked, waiting on Lee/.test(m)) || feed2.bad !== 1 || feed2.echoes) await fail("event board actions wrong", feed2);
 // Markdown in messages renders (bold, code, lists, links) and stays safe.
 await api("POST", `/api/runs/${run2}/messages`, { from: kim, to: "ceo", body: "**Status:** tests pass\n\n- fixed `checkout.ts`\n- see [the PR](https://example.com/pr/1)\n\n<img src=x onerror=alert(1)>" });
 await page.waitForSelector("#feed .msg .body.md strong");
@@ -410,7 +421,7 @@ const runT = (await api("POST", "/api/runs", { projectPath: "/home/yitec/shop", 
 await page.goto(`${base}/runs/${runT}`);
 await page.waitForSelector("[data-new-ticket]");
 // No CEO session has checked in for this run: HQ says so, instead of promising answers.
-if (!/type \/reload in the CEO's terminal/.test(await page.textContent("#needs-slot"))) await fail("a run whose CEO never checked in should say to /reload it");
+if (!/type \/reload in the CEO's terminal/.test(await page.getAttribute(".run-head .pill.red", "title") || "")) await fail("a run whose CEO never checked in should say to /reload it");
 await page.click('[data-view="board"]');
 await page.click("[data-new-ticket]");
 await page.waitForSelector("#ticket-form #tk-title");
@@ -447,14 +458,9 @@ await page.goto(`${base}/runs/${run2}`);
 await page.waitForSelector('[data-view="stats"]');
 await page.click('[data-view="stats"]');
 await page.waitForSelector("#view-body .chart");
-// A blocker is readable in full: the Needs you item opens its inbox ticket with the whole reason, and in
+// A worker's blockers are the team's (Lee's "human" one goes to the CEO first): none reach your inbox, and in
 // the person's chat the whole reason sits at the top, where "Reply about T4" starts your answer.
-if (await page.locator(".needs-item", { hasText: "Blocked: T3" }).count()) await fail("a blocker waiting on a teammate should not be under Needs you");
-const item = page.locator(".needs-item", { hasText: "Blocked: T4" });
-await item.click();
-await page.waitForSelector(".ib-detail.has .ib-body");
-if (!/END-OF-BLOCKER/.test(await page.textContent(".ib-detail .ib-body"))) await fail("the blocker's ticket should hold the full reason");
-await page.click('[data-view="stats"]');
+if ((await api("GET", `/api/inbox?run=${run2}&status=all`)).items.some((i) => i.kind === "blocker")) await fail("a worker's blocker should go to the CEO, not your inbox");
 await page.click(`.member[data-person="${lee}"]`);
 await page.waitForSelector('.drawer[aria-label="Lee"] .block-card');
 const card = await page.evaluate(() => { const n = document.querySelector(".drawer .block-note"), r = n.getBoundingClientRect(); return { text: n.textContent, clipped: n.scrollHeight > n.clientHeight + 1 && getComputedStyle(n).overflowY !== "auto", visible: r.height > 40 && r.top >= 0 }; });
@@ -472,6 +478,13 @@ await page.keyboard.press("Escape");
 await move("T2", "review", kim, "done"); await move("T2", "done", lee, "checked");
 await page.waitForFunction(() => /5h of 15h left · 2\/4 done/.test(document.querySelector('[data-chart="burndown"] .chart-sub')?.textContent || ""), null, { timeout: 5000 }).catch(async () => fail("charts did not update live", await page.textContent('[data-chart="burndown"] .chart-sub')));
 if (shots) await page.locator(".view-panel").screenshot({ path: join(shots, "charts.png") });
+// Stats time filter: Today clips the trend charts to this window (snapshots stay current); the choice sticks.
+await page.click('.stats-bar [data-range="today"]');
+await page.waitForFunction(() => document.querySelector('.stats-bar [data-range="today"]')?.getAttribute("aria-selected") === "true");
+if (!/Trends since midnight/.test(await page.textContent(".stats-note"))) await fail("the Today filter should note it clips the trends");
+if (!(await page.$("#view-body .chart"))) await fail("charts should still render under the Today filter");
+await page.click('.stats-bar [data-range="all"]');
+await page.waitForFunction(() => /2\/4 done/.test(document.querySelector('[data-chart="burndown"] .chart-sub')?.textContent || ""));
 // Timeline: the plan's Gantt with a progress bar per task and story, and overall progress.
 await page.click('[data-view="timeline"]');
 await page.waitForSelector("#view-body .tl-row.task");
@@ -577,14 +590,17 @@ if (errors.length) await fail("console errors", errors);
 
 // (Last, so the extra messages don't change the office scenes above.)
 const qp = await open();
-await qp.waitForSelector("#needs-slot", { state: "attached" });
-// A worker's status report to you is not a question; a question is.
-await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Human: T1 is pushed and back in review, all five findings fixed." });
-await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Should refunds be full-amount only for now?" });
-await qp.waitForFunction(() => /Question: Should refunds be full-amount only for now\? \(Alex\)/.test(document.getElementById("needs-slot").textContent));
-if (/Human: T1 is pushed/.test(await qp.textContent("#needs-slot"))) await fail("a status report should not show as a question in Needs you");
-await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: ids.Alex, body: "Yes, full amount only." });
-await qp.waitForFunction(() => !/Should refunds/.test(document.getElementById("needs-slot").textContent)).catch(() => fail("answering a question should clear it from Needs you"));
+await qp.waitForSelector('[data-view="inbox"]');
+const inboxTab = () => qp.textContent('[data-view="inbox"]').then((t) => t.trim());
+// The CEO's status report to you is not a question (no ticket); the CEO's question is; a worker's question stays in chat.
+await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", body: "Human: T1 is pushed and back in review, all five findings fixed." });
+await api("POST", `/api/runs/${runId}/messages`, { from: ids.Alex, to: "human", body: "Can I skip the flaky test?" });
+await api("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", body: "Should refunds be full-amount only for now?" });
+await qp.waitForFunction(() => document.querySelector('[data-view="inbox"] .tab-count')?.textContent === "1");
+const qs = (await api("GET", `/api/inbox?run=${runId}&status=open`)).items.map((i) => i.title);
+if (qs.join() !== "Should refunds be full-amount only for now?") await fail("only the CEO's question should be a ticket", qs);
+await api("POST", `/api/runs/${runId}/messages`, { from: "human", to: "ceo", body: "Yes, full amount only." });
+await qp.waitForFunction(() => !document.querySelector('[data-view="inbox"] .tab-count')).catch(() => fail("answering a question should take it off the Inbox count", inboxTab()));
 await browser.close();
 console.log("RedPi office UI test passed: files room for research, back to the desk for code, meeting room for talks with replies, YOU terminal, restless trips, coffee chats, reduced motion, board cards stay in their columns, chat and drawer keep your reading place, event board beside the office with All/Updates/Chat/Tools, agents' own updates (workers and CEO) on the board, cards and panels, no page jumps, the CEO opens from the team and the floor with a pinned chat box, a waiting note, replies in the same thread, typing untouched by live updates, live project charts in a Stats tab, a Timeline Gantt with progress, compact board cards, auto-play through the views, btw to the CEO, token use charts, a Screenshots tab with a lightbox, markdown on the event board, tickets from the run page (urgent first, attachments, panel, timeline).");
 process.exit(0);

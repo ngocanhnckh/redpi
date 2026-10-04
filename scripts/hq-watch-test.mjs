@@ -1,6 +1,6 @@
 // HQ watch: a private hub (temp dir, random port) with shortened timings replays the patterns that have
 // cost real runs hours, and checks that each one wakes the CEO with a diagnosis within seconds, is
-// escalated to the human when it keeps happening, clears itself when it stops, and that the CEO gets a
+// pressed on the CEO again (never the human) when it keeps happening, clears itself when it stops, and that the CEO gets a
 // regular check-in with the numbers. Never touches ~/.pi/agent.
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -51,13 +51,13 @@ const send = (from, to, body, extra = {}) => api("POST", `/api/runs/${runId}/mes
 for (let i = 0; i < 7; i++) { await send(rin, noor, `About the API field names, round ${i}.`); await send(noor, rin, `I still think it should be camelCase, round ${i}.`); }
 const chatter = await until("chatter alert to the CEO", () => watchMsg(/(Rin and Noor|Noor and Rin) are talking in circles: 1[2-4] messages to each other/));
 if (!/decide the open question yourself/.test(chatter.body)) fail("the alert should say what to do", chatter.body);
-// Still happening after the escalation time: the human is told, and it shows under Needs you.
-await until("escalated to the human", async () => (await state()).messages.find((m) => m.sender === "hq" && m.recipient === "human" && /talking in circles.*The CEO was told \d+ min ago and it is still happening/.test(m.body)));
+// Still happening after the escalation time: the CEO is pressed again; the human is not paged.
+await until("pressed on the CEO again", async () => (await ceoInbox()).find((m) => /^HQ watch, STILL HAPPENING after \d+ min\. This is yours to fix now, without the human: .*talking in circles/s.test(m.body)));
 const esc = (await state()).alerts.find((a) => a.kind === "chatter");
 if (!esc?.escalated || esc.resolved) fail("the chatter alert should be open and escalated", esc);
-const ticket = (await state()).inbox.find((i) => i.kind === "alert" && i.key === `alert:${esc.id}`);
-if (!ticket || ticket.status !== "open" || !/talking in circles/.test(ticket.title)) fail("an escalated alert should be an open ticket in the human's inbox", ticket);
-if ((await ceoInbox()).filter((m) => /talking in circles/.test(m.body)).length !== 2) fail("the CEO should hear once, then once more at escalation (not every minute)");
+{ const sx = await state(); if (sx.inbox.some((i) => i.kind === "alert") || sx.messages.some((m) => m.recipient === "human")) fail("watch alerts are the CEO's: nothing should reach the human", [sx.inbox.map((i) => i.kind + ":" + i.title), sx.messages.filter((m) => m.recipient === "human").map((m) => m.sender + ":" + m.kind + ":" + m.body.slice(0, 60))]); }
+const pressed = (await ceoInbox()).filter((m) => /talking in circles/.test(m.body)).length;
+if (pressed < 2 || pressed > 3) fail("the CEO should hear once, then again at escalation, less often each time (not every minute)", pressed);
 
 // 2. Burning tokens without moving a card.
 await beat(mia, { usage: [{ input: 150000, output: 2000, at: Date.now() }] });
@@ -99,7 +99,6 @@ if (!(cardTokens.T2 >= 230000 && cardTokens.T1 >= 120000)) fail("the board shoul
 
 // It clears itself when the pattern stops: the chatter falls out of the two-hour window.
 await until("chatter alert resolved", async () => (await state()).alerts.find((a) => a.kind === "chatter")?.resolved, 3 * HOUR);
-if ((await state()).inbox.find((i) => i.key === `alert:${esc.id}`)?.resolution !== "The problem stopped") fail("the alert's ticket should close itself when the problem stops");
 // 7. Check-in: the numbers and what to look for, on the schedule.
 const checkin = await until("check-in", async () => (await ceoInbox()).reverse().find((m) => /^Check-in \(every/.test(m.body) && /Tokens per task so far/.test(m.body)), 8000);
 for (const want of [/card moves? since the last one/, /Board: todo \d+; in progress \d+/, /in review 1: T1 waiting on Ria/, /Open alerts: /, /Tokens per task so far: T2 2\d\dk, T1 1\d\dk/, /post the human a 2-3 line status/, /do nothing and do not reply/]) if (!want.test(checkin.body)) fail(`check-in should include ${want}`, checkin.body);
@@ -120,5 +119,5 @@ if (after.tasks.find((t) => t.id === "T2").worker_id !== mia.id) fail("T2 should
 if (!after.messages.some((m) => m.recipient === mia.id && m.kind === "brief" && /Noor was dismissed and you now own:\n- T2 Client \[in_progress\]/.test(m.body))) fail("Mia should get a brief for T2");
 await until("orphan alert resolved", async () => (await state()).alerts.find((a) => a.kind === "orphan")?.resolved);
 
-console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker, work left with nobody on it and unanswered questions each wake the CEO with a diagnosis within seconds, token milestones per agent per task (checked once per step, reviewers' tokens counted against the task they review), keep-happening alerts reach the human (Needs you), alerts clear when the pattern stops, a worker who leaves mid-task is lost (one who leaves with nothing is a quiet finished), dismissing with a handoff moves the work and briefs the new owner, and the CEO gets a regular check-in with the numbers.");
+console.log("RedPi HQ watch test passed: agents talking in circles, token burn without progress, repeated steps, review loops, messages to a gone worker, work left with nobody on it and unanswered questions each wake the CEO with a diagnosis within seconds, token milestones per agent per task (checked once per step, reviewers' tokens counted against the task they review), keep-happening alerts are pressed on the CEO again, less often each time, and never page the human, alerts clear when the pattern stops, a worker who leaves mid-task is lost (one who leaves with nothing is a quiet finished), dismissing with a handoff moves the work and briefs the new owner, and the CEO gets a regular check-in with the numbers.");
 process.exit(0);
