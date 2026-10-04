@@ -68,7 +68,7 @@ const fakeBin = join(dir, "fakebin");
 mkdirSync(fakeBin);
 writeFileSync(join(fakeBin, "claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n", { mode: 0o755 });
 const PATH_NO_CODEX = [fakeBin, ...(process.env.PATH || "").split(":").filter((d) => !existsSync(join(d, "codex")) && !existsSync(join(d, "opencode")))].join(":");
-proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600", REDPI_HQ_STOP_GRACE_MS: "500", REDPI_HQ_PLAN_NUDGE_MS: "400", REDPI_HQ_STAFF_NUDGE_MS: "300", REDPI_HQ_STAFF_GRACE_MS: "300" }, stdio: "ignore" });
+proc = spawn(process.execPath, [join(root, "hq", "server.mjs")], { env: { ...process.env, PATH: PATH_NO_CODEX, REDPI_HQ_DIR: dir, REDPI_HQ_PORT: String(port), REDPI_HQ_HOST: "127.0.0.1", REDPI_HQ_PARK_MS: "600", REDPI_HQ_STOP_GRACE_MS: "500", REDPI_HQ_PLAN_NUDGE_MS: "400", REDPI_HQ_STAFF_NUDGE_MS: "300", REDPI_HQ_STAFF_GRACE_MS: "300", REDPI_HQ_TICKET_WAIT_MS: "400" }, stdio: "ignore" });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
@@ -345,6 +345,19 @@ const w5 = (await api("POST", `/api/runs/${run3}/workers`, { name: "Zoe", role: 
 const zb = (await api("GET", `/api/runs/${run3}/inbox?for=${w5.id}&after=0`)).body.find((m) => m.kind === "brief");
 if (!zb || !/Build the toggle\./.test(zb.body) || !/Ticket TK-2 · NORMAL priority/.test(zb.body)) fail("spawned worker's brief lacks the ticket", zb);
 
+// Finishing a run is refused while work is open; the ticket sweep reopens a run finished with a ticket left behind.
+const run6 = (await api("POST", "/api/runs", { projectPath: "/tmp/finish-guard", title: "Finish guard" })).body.run.id;
+await api("POST", `/api/runs/${run6}/workers`, { name: "Rue", role: "developer", cwd: "/tmp/finish-guard", launchId: "R1" });
+const gtk = (await api("POST", `/api/runs/${run6}/tickets`, { title: "Fix the login bug", priority: "normal" })).body;
+const tkFinish = await api("PATCH", `/api/runs/${run6}`, { status: "done" });
+if (tkFinish.status !== 409 || !/Cannot finish/.test(tkFinish.body.error) || !tkFinish.body.error.includes(gtk.id)) fail("finishing with open work should be refused", tkFinish);
+if ((await api("PATCH", `/api/runs/${run6}`, { status: "done", force: true })).status !== 200) fail("a forced finish should be allowed");
+if ((await api("GET", `/api/runs/${run6}`)).body.run.status !== "done") fail("the forced finish did not land");
+let reopened = false;
+for (let i = 0; i < 40 && !reopened; i++) { await new Promise((r) => setTimeout(r, 150)); reopened = (await api("GET", `/api/runs/${run6}`)).body.run.status === "executing"; }
+if (!reopened) fail("the ticket sweep did not reopen a run finished with an open ticket");
+if (!(await api("GET", `/api/runs/${run6}/inbox?for=ceo&after=0`)).body.some((m) => m.kind === "ticket" && /not finished/.test(m.body))) fail("the CEO was not told the run is not finished");
+
 // Home page data: projects with their live team, active ones first.
 await api("POST", "/api/runs", { projectPath: "/tmp/other-project", title: "Other project" });
 await api("PATCH", `/api/runs/${runId}`, { status: "executing" });
@@ -602,5 +615,5 @@ if (!locked) fail("repeated wrong passwords were never rate limited");
   if (!(await inboxOf(fay.id)).some((m) => /Omar, your manager, has left the team\. You now report to the CEO/.test(m.body))) fail("Fay should be told who she reports to now");
 }
 
-console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, the human's inbox (plan approvals, blockers, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves), managers (spawn their own team, own-team tasks only, get their people's blockers and release notes, dismiss only their people, hear when their area is done, hand their team back to the CEO when they leave), dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
+console.log("RedPi HQ API test passed: scheduling + critical path, validation, auth + CSRF, plan approval loop, workers, inbox, closure rules, review gate, reviews routed straight to reviewers and sent-back work kept with its author, the human's inbox (plan approvals, blockers, questions and yes/no approvals as tickets with a status and a thread; answers reach whoever must act; tickets close themselves), managers (spawn their own team, own-team tasks only, get their people's blockers and release notes, dismiss only their people, hear when their area is done, hand their team back to the CEO when they leave), dismissing workers (refused while they own work; work back on the board; reviews rerouted; quiet exit), staffing advice, history, handoff, blockers routed to whoever must act, stale launches, parked ladder, stop when done, tickets (attachments, urgent handling, assign, reopening a finished run, refusing to finish with work still open, a sweep that reopens a run finished with a ticket left behind), reopen limits, needs-reply flags, back-and-forth cap, token usage, screenshots, closing workers when the run is done, planning nudge, CEO presence, projects home, password sign-in, plan review comments, harness per task.");
 cleanup();

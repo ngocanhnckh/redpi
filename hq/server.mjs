@@ -661,6 +661,8 @@ const FREEZE_MS = Number(process.env.REDPI_HQ_FREEZE_MS || 12 * 60_000);
 const CEO_PRESENT_MS = Number(process.env.REDPI_HQ_CEO_PRESENT_MS || 120_000);
 // How long an inbox item can wait on the human before HQ re-surfaces it and nudges the CEO to keep moving.
 const HUMAN_REMIND_MS = Number(process.env.REDPI_HQ_HUMAN_REMIND_MS || 30 * 60_000);
+// How long a ticket can sit with nobody on it before HQ nudges the CEO (then, after a couple, tells the human).
+const TICKET_WAIT_MS = Number(process.env.REDPI_HQ_TICKET_WAIT_MS || 10 * 60_000);
 // A session that ended this long ago while holding work is reported (a quick resume should not alarm anyone).
 const ORPHAN_MS = Number(process.env.REDPI_HQ_ORPHAN_MS || 2 * 60_000);
 const pairLimitHits = new Map();
@@ -1032,6 +1034,41 @@ function sweepHumanInbox() {
 }
 safeInterval("human-inbox", sweepHumanInbox, Math.min(60000, Math.max(1000, HUMAN_REMIND_MS / 4)));
 
+// A ticket the human filed must never be silently ignored. If a finished run still has one open, re-open the run
+// (nothing watches a done run); if a ticket sits with nobody on it, nudge the CEO, and if it keeps sitting, tell
+// the human — the CEO may be stuck, done, or gone.
+const ticketNudge = new Map();   // "run|ticket" -> { at, level }
+function sweepTickets() {
+  const t = now();
+  // A finished/cancelled run with an unfinished ticket is not finished: re-open it so the CEO and watchdogs engage.
+  for (const r of all("SELECT id FROM runs WHERE status IN ('done', 'cancelled') AND EXISTS (SELECT 1 FROM tasks x WHERE x.run_id = runs.id AND x.kind = 'ticket' AND x.status != 'done')")) {
+    touchRun(r.id, "executing");
+    run("UPDATE workers SET stop_requested = NULL, stop_at = NULL WHERE run_id = ? AND alive = 1", r.id);
+    addMessage(r.id, "hq", "ceo", "ticket", `This run is not finished: a ticket is still open. Pick it up now — assign it (redplan_update_task assignTo with a brief), spawn a worker for it, or do it yourself — then finish again.`);
+    notify(r.id, "run");
+  }
+  // Tickets on a live run: clear the ladder for any now manned or done; nudge/escalate the rest.
+  for (const tk of all(`SELECT tk.*, (SELECT alive FROM workers w WHERE w.id = tk.worker_id) AS owner_alive,
+      (SELECT stop_requested FROM workers w WHERE w.id = tk.worker_id) AS owner_stop
+      FROM tasks tk JOIN runs r ON r.id = tk.run_id WHERE tk.kind = 'ticket' AND r.status = 'executing'`)) {
+    const key = `${tk.run_id}|${tk.id}`;
+    const manned = tk.worker_id && tk.owner_alive && !tk.owner_stop;
+    if (tk.status === "done" || tk.status === "in_progress" || tk.status === "review" || manned) {
+      if (ticketNudge.has(key)) { ticketNudge.delete(key); closeHumanItem(tk.run_id, `ticket-stuck:${tk.id}`, "resolved", "hq", "Someone is on it now."); }
+      continue;
+    }
+    if (t - tk.created < TICKET_WAIT_MS) continue;   // give the CEO a fair chance first
+    const st = ticketNudge.get(key) || { at: 0, level: 0 };
+    if (t - st.at < TICKET_WAIT_MS) continue;
+    const level = st.level + 1;
+    ticketNudge.set(key, { at: t, level });
+    if (level <= 2) addMessage(tk.run_id, "hq", "ceo", "ticket", `Ticket ${tk.id} "${tk.title}" has waited ${dur(t - tk.created)} with nobody on it. Assign it now (redplan_update_task assignTo + a brief), spawn a worker for it, or do it yourself.`);
+    else openHumanItem(tk.run_id, { kind: "alert", key: `ticket-stuck:${tk.id}`, askedBy: "hq", taskId: tk.id, title: `Your ticket ${tk.id} has not been picked up`,
+      body: `${tk.id} "${tk.title}" has sat unassigned for ${dur(t - tk.created)} and the CEO has not acted after being nudged. It may be stuck, finished, or gone — /reload the CEO, or assign the ticket yourself from the board.` });
+  }
+}
+safeInterval("tickets", sweepTickets, Math.min(30000, Math.max(1000, TICKET_WAIT_MS / 4)));
+
 // ---------- HTTP ----------
 function send(res, status, body, headers = {}) {
   const isJson = typeof body !== "string" && !Buffer.isBuffer(body);
@@ -1136,6 +1173,12 @@ route("GET", "/api/runs/:id", (_b, p) => runView(p.id) || notFound());
 route("PATCH", "/api/runs/:id", (b, p) => {
   if (!one("SELECT id FROM runs WHERE id = ?", p.id)) return notFound();
   if (b.status && !RUN_STATUSES.includes(b.status)) throw httpError(400, `status must be one of ${RUN_STATUSES.join(", ")}`);
+  // A run is not "done" while work is open. Without this the CEO could finish while a fresh ticket sat unassigned
+  // (nothing watches a done run), and that ticket was orphaned forever. The human can still cancel.
+  if (b.status === "done" && !b.force) {
+    const open = all("SELECT id FROM tasks WHERE run_id = ? AND status != 'done'", p.id);
+    if (open.length) throw httpError(409, `Cannot finish: ${open.length} task${open.length === 1 ? "" : "s"} still open (${open.slice(0, 8).map((t) => t.id).join(", ")}${open.length > 8 ? ", …" : ""}). Finish only once everything is done — assign or do the open ones (a ticket needs no plan), or hand them off, first.`);
+  }
   if (b.status) touchRun(p.id, b.status);
   if (b.status === "done" || b.status === "cancelled") stopWorkers(p.id, b.status === "done" ? "The run is complete: all work is finished." : "The run was cancelled.");
   notify(p.id, "run");

@@ -1248,8 +1248,9 @@ export default function (pi: ExtensionAPI) {
       if (!params.lessons?.length) throw new Error("Hold a short retrospective first: give at least one lesson for the next run.");
       const root = projectRoot(ctx.cwd);
       const saved = params.lessons.map((l: any) => addLesson(root, { ...l, area: l.area || "retrospective", by: "CEO" })).filter((r: any) => r.added).length;
-      await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "chat", body: params.report });
+      // Finish first: HQ refuses while any task or ticket is still open, so don't post a "done" report in that case.
       await hq("PATCH", `/api/runs/${runId}`, { status: "done" });
+      await hq("POST", `/api/runs/${runId}/messages`, { from: "ceo", to: "human", kind: "chat", body: params.report });
       return text(`Run marked done. Report posted to HQ: ${hqUrl(`/runs/${runId}`)}. ${saved} lesson${saved === 1 ? "" : "s"} added to ${LESSONS_FILE}; commit it.`);
     },
   } as any);
