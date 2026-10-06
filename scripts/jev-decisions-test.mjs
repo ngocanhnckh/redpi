@@ -86,12 +86,26 @@ answer = "Block it";
 r = await fire("tool_call", { toolName: "redpi_job", input: { action: "start", command: "npm publish PUBLISH" } }, ctx());
 assert.equal(r?.block, true, "redpi_job start is checked too");
 
-// A RedPlan worker never gets a dialog: clearly risky is blocked, a middling flag runs.
+// A RedPlan agent (worker or CEO) never gets a dialog. By default (shadow) nothing is blocked — the
+// factory must never be stuck on a flagged command — but the decision is still logged.
+for (const envKey of ["REDPI_HQ_WORKER", "REDPI_HQ_CEO"]) {
+  process.env[envKey] = "a1"; asked.length = 0;
+  assert.equal(await fire("tool_call", bash(`drop table DANGER ${envKey}`), ctx()), undefined, `${envKey}: shadow never blocks`);
+  assert.equal(asked.length, 0, `${envKey}: never a dialog`);
+  delete process.env[envKey];
+}
+// "block" brings back the old behaviour: clearly risky is blocked, a middling flag runs.
+setCfg({ safetyAutonomous: "block" });
 process.env.REDPI_HQ_WORKER = "w1"; asked.length = 0;
-r = await fire("tool_call", bash("drop table DANGER x"), ctx());
-assert.equal(r?.block, true); assert.match(r.reason, /redpi-hq/); assert.equal(asked.length, 0);
-assert.equal(await fire("tool_call", bash("print key SECRET y"), ctx()), undefined, "62% < block threshold 80%");
+r = await fire("tool_call", bash("drop table DANGER block1"), ctx());
+assert.equal(r?.block, true, "block mode blocks the clearly risky"); assert.match(r.reason, /redpi-hq/); assert.equal(asked.length, 0);
+assert.equal(await fire("tool_call", bash("print key SECRET block2"), ctx()), undefined, "62% < block threshold 80%");
+// "off" for agents: nothing runs, not even a Jev call.
+setCfg({ safetyAutonomous: "off" }); const offBefore = calls.length;
+assert.equal(await fire("tool_call", bash("drop table DANGER off1"), ctx()), undefined, "agents off: never blocks");
+assert.equal(calls.length, offBefore, "agents off: no Jev call");
 delete process.env.REDPI_HQ_WORKER;
+setCfg();
 
 // Shadow, off, Jev off, Jev down.
 setCfg({ safety: "shadow" }); asked.length = 0;
@@ -138,4 +152,4 @@ const stats = notes.at(-1);
 assert.match(stats, /safety: \d+ decisions/); assert.match(stats, /approved by human/); assert.match(stats, /prune: 1 decisions/); assert.match(stats, /dropped 6 stale tool outputs/); assert.match(stats, /\$0\.\d+/);
 
 server.close(); rmSync(dir, { recursive: true, force: true });
-console.log("Jev decisions test passed: read-only commands skip Jev, catastrophic ones are caught by rule, four safety questions in one call, the human blocks or allows (once / session), workers never get a dialog and only clearly risky commands are blocked, shadow/off/Jev-off/Jev-down behave, stale outputs pruned in one call with the newest kept and decisions persisted, log keeps hashes only, stats by layer, band and cost.");
+console.log("Jev decisions test passed: read-only commands skip Jev, catastrophic ones are caught by rule, four safety questions in one call, the human blocks or allows (once / session), RedPlan agents (worker and CEO) never get a dialog and by default (shadow) are never blocked, with block/off modes for them too, shadow/off/Jev-off/Jev-down behave, stale outputs pruned in one call with the newest kept and decisions persisted, log keeps hashes only, stats by layer, band and cost.");

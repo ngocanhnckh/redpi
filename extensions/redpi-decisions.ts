@@ -48,8 +48,12 @@ export default function (pi: ExtensionAPI) {
   // ---- Safety check ------------------------------------------------------------------------
   pi.on("tool_call", async (event: any, ctx: any) => {
     const cfg = loadJevConfig(AGENT_DIR);
+    if (!jevReady(cfg)) return undefined;
+    // A RedPlan agent (worker or CEO) runs unattended in tmux with nobody watching.
+    const autonomous = !!(process.env.REDPI_HQ_WORKER || process.env.REDPI_HQ_CEO);
     const mode = cfg.safety ?? "ask";
-    if (!jevReady(cfg) || mode === "off") return undefined;
+    const autoMode = cfg.safetyAutonomous ?? "shadow";
+    if ((autonomous ? autoMode : mode) === "off") return undefined; // check turned off for this kind of session: no Jev call
     const input = event.input || {};
     const command = event.toolName === "bash" ? input.command : event.toolName === "redpi_job" && input.action === "start" ? input.command : undefined;
     if (typeof command !== "string" || !command.trim()) return undefined;
@@ -69,9 +73,9 @@ export default function (pi: ExtensionAPI) {
     });
     if (!v.risky) { log(v.layer === "error" ? "allowed (decision model unavailable)" : v.unsure ? "allowed (unsure)" : "allowed"); return undefined; }
     const why = v.reasons.join("; ");
-    if (mode === "shadow") { log("would ask (shadow mode)"); return undefined; }
-    // A RedPlan worker's TUI runs in tmux with nobody watching: never wait on a dialog there.
-    const someoneToAsk = ctx.hasUI && !process.env.REDPI_HQ_WORKER;
+    if (!autonomous && mode === "shadow") { log("would ask (shadow mode)"); return undefined; }
+    // Never wait on a dialog in an unattended agent's pane.
+    const someoneToAsk = ctx.hasUI && !autonomous;
     if (someoneToAsk) {
       const shown = key.length > 500 ? `${key.slice(0, 500)}…` : key;
       const choice = await ctx.ui.select(`RedPi safety check: this command may ${why}.\n\n${shown}\n`, ["Block it", "Allow once", "Allow this exact command for the rest of the session"], { timeout: 10 * 60 * 1000 });
@@ -83,6 +87,9 @@ export default function (pi: ExtensionAPI) {
       log(choice ? "blocked by human" : "blocked (no answer in 10 minutes)");
       return { block: true, reason: `The human did not approve this command after the RedPi safety check flagged that it may ${why}. Do not run it again as is: ask what they want, or use a safer alternative.` };
     }
+    // Nobody can approve. By default the factory must never be stuck on a flagged command, so we log it
+    // and let it run (shadow). "block" keeps the old run-blocking behaviour. ("off" returned early above.)
+    if (autoMode === "shadow") { log("would block (autonomous, shadow) — allowed to keep the run moving"); return undefined; }
     const sure = v.layer === "code" || Object.values(v.scores).some((p) => p >= (cfg.safetyBlockThreshold ?? 0.8));
     if (!sure) { log("allowed (nobody to ask, below the block threshold)"); return undefined; }
     log("blocked (nobody to ask)");
@@ -147,7 +154,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const days = Number(String(args || "").trim()) || 7;
       const cfg = loadJevConfig(AGENT_DIR);
-      const head = `Decision model: ${jevReady(cfg) ? "ON" : "OFF"} · safety check ${jevReady(cfg) ? cfg.safety ?? "ask" : "off"} · pruning ${jevReady(cfg) && cfg.prune !== false ? "on" : "off"} · last ${days} day(s)`;
+      const head = `Decision model: ${jevReady(cfg) ? "ON" : "OFF"} · safety check ${jevReady(cfg) ? cfg.safety ?? "ask" : "off"} (agents ${jevReady(cfg) ? cfg.safetyAutonomous ?? "shadow" : "off"}) · pruning ${jevReady(cfg) && cfg.prune !== false ? "on" : "off"} · last ${days} day(s)`;
       ctx.ui.notify(`${head}\n\n${decisionStats(readDecisions(AGENT_DIR, Date.now() - days * 86_400_000))}`, "info");
     },
   });

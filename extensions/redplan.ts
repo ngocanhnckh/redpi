@@ -660,6 +660,9 @@ export default function (pi: ExtensionAPI) {
   }
   function startPolling() {
     if (poller) clearInterval(poller);
+    // Mark this session as a running RedPlan agent so the safety check treats the CEO like a worker:
+    // nobody is reliably watching the CEO's pane, so it must never be stuck on a flagged command.
+    if (!WORKER_ID && runId) process.env.REDPI_HQ_CEO = runId;
     lastPresence = 0;
     poller = setInterval(() => { ceoPresence(); keepAlive(); pollInbox(); }, 2000);
     poller.unref?.();

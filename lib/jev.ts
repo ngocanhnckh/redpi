@@ -34,9 +34,10 @@ export type JevConfig = {
   jevgrep?: boolean; // offer the redpi_jevgrep tool (default on)
   minConfidence?: number; // below this, a cheaper route falls back to the strong model
   timeoutMs?: number;
-  safety?: "ask" | "shadow" | "off"; // command safety check before bash runs (default ask)
+  safety?: "ask" | "shadow" | "off"; // command safety check for interactive human sessions (default ask)
+  safetyAutonomous?: "shadow" | "block" | "off"; // RedPlan agents (worker/CEO), nobody to ask: shadow logs and runs so the factory is never stuck (default), block keeps the run-blocking old behaviour, off skips the check
   safetyThreshold?: number; // a "yes" this likely flags the command (default 0.5)
-  safetyBlockThreshold?: number; // with nobody to ask, block at this (default 0.8)
+  safetyBlockThreshold?: number; // an autonomous agent in "block" mode blocks at this (default 0.8)
   prune?: boolean; // drop stale tool output from long contexts (default on)
   pruneAt?: number; // share of the context window that triggers pruning (default 0.3)
   pruneMinTokens?: number; // and at least this many tokens in context (default 60000)

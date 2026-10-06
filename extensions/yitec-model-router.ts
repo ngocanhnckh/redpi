@@ -1151,6 +1151,7 @@ export default function (pi: ExtensionAPI) {
         `Thinking level from Jev: ${cfg.thinking !== false ? "ON" : "OFF"} (toggle)`,
         `Jevgrep code search: ${cfg.jevgrep !== false ? "ON" : "OFF"} (toggle)`,
         `Command safety check: ${(cfg.safety ?? "ask").toUpperCase()} (ask → shadow → off)`,
+        `Safety for RedPlan agents: ${(cfg.safetyAutonomous ?? "shadow").toUpperCase()} (shadow → block → off)`,
         `Stale-output pruning: ${cfg.prune !== false ? "ON" : "OFF"} (toggle)`,
         "Decision stats",
         findJg(AGENT_DIR) ? "Update Jevgrep" : "Install Jevgrep (jg)",
@@ -1176,6 +1177,7 @@ export default function (pi: ExtensionAPI) {
       } else if (choice.startsWith("Model routing")) save({ ...cfg, routing: cfg.routing === false });
       else if (choice.startsWith("Thinking level")) save({ ...cfg, thinking: cfg.thinking === false });
       else if (choice.startsWith("Command safety check")) save({ ...cfg, safety: ({ ask: "shadow", shadow: "off", off: "ask" } as const)[cfg.safety ?? "ask"] });
+      else if (choice.startsWith("Safety for RedPlan agents")) save({ ...cfg, safetyAutonomous: ({ shadow: "block", block: "off", off: "shadow" } as const)[cfg.safetyAutonomous ?? "shadow"] });
       else if (choice.startsWith("Stale-output pruning")) save({ ...cfg, prune: cfg.prune === false });
       else if (choice === "Decision stats") pi.sendUserMessage("/redpi-jev-stats", { deliverAs: "followUp", expandPromptTemplates: true });
       else if (choice.startsWith("Jevgrep code search")) {
