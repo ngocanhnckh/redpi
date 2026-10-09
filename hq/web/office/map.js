@@ -45,11 +45,13 @@ function zoneShapes(roles) {
   roles.forEach((r, i) => { const d = department(r); if (!groups.has(d)) groups.set(d, []); groups.get(d).push(i); });
   return DEPARTMENTS.filter((d) => groups.has(d.key)).map((d) => {
     const members = groups.get(d.key), m = members.length;
-    // Landscape desk grids: biased wider than tall (more columns than rows), capped, and never
-    // more columns than there are people, so a solo dept stays a one-desk pod.
-    const cols = Math.min(10, Math.max(1, Math.min(m, Math.ceil(Math.sqrt(m * 2.5)))));
-    const rows = Math.ceil(m / cols);
-    return { key: d.key, name: d.name, members, cols, rows, w: cols * 3, h: rows * 3 };
+    // Each department is a pod of at least five desks, so even a one- or two-person team reads as a
+    // real department rather than a lone desk; it grows past five as the team does. Grids are
+    // landscape (wider than tall): a small pod is a single wide row, bigger ones a wide block.
+    const slots = Math.max(5, m);
+    const cols = slots <= 6 ? slots : Math.min(10, Math.ceil(Math.sqrt(slots * 2.5)));
+    const rows = Math.ceil(slots / cols);
+    return { key: d.key, name: d.name, members, slots, cols, rows, w: cols * 3, h: rows * 3 };
   });
 }
 
@@ -269,12 +271,14 @@ export function buildMap(arg) {
   for (const z of pk.zones) {
     setFloor(`zone:${z.key}`, z.x, z.y, z.w, z.h);
     label(z.name, z.x + z.w / 2, z.y - 0.45, "zone");
-    for (let idx = 0; idx < z.members.length; idx++) {
+    // Draw every slot (>= 5): the first members get an owned desk, the rest are empty desks ready
+    // for the team to grow into.
+    for (let idx = 0; idx < z.slots; idx++) {
       const col = idx % z.cols, row = Math.floor(idx / z.cols);
       const dx = z.x + col * 3, dy = z.y + 1 + row * 3, who = z.members[idx];
       add("desk", dx, dy, 2, 1, { owner: who });
       add("chair", dx, dy - 1, 1, 1, { walkable: true });
-      seats[who] = { ...S(dx, dy - 1, "down"), desk: { x: dx + OX, y: dy + OY } };
+      if (who !== undefined) seats[who] = { ...S(dx, dy - 1, "down"), desk: { x: dx + OX, y: dy + OY } };
     }
     depts.push({ key: z.key, name: z.name, members: z.members, ...R(z.x, z.y, z.w, z.h) });
   }
@@ -282,7 +286,7 @@ export function buildMap(arg) {
   // by the water cooler, alternating.
   for (const row of pk.rows) {
     let nx = row.end + 3, v = 0;
-    while (IW - 1 - nx >= 7 && row.h >= 4) {
+    while (IW - 1 - nx >= 7 && row.h >= 3) {
       const nw = Math.min(IW - 1 - nx, 10), ny = row.y + 1;
       if (v++ % 2 === 0) {
         setFloor("rug", nx, ny, nw, 3);

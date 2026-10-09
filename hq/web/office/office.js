@@ -609,10 +609,13 @@ export class Office {
     this.placing = !this.placedOnce;
     this.placedOnce = true;
     const { run, workers, tasks, messages } = data;
-    this.ensureMap(workers);
+    // Only the active team gets a desk. A run accumulates dozens of stopped and dismissed workers
+    // over its life; seating them all would fill the floor with empty desks for people long gone.
+    const team = workers.filter((w) => w.alive && w.status !== "stopped" && w.status !== "failed");
+    this.ensureMap(team);
     const m = this.map;
     const now = Date.now();
-    this.seatOwner = new Map(workers.map((w, i) => [i, w.id]));
+    this.seatOwner = new Map(team.map((w, i) => [i, w.id]));
     const monitors = new Map(), typing = new Set();
     const counts = {};
     for (const t of tasks) counts[t.status] = (counts[t.status] || 0) + 1;
@@ -633,7 +636,7 @@ export class Office {
     monitors.set("ceo", ceoMode === "desk" ? "on" : "off");
 
     let waitIdx = 0;
-    workers.forEach((w, i) => {
+    team.forEach((w, i) => {
       const p = this.person(w.id, w.name, w.role, m.entry);
       p.context = w.context;
       p.seatIndex = i;
@@ -695,15 +698,15 @@ export class Office {
       p.lastSay = e.id;
       if (!this.placing && now - e.created < 60_000) p.bubble.show(`“${String(e.text).split("\n")[0]}”`);
     }
-    // Anyone no longer in the team walks out.
-    for (const [id, p] of this.people) if (id !== "ceo" && !workers.some((w) => w.id === id) && p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.goTo(m.exit || m.entry, () => { p.leaving = true; }); }
+    // Anyone no longer on the active team (left, dismissed, stopped) walks out.
+    for (const [id, p] of this.people) if (id !== "ceo" && !team.some((w) => w.id === id) && p.mode !== "gone") { this.endErrand(p, false); p.mode = "gone"; p.goTo(m.exit || m.entry, () => { p.leaving = true; }); }
 
     // Messages: envelopes fly from sender to recipient, and the people talking meet.
     const newest = messages.length ? messages[messages.length - 1].id : 0;
     if (this.lastMsgId === null) this.lastMsgId = newest;           // don't replay history on first load
     const fresh = messages.filter((msg) => msg.id > this.lastMsgId).slice(-6);
     this.lastMsgId = Math.max(this.lastMsgId, newest);
-    for (const msg of fresh) this.onMessage(msg, workers);
+    for (const msg of fresh) this.onMessage(msg, team);
 
     // Finished tasks: cheer, but only for real work (≥ 60s busy), as in the original.
     for (const t of tasks) {
