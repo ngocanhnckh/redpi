@@ -45,7 +45,9 @@ function zoneShapes(roles) {
   roles.forEach((r, i) => { const d = department(r); if (!groups.has(d)) groups.set(d, []); groups.get(d).push(i); });
   return DEPARTMENTS.filter((d) => groups.has(d.key)).map((d) => {
     const members = groups.get(d.key), m = members.length;
-    const cols = Math.min(6, Math.max(1, Math.ceil(Math.sqrt(m))));
+    // Landscape desk grids: biased wider than tall (more columns than rows), capped, and never
+    // more columns than there are people, so a solo dept stays a one-desk pod.
+    const cols = Math.min(10, Math.max(1, Math.min(m, Math.ceil(Math.sqrt(m * 2.5)))));
     const rows = Math.ceil(m / cols);
     return { key: d.key, name: d.name, members, cols, rows, w: cols * 3, h: rows * 3 };
   });
@@ -111,24 +113,37 @@ export function buildMap(arg) {
   // Extra amenity rooms: one of each, unlocked one at a time as the team grows, never duplicated.
   const EXTRA_KINDS = [["huddle", "Huddle", 12], ["focus", "Focus room", 18], ["wellness", "Wellness", 26], ["studio", "Studio", 34]];
 
-  // Pick the smallest floor width the content needs — a tight building, never cavernous.
+  // Pick the floor width that gives a landscape building (wider than tall, ~3:2) — but only as wide
+  // as the department zones actually fill, so a small team stays compact (its landscape look comes
+  // from the park, not from empty columns). Widening is allowed only while the zones still fill it.
   const minIW = Math.max(topEnd, 24, ...shapes.map((z) => z.w + 4));
   let best = null;
-  for (let IW = minIW; IW <= minIW + 40; IW++) {
+  const seenRows = new Set();
+  for (let IW = minIW; IW <= minIW + 60; IW++) {
     const bb = bottomBand(n, IW);
     if (!bb) continue;
     const pk = packZones(shapes, IW);
-    const Yb = pk.bottom + 1, BH = Yb + bb.BHb + 2, BW = IW + 2;
-    const score = BW * 2 + BH;   // narrow first, then short
-    if (!best || score < best.score) best = { IW, bb, pk, Yb, BH, BW, score };
+    // Only the tightest width for each zone-row count is a real option — a wider floor with the
+    // same number of desk rows is just blank floor. So a small team (its zones already fit in one
+    // row at the minimum width) can only be compact, and its landscape look comes from the park;
+    // a big team chooses among genuinely-filled packings (fewer, wider rows) for a 3:2 building.
+    if (seenRows.has(pk.rows.length)) continue;
+    seenRows.add(pk.rows.length);
+    const Yb = pk.bottom + 1, BH = Yb + bb.BHb + 2, BW = IW + 2, ratio = BW / BH;
+    const cost = Math.abs(Math.log(ratio / 1.55))
+      + (ratio < 1.25 ? (1.25 - ratio) * 4 : 0) + (ratio > 1.95 ? (ratio - 1.95) * 3 : 0);
+    if (!best || cost < best.cost) best = { IW, bb, pk, Yb, BH, BW, cost };
   }
   const { IW, bb, pk, Yb, BH, BW } = best;
 
-  // The park around it, scaled down for a small building so a tiny office isn't lost in a huge lawn.
-  const MX = Math.min(40, Math.max(8 + Math.floor(n / 3), Math.ceil((2.1 * BH - BW) / 2)));
-  const MYt = Math.min(24, Math.max(7, Math.ceil((BW / 1.3 - BH) / 2)));
-  const MYb = Math.max(MYt, 10 + Math.floor(n / 3));
-  const W = BW + 2 * MX, H = BH + MYt + MYb, OX = MX, OY = MYt;
+  // The park frames the building in a widescreen world: modest lawn above, room for the path, road
+  // and car park below, and whatever side lawn it takes to make the whole world read landscape
+  // (~16:9) — a small office sits centred in a wide park, never in a tall, letter-boxed one.
+  const MYt = Math.max(7, Math.round(BH * 0.15));
+  const MYb = Math.max(15, Math.round(BH * 0.2));
+  const Hworld = BH + MYt + MYb;
+  const MX = Math.max(10, Math.min(80, Math.round((1.65 * Hworld - BW) / 2)));
+  const W = BW + 2 * MX, H = Hworld, OX = MX, OY = MYt;
 
   const solid = Array.from({ length: H }, () => new Array(W).fill(true));
   const floor = Array.from({ length: H }, () => new Array(W).fill("grass"));
