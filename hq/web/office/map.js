@@ -4,16 +4,19 @@
 // door to the street, a car park and a pond, so the floor always fills the screen (the camera
 // never shows past the edge of the world). Inside, three bands around cream-tiled corridors:
 //   - top: the CEO's glass office (with the live whiteboard), a glass boardroom where teammates
-//     talk, the library (files: where research happens), the server room (where builds and
-//     tests run), and, on wider floors, a huddle room, focus room, wellness room and studio;
+//     talk, the library (files: where research happens) and the server room (where builds and
+//     tests run) — all compact for a small team and wider as it grows — and, once the team is
+//     large, a huddle room, focus room, wellness room and studio, one of each as thresholds pass;
 //   - middle: one open-plan zone per department (Engineering, Design, Research & Data,
 //     Review & QA, Platform & Ops, Security, Docs & Content), picked from each worker's role,
-//     with benches of two desks, and breakout nooks in the space left over;
+//     sized to the people actually in it (a one-person team is a one-desk pod), with breakout
+//     nooks in whatever space is left over;
 //   - bottom: the lobby with the front door, the "needs you" mat and the YOU terminal, the café
-//     (people waiting on a build sit here with a coffee), and the lounge (games, ping-pong,
-//     gym and a reading corner) for anyone with nothing left to do.
-// Every shared area grows with the team. Returns the furniture list, floor and wall grids for
-// the painter, a walkability grid for pathfinding, labels, and named spots.
+//     (people waiting on a build sit here with a coffee), and the lounge (games, and a gym,
+//     ping-pong and more once the team is big) for anyone with nothing left to do.
+// The whole building is sized to the team: small and tightly filled for a few agents, growing in
+// steps as members join. Returns the furniture list, floor and wall grids for the painter, a
+// walkability grid for pathfinding, labels, and named spots.
 
 export const TILE = 16;
 
@@ -35,20 +38,20 @@ export function department(role) {
   return "eng";
 }
 
-// A department zone: benches of two desks (seat row, desk row, aisle row), up to three across.
+// A department zone, sized to its people: one desk per member in a tight grid (a desk cell is
+// 3 wide — a 2-wide desk and an aisle — and 3 tall — the chair, the desk, and a walkway).
 function zoneShapes(roles) {
   const groups = new Map();
   roles.forEach((r, i) => { const d = department(r); if (!groups.has(d)) groups.set(d, []); groups.get(d).push(i); });
   return DEPARTMENTS.filter((d) => groups.has(d.key)).map((d) => {
-    const members = groups.get(d.key);
-    const benches = Math.max(2, Math.ceil(members.length / 2));
-    const c = benches <= 2 ? benches : benches <= 4 ? 2 : 3;
-    const r = Math.ceil(benches / c);
-    return { key: d.key, name: d.name, members, c, r, w: c * 6, h: 1 + r * 3 };
+    const members = groups.get(d.key), m = members.length;
+    const cols = Math.min(6, Math.max(1, Math.ceil(Math.sqrt(m))));
+    const rows = Math.ceil(m / cols);
+    return { key: d.key, name: d.name, members, cols, rows, w: cols * 3, h: rows * 3 };
   });
 }
 
-const ZONE_Y = 13;   // below the top rooms (y 2..8), their front wall (9) and a corridor (10..12)
+const ZONE_Y = 12;   // below the top rooms (y 2..8), their front wall (9) and a corridor (10..11)
 function packZones(zones, IW) {
   const out = [], rows = [];
   let x = 3, y = ZONE_Y, rowH = 0, row = [];
@@ -61,25 +64,22 @@ function packZones(zones, IW) {
   return { zones: out, rows, bottom: y + rowH };
 }
 
-// Bottom band: lobby (x 1..13), café (from x 15, 3k+1 wide), lounge (the rest, at least 22 wide).
+// Bottom band: lobby (x 1..13), café (from x 15), lounge (the rest). Café and lounge are packed
+// tight to the team — only as many seats as the team needs — and the lounge grows just tall
+// enough that everyone with nothing to do still has a spot.
 function bottomBand(n, IW) {
   const matRows = Math.max(2, Math.ceil(n / 4));
-  const needCafe = Math.max(8, Math.ceil(n * 0.6) + 2);
-  let BHb = Math.max(9, matRows + 5);
-  for (let i = 0; i < 8; i++) {
-    const cafeRows = Math.floor((BHb - 5) / 3) + 1;
-    const k = Math.max(3, Math.ceil(needCafe / (4 * cafeRows)));
-    const CW = 3 * k + 1, cx0 = 15, lx = cx0 + CW + 1, LWd = IW - lx + 1;
-    if (LWd < 22) return null;
-    let base = 12;
-    for (let ex = 22; ex + 2 <= LWd - 1; ex += 4) base++;
-    const perRow = Math.floor((LWd - 3) / 2) + 1;
-    const recRows = Math.max(0, Math.ceil((n + 1 - base) / perRow));
-    const need = Math.max(9, matRows + 5, 7 + 2 * recRows);
-    if (need <= BHb) return { BHb, matRows, cafeRows, k, CW, cx0, lx, LWd, recRows };
-    BHb = need;
-  }
-  return null;
+  const needCafe = Math.max(4, Math.ceil(n * 0.6) + 2);
+  const tables = Math.ceil(needCafe / 4);          // a café table seats four
+  const k = Math.max(1, Math.min(3, tables));      // up to three tables across, more in extra rows
+  const cafeRows = Math.ceil(tables / k);
+  const CW = 3 * k + 1, cx0 = 15, lx = cx0 + CW + 1, LWd = IW - lx + 1;
+  const loungeMin = Math.min(22, Math.max(8, 6 + Math.ceil(n / 2)));
+  if (LWd < loungeMin) return null;
+  const perRow = Math.floor((LWd - 3) / 2) + 1;    // armchairs every other tile across the lounge
+  const recRows = Math.max(1, Math.ceil((n + 1 - 3) / perRow));   // the couch seats 3; rows seat the rest
+  const BHb = Math.max(8, matRows + 5, 6 + 2 * recRows, 3 * cafeRows + 2);
+  return { BHb, matRows, cafeRows, k, CW, cx0, lx, LWd, recRows };
 }
 
 // Small deterministic random numbers, so the park looks the same on every load.
@@ -95,24 +95,39 @@ export function buildMap(arg) {
   const n = roles.length;
   const shapes = zoneShapes(roles);
 
-  // Pick the floor width whose building is closest to a wide screen's shape.
-  const minIW = Math.max(47, ...shapes.map((z) => z.w + 4));
+  // Top-band rooms, sized to the team. The CEO office and the three work rooms (boardroom,
+  // library, servers) are always there — compact for a small team, wider as it grows.
+  const wCeo = n >= 8 ? 10 : 8;
+  const boardCols = Math.min(6, Math.max(4, Math.ceil(n / 2)));   // facing-seat columns (2 seats each) → >= 8 seats
+  const wBoard = boardCols + 6;
+  const libShelves = Math.min(4, Math.max(1, Math.ceil(n / 4)));  // shelves of three files
+  const libCols = Math.ceil(libShelves / 2);
+  const wLib = libCols * 4 + 1;
+  const srvRacks = Math.min(8, Math.max(2, 2 * Math.ceil(n / 4)));
+  const srvCols = Math.ceil(srvRacks / 2);
+  const wSrv = srvCols + 3;
+  const ceoX = 1, boardX = ceoX + wCeo + 1, libX = boardX + wBoard + 1, srvX = libX + wLib + 1;
+  const topEnd = srvX + wSrv - 1;   // last inner column the fixed top rooms use
+  // Extra amenity rooms: one of each, unlocked one at a time as the team grows, never duplicated.
+  const EXTRA_KINDS = [["huddle", "Huddle", 12], ["focus", "Focus room", 18], ["wellness", "Wellness", 26], ["studio", "Studio", 34]];
+
+  // Pick the smallest floor width the content needs — a tight building, never cavernous.
+  const minIW = Math.max(topEnd, 24, ...shapes.map((z) => z.w + 4));
   let best = null;
-  for (let IW = minIW; IW <= minIW + 50; IW++) {
+  for (let IW = minIW; IW <= minIW + 40; IW++) {
     const bb = bottomBand(n, IW);
     if (!bb) continue;
     const pk = packZones(shapes, IW);
-    const Yb = pk.bottom + 2, BH = Yb + bb.BHb + 2, BW = IW + 2;
-    const score = Math.abs(Math.log(BW / BH / 1.6));
-    if (!best || score < best.score - 0.02) best = { IW, bb, pk, Yb, BH, BW, score };
+    const Yb = pk.bottom + 1, BH = Yb + bb.BHb + 2, BW = IW + 2;
+    const score = BW * 2 + BH;   // narrow first, then short
+    if (!best || score < best.score) best = { IW, bb, pk, Yb, BH, BW, score };
   }
   const { IW, bb, pk, Yb, BH, BW } = best;
 
-  // The park around it: wide enough on every side that a wide or tall view of the whole
-  // building still lands on scenery, with room in front for the path, car park and street.
-  const MX = Math.min(48, Math.max(14, Math.ceil((2.3 * BH - BW) / 2)));
-  const MYt = Math.min(30, Math.max(9, Math.ceil((BW / 1.3 - BH) / 2)));
-  const MYb = Math.max(MYt, 15);
+  // The park around it, scaled down for a small building so a tiny office isn't lost in a huge lawn.
+  const MX = Math.min(40, Math.max(8 + Math.floor(n / 3), Math.ceil((2.1 * BH - BW) / 2)));
+  const MYt = Math.min(24, Math.max(7, Math.ceil((BW / 1.3 - BH) / 2)));
+  const MYb = Math.max(MYt, 10 + Math.floor(n / 3));
   const W = BW + 2 * MX, H = BH + MYt + MYb, OX = MX, OY = MYt;
 
   const solid = Array.from({ length: H }, () => new Array(W).fill(true));
@@ -144,56 +159,67 @@ export function buildMap(arg) {
   // ---- Top band: rooms along the top wall, each with a door onto the corridor ----
   setWall("inner", 1, 9, IW, 1);
   // CEO office (glass front) with the live whiteboard.
-  setFloor("wood", 1, 2, 10, 7); setWall("inner", 11, 2, 1, 7);
-  setWall("glass", 1, 9, 10, 1); gap(5, 9, 2, 1);
+  setFloor("wood", ceoX, 2, wCeo, 7); setWall("inner", ceoX + wCeo, 2, 1, 7);
+  setWall("glass", ceoX, 9, wCeo, 1); gap(ceoX + Math.floor(wCeo / 2) - 1, 9, 2, 1);
   add("whiteboard", 2, 0, 5, 2, { walkable: true });
-  windows.push(R(8, 0, 2, 2));
+  windows.push(R(wCeo - 1, 0, 2, 2));
   add("desk", 3, 5, 3, 1, { owner: "ceo" });
   add("chair", 4, 4, 1, 1, { walkable: true });
-  add("plant", 1, 2); add("plant", 10, 2, 1, 1, { tall: true });
-  add("sofa", 8, 6, 2, 1, { walkable: true }); add("plant", 10, 8);
+  add("plant", ceoX, 2); add("plant", wCeo, 2, 1, 1, { tall: true });
+  add("sofa", wCeo - 2, 6, 2, 1, { walkable: true }); add("plant", wCeo, 8);
   const ceoSeat = S(4, 4, "down");
-  const ceo = R(1, 2, 10, 7);
+  const ceo = R(ceoX, 2, wCeo, 7);
   label("CEO", 3, 8.5);
-  // Boardroom (glass front): a long table with facing seats and a screen on the wall.
-  setFloor("meet", 12, 2, 12, 7); setWall("inner", 24, 2, 1, 7);
-  setWall("glass", 12, 9, 12, 1); gap(17, 9, 2, 1);
-  add("screen", 17, 0, 2, 2, { walkable: true });
-  windows.push(R(13, 0, 2, 2), R(21, 0, 2, 2));
-  add("table", 15, 5, 6, 2);
+  // Boardroom (glass front): a table with facing seats and a screen on the wall.
+  setFloor("meet", boardX, 2, wBoard, 7); setWall("inner", boardX + wBoard, 2, 1, 7);
+  setWall("glass", boardX, 9, wBoard, 1);
+  const boardMid = boardX + Math.floor(wBoard / 2);
+  gap(boardMid - 1, 9, 2, 1);
+  add("screen", boardMid - 1, 0, 2, 2, { walkable: true });
+  windows.push(R(boardX + 1, 0, 2, 2), R(boardX + wBoard - 2, 0, 2, 2));
+  const tableX = boardX + 3;
+  add("table", tableX, 5, boardCols, 2);
   const meetingSeats = [];
-  for (const i of [2, 3, 1, 4, 0, 5]) {
-    meetingSeats.push(S(15 + i, 4, "down"), S(15 + i, 7, "up"));
-    add("chair", 15 + i, 4, 1, 1, { walkable: true }); add("chair", 15 + i, 7, 1, 1, { walkable: true, back: true });
+  const seatOrder = [...Array(boardCols).keys()].sort((a, b) => Math.abs(a - (boardCols - 1) / 2) - Math.abs(b - (boardCols - 1) / 2));
+  for (const i of seatOrder) {
+    meetingSeats.push(S(tableX + i, 4, "down"), S(tableX + i, 7, "up"));
+    add("chair", tableX + i, 4, 1, 1, { walkable: true }); add("chair", tableX + i, 7, 1, 1, { walkable: true, back: true });
   }
-  add("plant", 12, 2); add("plant", 23, 2);
-  const meeting = R(12, 2, 12, 7);
-  label("Boardroom", 14.5, 8.5);
-  // Library: tall bookcases of files; people look things up standing in front of them.
-  setFloor("library", 25, 2, 8, 7); setWall("inner", 33, 2, 1, 7);
-  gap(28, 9, 2, 1);
+  add("plant", boardX, 2); add("plant", boardX + wBoard - 1, 2);
+  const meeting = R(boardX, 2, wBoard, 7);
+  label("Boardroom", boardX + wBoard / 2, 8.5);
+  // Library: bookcases of files; people look things up standing in front of them.
+  setFloor("library", libX, 2, wLib, 7); setWall("inner", libX + wLib, 2, 1, 7);
+  gap(libX + Math.floor(wLib / 2) - 1, 9, 2, 1);
   const fileSpots = [];
-  for (const [sx, sy] of [[25, 2], [29, 2], [25, 5], [29, 5]]) {
-    add("shelf", sx, sy, 3, 1);
-    for (let i = 0; i < 3; i++) fileSpots.push(S(sx + i, sy + 1, "up"));
+  let shelvesLeft = libShelves;
+  for (let col = 0; col < libCols && shelvesLeft > 0; col++) for (const sy of [2, 5]) {
+    if (shelvesLeft-- <= 0) break;
+    const lsx = libX + 1 + col * 4;
+    add("shelf", lsx, sy, 3, 1);
+    for (let i = 0; i < 3; i++) fileSpots.push(S(lsx + i, sy + 1, "up"));
   }
-  add("plant", 32, 8);
-  const files = R(25, 2, 8, 7);
-  label("Library", 26.5, 8.5);
-  // Server room: two rows of racks.
-  setFloor("server", 34, 2, 6, 7);
-  gap(36, 9, 2, 1);
+  add("plant", libX + wLib - 1, 8);
+  const files = R(libX, 2, wLib, 7);
+  label("Library", libX + wLib / 2, 8.5);
+  // Server room: racks of machines, with room to stand in front of each.
+  setFloor("server", srvX, 2, wSrv, 7);
+  gap(srvX + Math.floor(wSrv / 2) - 1, 9, 2, 1);
   const serverSpots = [];
-  for (const ry of [2, 5]) for (const rx of [35, 36, 38, 39]) { add("rack", rx, ry, 1, 2); serverSpots.push(S(rx, ry + 2, "up")); }
-  label("Servers", 37, 8.5);
-  // Wider floors get more rooms to the right.
+  for (let r = 0; r < srvRacks; r++) {
+    const col = r % srvCols, rowi = Math.floor(r / srvCols), rx = srvX + 1 + col, ry = rowi === 0 ? 2 : 5;
+    add("rack", rx, ry, 1, 2); serverSpots.push(S(rx, ry + 2, "up"));
+  }
+  label("Servers", srvX + wSrv / 2, 8.5);
+  // Amenity rooms fill the top-band width left of the outer wall, one kind at a time as the team grows.
   const extras = [];
-  const KINDS = [["huddle", "Huddle"], ["focus", "Focus room"], ["wellness", "Wellness"], ["studio", "Studio"]];
-  let ex0 = 41, ki = 0;
-  while (IW - ex0 + 1 >= 5) {
-    const left = IW - ex0 + 1, w = left <= 13 ? left : Math.min(10, left - 6);
-    extras.push({ kind: KINDS[ki % 4][0], name: KINDS[ki % 4][1], x: ex0, w }); ki++;
-    ex0 += w + 1;
+  let ex0 = topEnd + 2;
+  for (const [kind, name, need] of EXTRA_KINDS) {
+    if (n < need) break;
+    const left = IW - ex0 + 1;
+    if (left < 5) break;
+    const w = left <= 13 ? left : Math.min(10, left - 6);
+    extras.push({ kind, name, x: ex0, w }); ex0 += w + 1;
   }
   for (const ex of extras) {
     const { x: x0, w, kind } = ex, cx = x0 + Math.floor(w / 2);
@@ -222,21 +248,18 @@ export function buildMap(arg) {
     label(ex.name, x0 + w / 2, 8.5);
   }
 
-  // ---- Middle band: a zone per department ----
+  // ---- Middle band: a zone per department, one desk per member ----
   const seats = new Array(n);
   const depts = [];
   for (const z of pk.zones) {
     setFloor(`zone:${z.key}`, z.x, z.y, z.w, z.h);
     label(z.name, z.x + z.w / 2, z.y - 0.45, "zone");
-    let m = 0;
-    for (let br = 0; br < z.r; br++) for (let bc = 0; bc < z.c; bc++) {
-      const bx = z.x + bc * 6, by = z.y + 1 + br * 3;
-      for (const dx of [1, 3]) {
-        const who = z.members[m++];
-        add("desk", bx + dx, by + 1, 2, 1, { owner: who ?? null });
-        add("chair", bx + dx, by, 1, 1, { walkable: true });
-        if (who !== undefined) seats[who] = { ...S(bx + dx, by, "down"), desk: { x: bx + dx + OX, y: by + 1 + OY } };
-      }
+    for (let idx = 0; idx < z.members.length; idx++) {
+      const col = idx % z.cols, row = Math.floor(idx / z.cols);
+      const dx = z.x + col * 3, dy = z.y + 1 + row * 3, who = z.members[idx];
+      add("desk", dx, dy, 2, 1, { owner: who });
+      add("chair", dx, dy - 1, 1, 1, { walkable: true });
+      seats[who] = { ...S(dx, dy - 1, "down"), desk: { x: dx + OX, y: dy + OY } };
     }
     depts.push({ key: z.key, name: z.name, members: z.members, ...R(z.x, z.y, z.w, z.h) });
   }
@@ -293,10 +316,10 @@ export function buildMap(arg) {
   // Café: counter and coffee machine along the wall, tables of four in rows.
   setFloor("cafe", cx0, ly, CW, BHb);
   setWall("inner", lx - 1, ly, 1, BHb); gap(lx - 1, bottomRow - 1, 1, 2);
-  gap(cx0 + CW - 3, Yb, 2, 1);
-  add("counter", cx0, ly, 4, 1); add("coffee", cx0 + 4, ly); add("fridge", cx0 + 5, ly);
+  if (CW >= 10) gap(cx0 + CW - 3, Yb, 2, 1);
+  add("counter", cx0, ly, CW - 2, 1); add("coffee", cx0 + CW - 2, ly); add("fridge", cx0 + CW - 1, ly);
   if (CW >= 10) add("plant", cx0 + CW - 1, ly + 1);
-  const coffeeSpot = S(cx0 + 4, ly + 1, "up");
+  const coffeeSpot = S(cx0 + CW - 2, ly + 1, "up");
   const cafeSeats = [];
   for (let j = 0; j < cafeRows; j++) {
     const ty = ly + 3 + j * 3;
@@ -310,43 +333,36 @@ export function buildMap(arg) {
   }
   const cafe = R(cx0, ly, CW, BHb);
   label("Café", cx0 + CW / 2, bottomRow + 0.5);
-  // Lounge: games, ping-pong, a gym and a reading corner; everyone with nothing left to do
-  // comes here, one person per spot.
+  // Lounge: a TV couch always; ping-pong, a gym and a reading nook unlock as the team grows,
+  // then dense rows of seats make sure everyone with nothing to do still has somewhere to sit.
   setFloor("lounge", lx, ly, LWd, BHb);
-  for (const dx of [4, 9, 20]) gap(lx + dx, Yb, 2, 1);
+  gap(lx + 3, Yb, 2, 1);
   const gameSpots = [], gymSpots = [], readSpots = [];
-  setFloor("rugLounge", lx, ly + 1, 4, 4);
+  setFloor("rugLounge", lx, ly + 1, Math.min(4, LWd), 4);
   add("tv", lx + 1, ly, 2, 1);
   add("couch", lx, ly + 3, 3, 1, { walkable: true });
   for (let i = 0; i < 3; i++) gameSpots.push(S(lx + i, ly + 3, "up", { sit: true, prop: "controller", game: true }));
-  add("pingpong", lx + 6, ly + 1, 3, 2);
-  gameSpots.push(S(lx + 5, ly + 1, "right", { prop: "paddle", game: true }), S(lx + 9, ly + 2, "left", { prop: "paddle", game: true }));
-  setFloor("gym", lx + 10, ly, 6, 5);
-  for (const tx of [lx + 11, lx + 13]) { add("treadmill", tx, ly, 1, 1, { walkable: true }); gymSpots.push(S(tx, ly, "down", { treadmill: true })); }
-  add("weights", lx + 15, ly);
-  for (const tx of [lx + 11, lx + 13]) { add("bench", tx, ly + 3, 1, 1, { walkable: true }); gymSpots.push(S(tx, ly + 3, "down", { sit: true, prop: "dumbbell" })); }
-  add("shelf", lx + 17, ly, 3, 1);
-  for (const [dx, dy] of [[17, 2], [19, 2], [18, 4]]) { add("armchair", lx + dx, ly + dy, 1, 1, { walkable: true }); readSpots.push(S(lx + dx, ly + dy, "down", { sit: true, prop: "book" })); }
-  for (let ex = 22; ex + 2 <= LWd - 1; ex += 4) {
-    add("beanbag", lx + ex + 1, ly + 2, 1, 1, { walkable: true }); readSpots.push(S(lx + ex + 1, ly + 2, "down", { sit: true, prop: "book" }));
-    add("plant", lx + ex + 2, ly, 1, 1, { tall: ex % 8 === 2 });
+  let gx = lx + 5;
+  if (n >= 10 && gx + 4 <= lx + LWd - 1) {
+    add("pingpong", gx, ly + 1, 3, 2);
+    gameSpots.push(S(gx - 1, ly + 1, "right", { prop: "paddle", game: true }), S(gx + 3, ly + 2, "left", { prop: "paddle", game: true }));
+    gx += 5;
   }
-  for (let b = 0; b < recRows; b++) {
-    for (let ax = 1; ax <= LWd - 2; ax += 2) {
-      const type = (ax + b) % 4 === 1 ? "beanbag" : "armchair";
-      add(type, lx + ax, ly + 6 + b * 2, 1, 1, { walkable: true }); readSpots.push(S(lx + ax, ly + 6 + b * 2, "down", { sit: true, prop: "book" }));
-    }
+  if (n >= 8 && gx + 6 <= lx + LWd - 1) {
+    setFloor("gym", gx, ly, 6, 5);
+    for (const tx of [gx + 1, gx + 3]) { add("treadmill", tx, ly, 1, 1, { walkable: true }); gymSpots.push(S(tx, ly, "down", { treadmill: true })); }
+    add("weights", gx + 5, ly);
+    for (const tx of [gx + 1, gx + 3]) { add("bench", tx, ly + 3, 1, 1, { walkable: true }); gymSpots.push(S(tx, ly + 3, "down", { sit: true, prop: "dumbbell" })); }
+    gx += 7;
   }
-  // Below the seats: a second sitting area, arcade cabinets and a pool table, where there is room.
-  const dy0 = ly + 5 + 2 * recRows + (recRows ? 1 : 0);
-  if (dy0 + 2 <= bottomRow - 1) {
-    setFloor("rugLounge", lx + 1, dy0, 7, 3);
-    add("sofa", lx + 2, dy0, 3, 1, { walkable: true });
-    for (let i = 0; i < 3; i++) readSpots.push(S(lx + 2 + i, dy0, "down", { sit: true, prop: "book" }));
-    add("sideTable", lx + 3, dy0 + 1); add("plant", lx + 7, dy0, 1, 1, { tall: true });
-    for (let ax = lx + 10; ax <= lx + 14; ax += 2) add("arcade", ax, dy0 + 1);
-    if (LWd >= 24) add("pool", lx + 17, dy0, 3, 2);
-    else add("plant", lx + 16, dy0 + 2);
+  if (gx + 1 <= lx + LWd - 1) {
+    add("shelf", gx, ly, Math.min(3, lx + LWd - gx), 1);
+    for (const [dx, dy] of [[0, 2], [2, 2], [1, 4]]) if (gx + dx <= lx + LWd - 2) { add("armchair", gx + dx, ly + dy, 1, 1, { walkable: true }); readSpots.push(S(gx + dx, ly + dy, "down", { sit: true, prop: "book" })); }
+  }
+  // Dense rows of seats below, sized so everyone (plus the CEO) has a spot.
+  for (let b = 0; b < recRows; b++) for (let ax = 1; ax <= LWd - 2; ax += 2) {
+    const type = (ax + b) % 4 === 1 ? "beanbag" : "armchair";
+    add(type, lx + ax, ly + 6 + b * 2, 1, 1, { walkable: true }); readSpots.push(S(lx + ax, ly + 6 + b * 2, "down", { sit: true, prop: "book" }));
   }
   add("plant", lx + LWd - 1, bottomRow);
   const recSpots = [...gameSpots, ...gymSpots, ...readSpots];
