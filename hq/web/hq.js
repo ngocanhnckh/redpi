@@ -36,14 +36,38 @@ export function hours(h) {
   return `${+(h / 8).toFixed(1)}d (8h days)`;
 }
 
-// Live updates: call onChange (debounced) whenever the hub reports a change for this run.
+// A small "reconnecting to HQ" pill, shown while the live stream is down.
+export function connBanner(show) {
+  const el = document.getElementById("conn-banner");
+  if (show && !el) { const b = document.createElement("div"); b.id = "conn-banner"; b.className = "conn-banner"; b.innerHTML = `<span class="dot"></span> Reconnecting to HQ…`; document.body.appendChild(b); }
+  else if (!show && el) el.remove();
+}
+
+// Live updates: call onChange (debounced) whenever the hub reports a change for this run. The stream
+// drops whenever HQ restarts or the network blips; we reconnect with a growing backoff and, on every
+// reconnect, kick one refresh so the page catches up on anything it missed while it was down. The stream
+// is HQ's heartbeat (it pings every 25 s), so if it stays down past a short grace we warn the user with a
+// reconnecting banner and one toast — having let it retry quietly first — and clear them when it is back.
 export function live(runId, onChange) {
-  let timer;
+  let timer, backoff = 1000, opened = false, graceTimer = null, down = false, warned = false;
   const kick = () => { clearTimeout(timer); timer = setTimeout(onChange, 150); };
+  const up = () => {
+    backoff = 1000; down = false;
+    if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+    if (warned) { warned = false; connBanner(false); toast("Reconnected to HQ"); }
+    if (opened) kick();
+    opened = true;
+  };
+  const dropped = () => {
+    if (down) return;
+    down = true;
+    graceTimer = setTimeout(() => { graceTimer = null; if (down) { warned = true; connBanner(true); toast("Lost connection to HQ — retrying…"); } }, 5000);
+  };
   const connect = () => {
     const es = new EventSource(`/api/events${runId ? `?run=${encodeURIComponent(runId)}` : ""}`);
+    es.onopen = up;
     es.onmessage = kick;
-    es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+    es.onerror = () => { es.close(); dropped(); setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 15000); };
   };
   connect();
 }

@@ -26,10 +26,17 @@ async function load() {
     // Most live events are about workers or chat: only redraw when this page would change.
     const key = (d) => JSON.stringify([d.status, d.comment, d.comments, d.harness, d.latestVersion, d.previous, d.runState.plans, d.runState.run.status]);
     const same = data && key(data) === key(next);
+    const first = !data;
     data = next;
     if (!same) render();
+    // Start the live stream once we know the run — even if the first load had to retry first.
+    if (first) live(data.runId, () => { load(); inboxBadge(); });
   } catch (e) {
-    app.innerHTML = `<div class="error-box">Could not load plan: ${esc(e.message)}</div>`;
+    // A blip must not wipe a plan that is already on screen: keep it and retry shortly. Only the first
+    // load (nothing rendered yet) shows the error, and it keeps retrying so it recovers on its own. The
+    // reconnecting banner and toast come from live() once the stream is down.
+    if (!data) { app.innerHTML = `<div class="error-box">Could not load plan: ${esc(e.message)}<div class="faint" style="margin-top:6px">Retrying…</div></div>`; setTimeout(load, 3000); }
+    else setTimeout(load, 3000);
   }
 }
 onComposerClose(() => { if (reloadLater && !selection) { reloadLater = false; setTimeout(load, 0); } });
@@ -550,6 +557,6 @@ const cardCommentButton = (anchor, label, text = "💬") => `<button class="btn 
 function trim(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 function safeUrl(u) { return /^https?:\/\//i.test(u) ? u : "#"; }
 
-load().then(() => data && live(data.runId, () => { load(); inboxBadge(); }));
+load();
 signedInAs();
 inboxBadge();

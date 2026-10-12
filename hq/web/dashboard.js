@@ -1112,7 +1112,22 @@ async function renderTask(root, taskId) {
 function closePanel() { openPanel = null; renderedPanel = null; document.getElementById("drawer-root").innerHTML = ""; if (autoplay) scheduleAutoplay(); }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openPanel) closePanel(); });
 
-const refresh = () => { inboxBadge(); return (runId ? loadRun() : projectId ? loadProject() : inboxPage ? loadInboxPage() : loadHome()).catch((e) => { app.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; }); };
+// A blip (HQ restart, a dropped network, a slow request) must not wipe the dashboard. Once the page has
+// rendered, a failed refresh keeps what is on screen and quietly retries; it never clears the UI. Only the
+// very first load (nothing on screen yet) shows the full error, and it keeps retrying so it recovers on its
+// own. The reconnecting banner and toast are handled by live() once the stream is the thing that is down.
+let rendered = false, retryTimer = null;
+const loadCurrent = () => (runId ? loadRun() : projectId ? loadProject() : inboxPage ? loadInboxPage() : loadHome());
+const refresh = () => {
+  inboxBadge();
+  return loadCurrent().then(() => {
+    rendered = true;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  }).catch((e) => {
+    if (!rendered) app.innerHTML = `<div class="error-box">${esc(e.message)}<div class="faint" style="margin-top:6px">Retrying…</div></div>`;
+    if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; refresh(); }, 3000);
+  });
+};
 
 // /inbox: every ticket waiting on you, across all projects.
 let pageInbox = null;
