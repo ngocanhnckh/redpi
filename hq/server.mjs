@@ -836,8 +836,13 @@ function checkinText(runId, since) {
       const spare = all("SELECT * FROM workers WHERE run_id = ? AND alive = 1 AND stop_requested IS NULL", runId).filter((w) => !heldWork(runId, w.id).length && now() - w.updated > 10 * 60_000
         && !(w.is_manager && one("SELECT 1 AS x FROM workers WHERE manager_id = ? AND alive = 1 AND stop_requested IS NULL", w.id)));
       const reviewsLeft = tasks.some((x) => x.status !== "done");
-      const lay = spare.filter((w) => !(REVIEWER_RE.test(w.role) && reviewsLeft));
-      return lay.length ? `Nothing left for: ${lay.map((w) => w.name).join(", ")}. If no more work is coming for them, dismiss them (redplan_dismiss_worker) so the team stays small.` : "";
+      const free = spare.filter((w) => !(REVIEWER_RE.test(w.role) && reviewsLeft));
+      if (!free.length) return "";
+      // Winding down = nothing left to pick up and no open ticket, so no new work is coming for the bench.
+      const windingDown = !tasks.some((x) => x.status === "todo") && !tasks.some((x) => x.kind === "ticket" && x.status !== "done");
+      return windingDown
+        ? `Nothing left for: ${free.map((w) => w.name).join(", ")}, and the run is wrapping up. Hand over any open work and dismiss them (redplan_dismiss_worker) to close the team out.`
+        : `Free now, a warm bench: ${free.map((w) => w.name).join(", ")}. Keep them — reuse them for the next ticket or the next wave (redplan_update_task assignTo + a brief), which keeps their context, instead of dismissing them now and spawning a fresh session later.`;
     })(),
     `Open alerts: ${alertsOpen.length ? alertsOpen.map((a) => a.text.split(". ")[0]).join(" | ") : "none"}.`,
     burn.length ? `Tokens since the last check-in: ${burn.map((b) => `${b.w === "ceo" ? "you" : name(b.w)} ${tokens(b.n)}`).join(", ")}.` : "",
@@ -1044,7 +1049,7 @@ function sweepTickets() {
   for (const r of all("SELECT id FROM runs WHERE status IN ('done', 'cancelled') AND EXISTS (SELECT 1 FROM tasks x WHERE x.run_id = runs.id AND x.kind = 'ticket' AND x.status != 'done')")) {
     touchRun(r.id, "executing");
     run("UPDATE workers SET stop_requested = NULL, stop_at = NULL WHERE run_id = ? AND alive = 1", r.id);
-    addMessage(r.id, "hq", "ceo", "ticket", `This run is not finished: a ticket is still open. Pick it up now — assign it (redplan_update_task assignTo with a brief), spawn a worker for it, or do it yourself — then finish again.`);
+    addMessage(r.id, "hq", "ceo", "ticket", `This run is not finished: a ticket is still open. Pick it up now — reuse a free worker who did similar work (redplan_update_task assignTo with a brief), spawn a worker only if nobody is free, or do it yourself — then finish again.`);
     notify(r.id, "run");
   }
   // Tickets on a live run: clear the ladder for any now manned or done; nudge/escalate the rest.
@@ -1062,7 +1067,7 @@ function sweepTickets() {
     if (t - st.at < TICKET_WAIT_MS) continue;
     const level = st.level + 1;
     ticketNudge.set(key, { at: t, level });
-    if (level <= 2) addMessage(tk.run_id, "hq", "ceo", "ticket", `Ticket ${tk.id} "${tk.title}" has waited ${dur(t - tk.created)} with nobody on it. Assign it now (redplan_update_task assignTo + a brief), spawn a worker for it, or do it yourself.`);
+    if (level <= 2) addMessage(tk.run_id, "hq", "ceo", "ticket", `Ticket ${tk.id} "${tk.title}" has waited ${dur(t - tk.created)} with nobody on it. Reuse a free worker who did similar work (redplan_update_task assignTo + a brief), spawn one only if nobody is free, or do it yourself.`);
     else openHumanItem(tk.run_id, { kind: "alert", key: `ticket-stuck:${tk.id}`, askedBy: "hq", taskId: tk.id, title: `Your ticket ${tk.id} has not been picked up`,
       body: `${tk.id} "${tk.title}" has sat unassigned for ${dur(t - tk.created)} and the CEO has not acted after being nudged. It may be stuck, finished, or gone — /reload the CEO, or assign the ticket yourself from the board.` });
   }
@@ -1798,8 +1803,8 @@ route("POST", "/api/runs/:id/tickets", (b, p) => {
     const idle = all("SELECT w.name, (SELECT COUNT(*) FROM tasks t WHERE t.run_id = w.run_id AND t.worker_id = w.id AND t.status != 'done') AS open FROM workers w WHERE w.run_id = ? AND w.alive = 1 AND w.stop_requested IS NULL", p.id)
       .filter((w) => !w.open).map((w) => w.name);
     addMessage(p.id, "human", "ceo", "ticket", `${ticketText(p.id, t, "New ticket")}\n\nIt is on the board (to do, unassigned) and on the timeline. A ticket needs no plan and no approval: get it done now, without asking questions unless it truly cannot be done otherwise.${priority === "urgent"
-      ? ` URGENT: act on it right away, before other work. Assign it to someone free${idle.length ? ` (free now: ${idle.join(", ")})` : ""} with redplan_update_task assignTo and a brief, or spawn a new worker for it with redplan_spawn_worker if nobody is free; if it is small, you may do it yourself.`
-      : ` Assign it to someone free${idle.length ? ` (free now: ${idle.join(", ")})` : ""} with redplan_update_task assignTo and a brief, spawn a worker for it if nobody is free and it should not wait, or do it yourself if it is small.`} Then tell the human in one line who is on it.`, true);
+      ? ` URGENT: act on it right away, before other work. Reuse a free worker${idle.length ? ` (free now, already warm on this run: ${idle.join(", ")})` : ""} with redplan_update_task assignTo and a brief; spawn a new worker only if nobody is free; if it is small, you may do it yourself.`
+      : ` Reuse a free worker${idle.length ? ` (free now, already warm on this run: ${idle.join(", ")})` : ""} — give it to them with redplan_update_task assignTo and a brief, so they keep their context; spawn a new worker only if nobody is free and it should not wait, or do it yourself if it is small.`} Then tell the human in one line who is on it.`, true);
   }
   notify(p.id, "task");
   return t;

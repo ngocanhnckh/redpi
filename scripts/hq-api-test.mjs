@@ -322,7 +322,7 @@ const atts = rv3.attachments.filter((a) => a.task_id === "TK-1");
 if (atts.length !== 3 || atts[0].mime !== "image/png" || atts[1].name !== "console log.txt" || atts[1].mime !== "text/plain") fail("attachments not stored with safe names and types", atts);
 if (!rv3.transitions.some((t) => t.task_id === "TK-1" && t.to_status === "todo" && t.actor === "human")) fail("a new ticket should be in the task history");
 const ceoTicket = (await api("GET", `/api/runs/${run3}/inbox?for=ceo&after=0`)).body.find((m) => m.kind === "ticket");
-if (!ceoTicket || !/TK-1 · URGENT/.test(ceoTicket.body) || !/act on it right away/.test(ceoTicket.body) || !/free now: Kai/.test(ceoTicket.body) || !/Click \*\*Pay\*\*/.test(ceoTicket.body) || !ceoTicket.needs_reply) fail("the CEO was not told to act on the urgent ticket", ceoTicket);
+if (!ceoTicket || !/TK-1 · URGENT/.test(ceoTicket.body) || !/act on it right away/.test(ceoTicket.body) || !/Reuse a free worker/.test(ceoTicket.body) || !/free now[^:]*: Kai/.test(ceoTicket.body) || !/Click \*\*Pay\*\*/.test(ceoTicket.body) || !ceoTicket.needs_reply) fail("the CEO was not told to reuse a free worker for the urgent ticket", ceoTicket);
 const paths = [...ceoTicket.body.matchAll(/: (\/\S+)$/gm)].map((m) => m[1]);
 if (paths.length !== 3 || !paths.every((f) => f.startsWith(join(dir, "attachments")) && existsSync(f) && (statSync(f).mode & 0o077) === 0)) fail("attachment paths for the agents missing or not private", paths);
 const attImg = await fetch(`${base}/api/attachments/${atts[0].id}`, { headers: { authorization: `Bearer ${token}` } });
