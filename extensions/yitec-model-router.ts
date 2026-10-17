@@ -636,6 +636,17 @@ function contextOverride(provider: string, id: string): number | undefined {
   const v = Number(contextOverrides()[`${provider}/${id}`]);
   return Number.isFinite(v) && v > 0 ? v : undefined;
 }
+// A global ceiling on every model's effective context window. Auto-compaction uses the
+// window, so this caps when compaction kicks in: context never grows past it, no matter
+// which model is active. The point is fall-back — if a 1M combo lets context swell toward
+// 1M and the router then fails over to a smaller-window model, that model lands in an
+// already-overloaded context and loops. The cap keeps context small enough to survive the
+// fall-back. Stored under the reserved "max" key in context-windows.json (real per-model
+// overrides are "provider/id" keys, which always contain a slash, so there is no clash).
+function contextMax(): number | undefined {
+  const v = Number((contextOverrides() as any).max);
+  return Number.isFinite(v) && v >= 1_000 ? v : undefined;
+}
 function nineRouterWindow(id: string, reported: number): { contextWindow: number; source: string } {
   const override = contextOverride("9router", id);
   if (override) return { contextWindow: override, source: "set with /redpi-context" };
@@ -1002,6 +1013,13 @@ export default function (pi: ExtensionAPI) {
     const override = contextOverride(model.provider, model.id);
     if (override) { model.contextWindow = override; contextSource.set(key, "set with /redpi-context"); }
     else if (!contextSource.has(key)) contextSource.set(key, "from the provider's model list");
+    // Clamp to the global max last, so a fall-back model never selects into an
+    // already-overloaded context. This runs on every model_select, including failover.
+    const max = contextMax();
+    if (max && model.contextWindow && model.contextWindow > max) {
+      model.contextWindow = max;
+      contextSource.set(key, `${contextSource.get(key) || "from the provider's model list"}, capped at ${max.toLocaleString()} (max auto-compact)`);
+    }
   }
   const unknownWarned = new Set<string>();
   function windowNote(ctx: any) {
@@ -1015,13 +1033,38 @@ export default function (pi: ExtensionAPI) {
   pi.on("model_select", async (event: any, ctx: any) => { applyContextWindow(event.model); windowNote(ctx); updateContextStatus(ctx); });
 
   pi.registerCommand("redpi-context", {
-    description: "Show or set the current model's context window: /redpi-context [1m | 256k | <tokens> | reset]",
+    description: "Show or set the context window: /redpi-context [1m | 256k | <tokens> | reset | max <tokens> | max off]",
     handler: async (args, ctx) => {
       const m: any = ctx.model;
       if (!m) { ctx.ui.notify("No model selected.", "warning"); return; }
       const key = `${m.provider}/${m.id}`;
       const arg = String(args || "").trim().toLowerCase();
       const overrides = contextOverrides();
+      // Global max auto-compact cap (applies to every model, including fall-backs).
+      if (arg === "max" || arg.startsWith("max ")) {
+        const rest = arg.slice(3).trim();
+        if (!rest) {
+          const cur = contextMax();
+          ctx.ui.notify(cur
+            ? `Max auto-compact context: ${cur.toLocaleString()} tokens. Every model compacts by this, even a 1M combo. Change: /redpi-context max <tokens>   Remove: /redpi-context max off`
+            : "No max auto-compact cap. Set one so a fall-back to a smaller model never lands in an overloaded context: /redpi-context max 500k", "info");
+          return;
+        }
+        if (rest === "off" || rest === "none" || rest === "reset") {
+          delete (overrides as any).max;
+          writeJson(CONTEXT_OVERRIDES_PATH, overrides);
+          applyContextWindow(m); updateContextStatus(ctx);
+          ctx.ui.notify("Max auto-compact cap removed. Models use their own windows again.", "info");
+          return;
+        }
+        const capTokens = parseTokens(rest);
+        if (!capTokens) { ctx.ui.notify(`Not a size: "${rest}". Example: /redpi-context max 500k.`, "warning"); return; }
+        (overrides as any).max = capTokens;
+        writeJson(CONTEXT_OVERRIDES_PATH, overrides);
+        applyContextWindow(m); updateContextStatus(ctx);
+        ctx.ui.notify(`Max auto-compact context set to ${capTokens.toLocaleString()} tokens. No model — not even a 1M agent combo or a fall-back — grows past it before auto-compaction. Saved in ${CONTEXT_OVERRIDES_PATH}.`, "info");
+        return;
+      }
       if (arg === "reset") {
         delete overrides[key];
         writeJson(CONTEXT_OVERRIDES_PATH, overrides);
@@ -1050,10 +1093,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const usage = ctx.getContextUsage?.();
+      const cap = contextMax();
       ctx.ui.notify([
         `${key}: ${m.contextWindow ? m.contextWindow.toLocaleString() : "?"} tokens (${contextSource.get(key) || "from the provider's model list"})`,
         usage?.tokens != null ? `In use: ${usage.tokens.toLocaleString()} tokens` : "",
+        cap ? `Max auto-compact cap: ${cap.toLocaleString()} tokens (all models)` : "",
         "Set it: /redpi-context 1m | 256k | <tokens>   Undo: /redpi-context reset",
+        "Global cap: /redpi-context max 500k | max off",
       ].filter(Boolean).join("\n"), "info");
     },
   });
