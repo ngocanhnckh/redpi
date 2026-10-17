@@ -9,6 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzip } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import { schedulePlan, validatePlan } from "./schedule.mjs";
 import { DEFAULT_HARNESS, HARNESS_IDS, HARNESSES, detectHarnesses, interactiveCommand } from "./harnesses.mjs";
@@ -1077,8 +1078,22 @@ safeInterval("tickets", sweepTickets, Math.min(30000, Math.max(1000, TICKET_WAIT
 // ---------- HTTP ----------
 function send(res, status, body, headers = {}) {
   const isJson = typeof body !== "string" && !Buffer.isBuffer(body);
-  res.writeHead(status, { "content-type": isJson ? "application/json" : "text/plain; charset=utf-8", "cache-control": "no-store", ...headers });
-  res.end(isJson ? JSON.stringify(body) : body);
+  const text = isJson ? JSON.stringify(body) : body;
+  const base = { "content-type": isJson ? "application/json" : "text/plain; charset=utf-8", "cache-control": "no-store", ...headers };
+  // The run payload is multi-MB (it carries the board, history, tokens and roster). Over a LAN/Tailscale
+  // link, re-sending it uncompressed on every live update saturates the browser's connection pool and
+  // stalls the next request (a chat send times out). gzip when the client offers it and the body is big
+  // enough to be worth it; small responses go straight through so tiny calls stay snappy.
+  if (res._gzip && Buffer.byteLength(text) > 1400) {
+    gzip(text, (err, buf) => {
+      if (err || res.writableEnded) { try { res.writeHead(status, base); res.end(text); } catch {} return; }
+      res.writeHead(status, { ...base, "content-encoding": "gzip", vary: "accept-encoding" });
+      res.end(buf);
+    });
+    return;
+  }
+  res.writeHead(status, base);
+  res.end(text);
 }
 
 function cookieToken(req) {
@@ -1862,6 +1877,7 @@ function notFound() { throw httpError(404, "not found"); }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
+  res._gzip = /\bgzip\b/.test(req.headers["accept-encoding"] || "");
   try {
     if (url.pathname === "/api/health") return send(res, 200, { ok: true, version: VERSION, pid: process.pid, port: PORT, sweeps: sweepRanAt });
     // Public: the login page and the static assets (the open-source UI code, no data).

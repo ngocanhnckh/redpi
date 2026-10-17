@@ -50,7 +50,9 @@ export function connBanner(show) {
 // reconnecting banner and one toast — having let it retry quietly first — and clear them when it is back.
 export function live(runId, onChange) {
   let timer, backoff = 1000, opened = false, graceTimer = null, down = false, warned = false;
-  const kick = () => { clearTimeout(timer); timer = setTimeout(onChange, 150); };
+  // Coalesce bursts: many workers posting at once would otherwise each trigger a full run refetch
+  // (multi-MB). One refresh per ~600ms keeps the UI lively without flooding the connection pool.
+  const kick = () => { clearTimeout(timer); timer = setTimeout(onChange, 600); };
   const up = () => {
     backoff = 1000; down = false;
     if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
